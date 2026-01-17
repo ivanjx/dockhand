@@ -978,7 +978,7 @@
 					<Tabs.Content value="env" class="space-y-4 overflow-auto">
 						{#if containerData.Config?.Env && containerData.Config.Env.length > 0}
 							<div class="space-y-1">
-								{#each containerData.Config.Env as envVar}
+								{#each [...containerData.Config.Env].sort((a, b) => a.split('=')[0].localeCompare(b.split('=')[0])) as envVar}
 									{@const [key, ...valueParts] = envVar.split('=')}
 									{@const value = valueParts.join('=')}
 									<div class="text-xs p-2 bg-muted rounded">
@@ -1214,10 +1214,10 @@
 					</Tabs.Content>
 
 					<!-- Health Tab -->
-					<Tabs.Content value="health" class="space-y-4 overflow-auto">
+					<Tabs.Content value="health" class="flex flex-col overflow-hidden">
 						{#if containerData.State?.Health}
-							<div class="space-y-3">
-								<div class="grid grid-cols-2 gap-3 text-sm">
+							<div class="flex flex-col flex-1 min-h-0 gap-3">
+								<div class="grid grid-cols-2 gap-3 text-sm shrink-0">
 									<div>
 										<p class="text-muted-foreground">Status</p>
 										<Badge variant={containerData.State.Health.Status === 'healthy' ? 'default' : 'destructive'}>
@@ -1231,9 +1231,9 @@
 								</div>
 
 								{#if containerData.State.Health.Log && containerData.State.Health.Log.length > 0}
-									<div class="space-y-2">
-										<h3 class="text-sm font-semibold">Health check log</h3>
-										<div class="space-y-1 max-h-64 overflow-y-auto">
+									<div class="flex flex-col flex-1 min-h-0">
+										<h3 class="text-sm font-semibold mb-2 shrink-0">Health check log</h3>
+										<div class="space-y-1 overflow-y-auto flex-1">
 											{#each containerData.State.Health.Log.slice(-5) as log}
 												<div class="p-2 border border-border rounded text-xs space-y-1">
 													<div class="flex justify-between items-center">

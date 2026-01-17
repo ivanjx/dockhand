@@ -316,13 +316,10 @@
 		envAbortController = new AbortController();
 		fetchHostInfo();
 		fetchDiskUsage();
-		const hostInterval = setInterval(fetchHostInfo, 30000);
-		const diskInterval = setInterval(fetchDiskUsage, 30000);
+		// No polling - only fetch on mount and environment switch
 		document.addEventListener('click', handleClickOutside);
 		return () => {
 			abortPendingRequests(); // Abort on destroy
-			clearInterval(hostInterval);
-			clearInterval(diskInterval);
 			document.removeEventListener('click', handleClickOutside);
 		};
 	});

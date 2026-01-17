@@ -5,7 +5,8 @@ import {
 	getContainerEventStats,
 	getEnvSetting,
 	hasEnvironments,
-	getEnvUpdateCheckSettings
+	getEnvUpdateCheckSettings,
+	getPendingContainerUpdates
 } from '$lib/server/db';
 import {
 	listContainers,
@@ -61,6 +62,7 @@ export interface EnvironmentStats {
 		paused: number;
 		restarting: number;
 		unhealthy: number;
+		pendingUpdates: number;
 	};
 	images: {
 		total: number;
@@ -165,7 +167,7 @@ export const GET: RequestHandler = async ({ cookies, url }) => {
 				labels: parseLabels(env.labels),
 				connectionType: (env.connectionType as 'socket' | 'direct' | 'hawser-standard' | 'hawser-edge') || 'socket',
 				online: false,
-				containers: { total: 0, running: 0, stopped: 0, paused: 0, restarting: 0, unhealthy: 0 },
+				containers: { total: 0, running: 0, stopped: 0, paused: 0, restarting: 0, unhealthy: 0, pendingUpdates: 0 },
 				images: { total: 0, totalSize: 0 },
 				volumes: { total: 0, totalSize: 0 },
 				containersSize: 0,
@@ -252,10 +254,11 @@ export const GET: RequestHandler = async ({ cookies, url }) => {
 				envStats.stacks.partial = stacks.filter((s: any) => s.status === 'partial').length;
 				envStats.stacks.stopped = stacks.filter((s: any) => s.status === 'stopped').length;
 
-				// Get latest metrics and event stats in parallel
-				const [latestMetrics, eventStats] = await Promise.all([
+				// Get latest metrics, event stats, and pending updates in parallel
+				const [latestMetrics, eventStats, pendingUpdates] = await Promise.all([
 					getLatestHostMetrics(env.id),
-					getContainerEventStats(env.id)
+					getContainerEventStats(env.id),
+					getPendingContainerUpdates(env.id)
 				]);
 
 				if (latestMetrics) {
@@ -271,6 +274,8 @@ export const GET: RequestHandler = async ({ cookies, url }) => {
 					total: eventStats.total,
 					today: eventStats.today
 				};
+
+				envStats.containers.pendingUpdates = pendingUpdates.length;
 
 			} catch (error) {
 				// Convert technical error messages to user-friendly ones

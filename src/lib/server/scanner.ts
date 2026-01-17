@@ -497,6 +497,12 @@ export async function scanWithGrype(
 			}
 		);
 
+		// Defensive logging for empty output
+		console.log(`[Grype] Scanner container output received, length: ${output.length}`);
+		if (output.length === 0) {
+			console.error('[Grype] WARNING: Empty output from scanner container - possible race condition');
+		}
+
 		onProgress?.({
 			stage: 'parsing',
 			message: 'Parsing scan results...',
@@ -588,6 +594,12 @@ export async function scanWithTrivy(
 				});
 			}
 		);
+
+		// Defensive logging for empty output
+		console.log(`[Trivy] Scanner container output received, length: ${output.length}`);
+		if (output.length === 0) {
+			console.error('[Trivy] WARNING: Empty output from scanner container - possible race condition');
+		}
 
 		onProgress?.({
 			stage: 'parsing',
@@ -731,6 +743,7 @@ async function getScannerVersion(
 
 		// Create temporary container to get version
 		const versionCmd = scannerType === 'grype' ? ['version'] : ['--version'];
+		console.log(`[Scanner] Getting ${scannerType} version with cmd:`, versionCmd);
 		const { stdout, stderr } = await runContainer({
 			image: scannerImage,
 			cmd: versionCmd,
@@ -738,6 +751,7 @@ async function getScannerVersion(
 			envId
 		});
 
+		console.log(`[Scanner] ${scannerType} version check result: stdout="${stdout.substring(0, 100)}", stderr="${stderr.substring(0, 100)}"`);
 		const output = stdout || stderr;
 
 		// Parse version from output

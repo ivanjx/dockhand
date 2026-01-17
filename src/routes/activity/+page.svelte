@@ -625,10 +625,7 @@
 			connectSSE();
 			initialLoadDone = true;
 		});
-
-		return () => {
-			disconnectSSE();
-		};
+		// Note: In Svelte 5, cleanup must be in onDestroy, not returned from onMount
 	});
 
 	onDestroy(() => {
@@ -644,7 +641,7 @@
 
 <div class="flex-1 min-h-0 flex flex-col gap-3 overflow-hidden">
 	<!-- Header with inline filters -->
-	<div class="shrink-0 flex flex-wrap justify-between items-center gap-3">
+	<div class="shrink-0 flex flex-wrap justify-between items-center gap-3 min-h-8">
 		<div class="flex items-center gap-3">
 			<PageHeader icon={Activity} title="Activity" count={visibleEnd > 0 ? `${visibleStart}-${visibleEnd}` : undefined} total={total > 0 ? total : undefined} countClass="min-w-32" />
 			<Badge variant="outline" class="gap-1.5 {($appSettings.eventCollectionMode || 'stream') === 'stream' ? 'text-green-500 border-green-500/50' : 'text-amber-500 border-amber-500/50'}">
@@ -782,6 +779,7 @@
 					variant="destructive"
 					disabled={clearingActivity}
 					onOpenChange={(open) => showClearConfirm = open}
+					unstyled
 				>
 					{#snippet children({ open })}
 						<Button variant="outline" size="sm" disabled={clearingActivity || total === 0}>

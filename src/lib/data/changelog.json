@@ -1,5 +1,23 @@
 [
   {
+    "version": "1.0.9",
+    "date": "2026-01-17",
+    "changes": [
+      { "type": "feature", "text": "Shell: detect available shells in container before connecting" },
+      { "type": "fix", "text": "Fix GHCR registry authentication with OAuth2 token flow" },
+      { "type": "fix", "text": "Add page titles for browser tab updates on navigation" },
+      { "type": "fix", "text": "Add stack name conflict warning" },
+      { "type": "feature", "text": "Add docker-buildx plugin to container image" },
+      { "type": "fix", "text": "Fix relative paths not working for adopted/imported stacks" },
+      { "type": "fix", "text": "Fix TLS certificates not passed to docker-compose for direct connections" },
+      { "type": "fix", "text": "Fix registry queries for images with docker.io prefix" },
+      { "type": "fix", "text": "Fix compose editor issues when editing near env var references" },
+      { "type": "fix", "text": "Fix branch switching causing unknown revision error in git stacks" },
+      { "type": "fix", "text": "Fix SSE connection leak" }
+    ],
+    "imageTag": "fnsys/dockhand:v1.0.9"
+  },
+  {
     "version": "1.0.8",
     "date": "2026-01-13",
     "changes": [

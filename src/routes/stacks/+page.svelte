@@ -1,3 +1,7 @@
+<svelte:head>
+	<title>Stacks - Dockhand</title>
+</svelte:head>
+
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
@@ -51,6 +55,11 @@
 
 	// Derived: current environment details for reactive port URL generation
 	const currentEnvDetails = $derived($environments.find(e => e.id === $currentEnvironment?.id) ?? null);
+
+	// Polling intervals - module scope for cleanup in onDestroy
+	let stacksInterval: ReturnType<typeof setInterval> | null = null;
+	let statsInterval: ReturnType<typeof setInterval> | null = null;
+	let unsubscribeDockerEvent: (() => void) | null = null;
 
 	// Helper: extract host from URL (e.g., tcp://192.168.1.4:2376 -> 192.168.1.4)
 	function extractHostFromUrl(urlString: string): string | null {
@@ -1037,38 +1046,51 @@
 		document.addEventListener('resume', handleVisibilityChange);
 
 		// Subscribe to container events (stacks are identified by container labels)
-		const unsubscribe = onDockerEvent((event) => {
+		unsubscribeDockerEvent = onDockerEvent((event) => {
 			if (envId && isContainerListChange(event)) {
 				fetchStacks();
 				fetchStats();
 			}
 		});
 
-		// Refresh stacks every 30 seconds
-		const stacksInterval = setInterval(() => {
+		// Refresh stacks every 30 seconds (use module-scope vars for cleanup)
+		stacksInterval = setInterval(() => {
 			if (envId) fetchStacks();
 		}, 30000);
 
 		// Refresh stats every 5 seconds (faster for resource monitoring)
-		const statsInterval = setInterval(() => {
+		statsInterval = setInterval(() => {
 			if (envId) fetchStats();
 		}, 5000);
 
-		return () => {
-			clearInterval(stacksInterval);
-			clearInterval(statsInterval);
-			unsubscribe();
-		};
+		// Note: In Svelte 5, cleanup must be in onDestroy, not returned from onMount
 	});
 
+	// Cleanup on component destroy
 	onDestroy(() => {
+		// Clear polling intervals
+		if (stacksInterval) {
+			clearInterval(stacksInterval);
+			stacksInterval = null;
+		}
+		if (statsInterval) {
+			clearInterval(statsInterval);
+			statsInterval = null;
+		}
+
+		// Unsubscribe from Docker events
+		if (unsubscribeDockerEvent) {
+			unsubscribeDockerEvent();
+			unsubscribeDockerEvent = null;
+		}
+
 		document.removeEventListener('visibilitychange', handleVisibilityChange);
 		document.removeEventListener('resume', handleVisibilityChange);
 	});
 </script>
 
 <div class="flex-1 min-h-0 flex flex-col gap-3 overflow-hidden">
-	<div class="shrink-0 flex flex-wrap justify-between items-center gap-3">
+	<div class="shrink-0 flex flex-wrap justify-between items-center gap-3 min-h-8">
 		<PageHeader icon={Layers} title="Compose stacks" count={stacks.length}>
 			{#if stacks.length > 0}
 				<button
@@ -1127,13 +1149,14 @@
 		</div>
 	</div>
 
-	<!-- Selection bar -->
-	{#if selectedStacks.size > 0}
-		<div class="flex items-center gap-2 text-xs text-muted-foreground">
+	<!-- Selection bar - always reserve space to prevent layout shift -->
+	<div class="h-4 shrink-0">
+		{#if selectedStacks.size > 0}
+			<div class="flex items-center gap-1 text-xs text-muted-foreground h-full">
 			<span>{selectedInFilter.length} selected</span>
 			<button
 				type="button"
-				class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-border shadow-sm hover:border-foreground/30 hover:shadow transition-all"
+				class="inline-flex items-center gap-1 px-1.5 py-0 rounded border border-border hover:border-foreground/30 hover:shadow transition-all"
 				onclick={selectNone}
 			>
 				Clear
@@ -1151,7 +1174,7 @@
 					onOpenChange={(open) => confirmBulkStart = open}
 				>
 					{#snippet children({ open })}
-						<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-border shadow-sm hover:text-green-600 hover:border-green-500/40 hover:shadow transition-all cursor-pointer">
+						<span class="inline-flex items-center gap-1 px-1.5 py-0 rounded border border-border hover:text-green-600 hover:border-green-500/40 hover:shadow transition-all cursor-pointer">
 							<Play class="w-3 h-3" />
 							Start
 						</span>
@@ -1171,7 +1194,7 @@
 					onOpenChange={(open) => confirmBulkRestart = open}
 				>
 					{#snippet children({ open })}
-						<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-border shadow-sm hover:text-amber-600 hover:border-amber-500/40 hover:shadow transition-all cursor-pointer">
+						<span class="inline-flex items-center gap-1 px-1.5 py-0 rounded border border-border hover:text-amber-600 hover:border-amber-500/40 hover:shadow transition-all cursor-pointer">
 							<RotateCcw class="w-3 h-3" />
 							Restart
 						</span>
@@ -1190,7 +1213,7 @@
 					onOpenChange={(open) => confirmBulkStop = open}
 				>
 					{#snippet children({ open })}
-						<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-border shadow-sm hover:text-red-600 hover:border-red-500/40 hover:shadow transition-all cursor-pointer">
+						<span class="inline-flex items-center gap-1 px-1.5 py-0 rounded border border-border hover:text-red-600 hover:border-red-500/40 hover:shadow transition-all cursor-pointer">
 							<Square class="w-3 h-3" />
 							Stop
 						</span>
@@ -1209,7 +1232,7 @@
 					onOpenChange={(open) => confirmBulkDown = open}
 				>
 					{#snippet children({ open })}
-						<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-border shadow-sm hover:text-orange-600 hover:border-orange-500/40 hover:shadow transition-all cursor-pointer">
+						<span class="inline-flex items-center gap-1 px-1.5 py-0 rounded border border-border hover:text-orange-600 hover:border-orange-500/40 hover:shadow transition-all cursor-pointer">
 							<ArrowBigDown class="w-3 h-3" />
 							Down
 						</span>
@@ -1228,15 +1251,16 @@
 				onOpenChange={(open) => confirmBulkRemove = open}
 			>
 				{#snippet children({ open })}
-					<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-border shadow-sm hover:text-destructive hover:border-destructive/40 hover:shadow transition-all cursor-pointer">
+					<span class="inline-flex items-center gap-1 px-1.5 py-0 rounded border border-border hover:text-destructive hover:border-destructive/40 hover:shadow transition-all cursor-pointer">
 						<Trash2 class="w-3 h-3" />
 						Remove
 					</span>
 				{/snippet}
 			</ConfirmPopover>
 			{/if}
-		</div>
-	{/if}
+			</div>
+		{/if}
+	</div>
 
 	{#if !loading && ($environments.length === 0 || !$currentEnvironment)}
 		<NoEnvironment />

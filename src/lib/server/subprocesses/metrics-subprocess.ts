@@ -132,7 +132,8 @@ async function collectEnvMetrics(env: { id: number; name: string; host?: string;
 		}
 	} catch (error) {
 		// Skip this environment if it fails (might be offline)
-		console.error(`[MetricsSubprocess] Failed to collect metrics for ${env.name}:`, error);
+		const message = error instanceof Error ? error.message : String(error);
+		console.warn(`[MetricsSubprocess] Failed to collect metrics for ${env.name}: ${message}`);
 	}
 }
 
@@ -165,12 +166,14 @@ async function collectMetrics() {
 			if (result.status === 'fulfilled' && result.value === null) {
 				console.warn(`[MetricsSubprocess] Environment "${enabledEnvs[index].name}" metrics timed out after ${ENV_METRICS_TIMEOUT}ms`);
 			} else if (result.status === 'rejected') {
-				console.warn(`[MetricsSubprocess] Environment "${enabledEnvs[index].name}" metrics failed:`, result.reason);
+				const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+				console.warn(`[MetricsSubprocess] Environment "${enabledEnvs[index].name}" metrics failed: ${reason}`);
 			}
 		});
 	} catch (error) {
-		console.error('[MetricsSubprocess] Metrics collection error:', error);
-		send({ type: 'error', message: `Metrics collection error: ${error}` });
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(`[MetricsSubprocess] Metrics collection error: ${message}`);
+		send({ type: 'error', message: `Metrics collection error: ${message}` });
 	}
 }
 
@@ -308,7 +311,8 @@ async function checkEnvDiskSpace(env: { id: number; name: string; collectMetrics
 		}
 	} catch (error) {
 		// Skip this environment if it fails
-		console.error(`[MetricsSubprocess] Failed to check disk space for ${env.name}:`, error);
+		const message = error instanceof Error ? error.message : String(error);
+		console.warn(`[MetricsSubprocess] Failed to check disk space for ${env.name}: ${message}`);
 	}
 }
 
@@ -341,12 +345,14 @@ async function checkDiskSpace() {
 			if (result.status === 'fulfilled' && result.value === null) {
 				console.warn(`[MetricsSubprocess] Environment "${enabledEnvs[index].name}" disk check timed out after ${ENV_DISK_TIMEOUT}ms`);
 			} else if (result.status === 'rejected') {
-				console.warn(`[MetricsSubprocess] Environment "${enabledEnvs[index].name}" disk check failed:`, result.reason);
+				const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+				console.warn(`[MetricsSubprocess] Environment "${enabledEnvs[index].name}" disk check failed: ${reason}`);
 			}
 		});
 	} catch (error) {
-		console.error('[MetricsSubprocess] Disk space check error:', error);
-		send({ type: 'error', message: `Disk space check error: ${error}` });
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(`[MetricsSubprocess] Disk space check error: ${message}`);
+		send({ type: 'error', message: `Disk space check error: ${message}` });
 	}
 }
 

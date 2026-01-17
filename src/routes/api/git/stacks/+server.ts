@@ -109,7 +109,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			stackName: trimmedStackName,
 			environmentId: data.environmentId || null,
 			repositoryId: repositoryId,
-			composePath: data.composePath || 'docker-compose.yml',
+			composePath: data.composePath || 'compose.yaml',
 			envFilePath: data.envFilePath || null,
 			autoUpdate: data.autoUpdate || false,
 			autoUpdateSchedule: data.autoUpdateSchedule || 'daily',

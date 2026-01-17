@@ -37,13 +37,17 @@ export const POST: RequestHandler = async ({ params, request, url, cookies }) =>
 			currentComposePath = source.composePath;
 			currentDir = dirname(source.composePath);
 		} else {
-			// Stack uses default directory structure
+			// Stack uses default directory structure - check all valid compose filenames
 			const stackDir = await findStackDir(name, envIdNum);
 			if (stackDir) {
-				const defaultComposePath = join(stackDir, 'docker-compose.yml');
-				if (existsSync(defaultComposePath)) {
-					currentComposePath = defaultComposePath;
-					currentDir = stackDir;
+				const composeNames = ['compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml'];
+				for (const fileName of composeNames) {
+					const composePath = join(stackDir, fileName);
+					if (existsSync(composePath)) {
+						currentComposePath = composePath;
+						currentDir = stackDir;
+						break;
+					}
 				}
 			}
 		}

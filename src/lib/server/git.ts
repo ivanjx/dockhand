@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, rmSync, chmodSync } from 'node:fs';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, basename, relative } from 'node:path';
 import {
 	getGitRepository,
 	getGitCredential,
@@ -11,7 +11,7 @@ import {
 	type GitCredential,
 	type GitStackWithRepo
 } from './db';
-import { deployStack } from './stacks';
+import { deployStack, getStackDir } from './stacks';
 
 // Directory for storing cloned repositories
 const GIT_REPOS_DIR = process.env.GIT_REPOS_DIR || './data/git-repos';
@@ -142,8 +142,10 @@ export interface SyncResult {
 	commit?: string;
 	composeContent?: string;
 	composeDir?: string; // Directory containing the compose file (for copying all files)
+	composeFileName?: string; // Filename of the compose file (e.g., "docker-compose.yaml")
 	envFileVars?: Record<string, string>; // Variables from .env file in repo
 	envFileContent?: string; // Raw .env file content (for Hawser deployments)
+	envFileName?: string; // Filename of env file relative to composeDir (e.g., ".env" or "../.env")
 	error?: string;
 	updated?: boolean;
 }
@@ -505,6 +507,22 @@ function getStackRepoPath(stackId: number): string {
 	return join(GIT_REPOS_DIR, `stack-${stackId}`);
 }
 
+/**
+ * Get the current commit hash from a repo path (if it exists).
+ * Used to detect if repo was updated after re-clone.
+ */
+async function getPreviousCommit(repoPath: string, env: GitEnv): Promise<string | null> {
+	if (!existsSync(repoPath)) {
+		return null;
+	}
+	try {
+		const result = await execGit(['rev-parse', 'HEAD'], repoPath, env);
+		return result.code === 0 ? result.stdout.trim() : null;
+	} catch {
+		return null;
+	}
+}
+
 export async function syncGitStack(stackId: number): Promise<SyncResult> {
 	const gitStack = await getGitStack(stackId);
 	if (!gitStack) {
@@ -551,54 +569,39 @@ export async function syncGitStack(stackId: number): Promise<SyncResult> {
 		let updated = false;
 		let currentCommit = '';
 
-		if (!existsSync(repoPath)) {
-			console.log(`${logPrefix} Repo doesn't exist locally, cloning...`);
-			// Clone the repository (shallow clone)
-			const repoUrl = buildRepoUrl(repo.url, credential);
-
-			const result = await execGit(
-				['clone', '--depth=1', '--branch', repo.branch, repoUrl, repoPath],
-				process.cwd(),
-				env
-			);
-			console.log(`${logPrefix} Clone exit code:`, result.code);
-			if (result.stdout) console.log(`${logPrefix} Clone stdout:`, result.stdout);
-			if (result.stderr) console.log(`${logPrefix} Clone stderr:`, result.stderr);
-
-			if (result.code !== 0) {
-				// Clean up partial clone directory on failure
-				if (existsSync(repoPath)) {
-					rmSync(repoPath, { recursive: true, force: true });
-				}
-				throw new Error(`Git clone failed: ${result.stderr}`);
-			}
-
-			updated = true;
-		} else {
-			console.log(`${logPrefix} Repo exists, pulling latest...`);
-			// Get current commit before pull
-			const beforeResult = await execGit(['rev-parse', 'HEAD'], repoPath, env);
-			const beforeCommit = beforeResult.stdout;
-			console.log(`${logPrefix} Commit before pull:`, beforeCommit.substring(0, 7));
-
-			// Pull latest changes
-			const result = await execGit(['pull', 'origin', repo.branch], repoPath, env);
-			console.log(`${logPrefix} Pull exit code:`, result.code);
-			if (result.stdout) console.log(`${logPrefix} Pull stdout:`, result.stdout);
-			if (result.stderr) console.log(`${logPrefix} Pull stderr:`, result.stderr);
-
-			if (result.code !== 0) {
-				throw new Error(`Git pull failed: ${result.stderr}`);
-			}
-
-			// Get commit after pull
-			const afterResult = await execGit(['rev-parse', 'HEAD'], repoPath, env);
-			const afterCommit = afterResult.stdout;
-			console.log(`${logPrefix} Commit after pull:`, afterCommit.substring(0, 7));
-
-			updated = beforeCommit !== afterCommit;
-			console.log(`${logPrefix} Repo updated:`, updated);
+		// Always re-clone to ensure clean state (handles branch/URL/credential changes, force pushes, etc.)
+		// Shallow clones are fast so this is acceptable
+		const previousCommit = await getPreviousCommit(repoPath, env);
+		if (existsSync(repoPath)) {
+			console.log(`${logPrefix} Removing existing clone for fresh sync...`);
+			rmSync(repoPath, { recursive: true, force: true });
 		}
+
+		console.log(`${logPrefix} Cloning repository...`);
+		const repoUrl = buildRepoUrl(repo.url, credential);
+
+		const result = await execGit(
+			['clone', '--depth=1', '--branch', repo.branch, repoUrl, repoPath],
+			process.cwd(),
+			env
+		);
+		console.log(`${logPrefix} Clone exit code:`, result.code);
+		if (result.stdout) console.log(`${logPrefix} Clone stdout:`, result.stdout);
+		if (result.stderr) console.log(`${logPrefix} Clone stderr:`, result.stderr);
+
+		if (result.code !== 0) {
+			// Clean up partial clone directory on failure
+			if (existsSync(repoPath)) {
+				rmSync(repoPath, { recursive: true, force: true });
+			}
+			throw new Error(`Git clone failed: ${result.stderr}`);
+		}
+
+		// Check if commit changed
+		const newCommitResult = await execGit(['rev-parse', 'HEAD'], repoPath, env);
+		const newCommit = newCommitResult.stdout.trim();
+		updated = previousCommit !== newCommit;
+		console.log(`${logPrefix} Previous commit: ${previousCommit || '(none)'}, new commit: ${newCommit.substring(0, 7)}, updated: ${updated}`);
 
 		// Get current commit hash
 		const commitResult = await execGit(['rev-parse', 'HEAD'], repoPath, env);
@@ -618,13 +621,16 @@ export async function syncGitStack(stackId: number): Promise<SyncResult> {
 		console.log(`${logPrefix} Compose content:`);
 		console.log(composeContent);
 
-		// Determine the compose directory (for copying all files)
+		// Determine the compose directory and filename (for copying all files)
 		const composeDir = dirname(composePath);
+		const composeFileName = basename(gitStack.composePath); // e.g., "docker-compose.yaml"
 		console.log(`${logPrefix} Compose directory:`, composeDir);
+		console.log(`${logPrefix} Compose filename:`, composeFileName);
 
 		// Read env file if configured (optional - don't fail if missing)
 		let envFileVars: Record<string, string> | undefined;
 		let envFileContent: string | undefined;
+		let envFileName: string | undefined;
 		if (gitStack.envFilePath) {
 			const envFilePath = join(repoPath, gitStack.envFilePath);
 			console.log(`${logPrefix} Looking for env file at:`, envFilePath);
@@ -634,6 +640,11 @@ export async function syncGitStack(stackId: number): Promise<SyncResult> {
 					envFileContent = await Bun.file(envFilePath).text();
 					envFileVars = parseEnvFileContent(envFileContent, gitStack.stackName);
 					console.log(`${logPrefix} Env file parsed, vars count:`, Object.keys(envFileVars).length);
+
+					// Compute env file path relative to compose directory
+					// This is needed for --env-file flag after files are copied to stack directory
+					envFileName = relative(composeDir, envFilePath);
+					console.log(`${logPrefix} Env filename relative to compose dir:`, envFileName);
 				} catch (err) {
 					// Log but don't fail - env file is optional
 					console.warn(`${logPrefix} Failed to read env file ${gitStack.envFilePath}:`, err);
@@ -668,7 +679,9 @@ export async function syncGitStack(stackId: number): Promise<SyncResult> {
 			commit: currentCommit,
 			composeContent,
 			composeDir,
+			composeFileName,
 			envFileVars,
+			envFileName,
 			updated
 		};
 	} catch (error: any) {
@@ -735,12 +748,17 @@ export async function deployGitStack(stackId: number, options?: { force?: boolea
 	// Note: Without this, docker compose only detects compose file changes, not env var changes
 	console.log(`${logPrefix} Calling deployStack...`);
 	console.log(`${logPrefix} Source directory (composeDir):`, syncResult.composeDir);
+	console.log(`${logPrefix} Compose filename:`, syncResult.composeFileName);
+	console.log(`${logPrefix} Env filename:`, syncResult.envFileName ?? '(none)');
+
 	const result = await deployStack({
 		name: gitStack.stackName,
 		compose: syncResult.composeContent!,
 		envId: gitStack.environmentId,
 		envFileVars: syncResult.envFileVars,
 		sourceDir: syncResult.composeDir, // Copy entire directory from git repo
+		composeFileName: syncResult.composeFileName, // Use original compose filename from repo
+		envFileName: syncResult.envFileName, // Env file relative to compose dir (for --env-file flag, optional)
 		forceRecreate
 	});
 
@@ -752,13 +770,21 @@ export async function deployGitStack(stackId: number, options?: { force?: boolea
 	if (result.error) console.log(`${logPrefix} Error:`, result.error);
 
 	if (result.success) {
-		// Record the stack source
+		// Record the stack source with resolved compose path for consistency
+		const stackDir = await getStackDir(gitStack.stackName, gitStack.environmentId);
+		const resolvedComposePath = syncResult.composeFileName
+			? join(stackDir, syncResult.composeFileName)
+			: undefined;
+
+		console.log(`${logPrefix} Resolved compose path for stack_sources:`, resolvedComposePath);
+
 		await upsertStackSource({
 			stackName: gitStack.stackName,
 			environmentId: gitStack.environmentId,
 			sourceType: 'git',
 			gitRepositoryId: gitStack.repositoryId,
-			gitStackId: stackId
+			gitStackId: stackId,
+			composePath: resolvedComposePath
 		});
 	}
 
@@ -873,53 +899,38 @@ export async function deployGitStackWithProgress(
 		let updated = false;
 		let currentCommit = '';
 
-		if (!existsSync(repoPath)) {
-			// Step 2: Cloning
-			onProgress({ status: 'cloning', message: 'Cloning repository...', step: 2, totalSteps });
+		// Always re-clone to ensure clean state (handles branch/URL/credential changes, force pushes, etc.)
+		// Shallow clones are fast so this is acceptable
+		const previousCommit = await getPreviousCommit(repoPath, env);
 
-			const repoUrl = buildRepoUrl(repo.url, credential);
+		// Step 2: Cloning
+		onProgress({ status: 'cloning', message: 'Cloning repository...', step: 2, totalSteps });
 
-			// Step 3: Fetching
-			onProgress({ status: 'fetching', message: `Fetching branch ${repo.branch}...`, step: 3, totalSteps });
-			const result = await execGit(
-				['clone', '--depth=1', '--branch', repo.branch, repoUrl, repoPath],
-				process.cwd(),
-				env
-			);
-			if (result.code !== 0) {
-				// Clean up partial clone directory on failure
-				if (existsSync(repoPath)) {
-					rmSync(repoPath, { recursive: true, force: true });
-				}
-				throw new Error(`Git clone failed: ${result.stderr}`);
-			}
-
-			updated = true;
-		} else {
-			// Step 2-3: Fetching and resetting to latest (works with shallow clones)
-			onProgress({ status: 'fetching', message: 'Fetching latest changes...', step: 2, totalSteps });
-
-			const beforeResult = await execGit(['rev-parse', 'HEAD'], repoPath, env);
-			const beforeCommit = beforeResult.stdout;
-
-			// Fetch the latest from origin (shallow fetch)
-			const fetchResult = await execGit(['fetch', '--depth=1', 'origin', repo.branch], repoPath, env);
-			if (fetchResult.code !== 0) {
-				throw new Error(`Git fetch failed: ${fetchResult.stderr}`);
-			}
-
-			// Reset to the fetched commit (this works reliably with shallow clones)
-			onProgress({ status: 'fetching', message: 'Updating to latest...', step: 3, totalSteps });
-			const resetResult = await execGit(['reset', '--hard', `origin/${repo.branch}`], repoPath, env);
-			if (resetResult.code !== 0) {
-				throw new Error(`Git reset failed: ${resetResult.stderr}`);
-			}
-
-			const afterResult = await execGit(['rev-parse', 'HEAD'], repoPath, env);
-			const afterCommit = afterResult.stdout;
-
-			updated = beforeCommit !== afterCommit;
+		if (existsSync(repoPath)) {
+			rmSync(repoPath, { recursive: true, force: true });
 		}
+
+		const repoUrl = buildRepoUrl(repo.url, credential);
+
+		// Step 3: Fetching
+		onProgress({ status: 'fetching', message: `Fetching branch ${repo.branch}...`, step: 3, totalSteps });
+		const cloneResult = await execGit(
+			['clone', '--depth=1', '--branch', repo.branch, repoUrl, repoPath],
+			process.cwd(),
+			env
+		);
+		if (cloneResult.code !== 0) {
+			// Clean up partial clone directory on failure
+			if (existsSync(repoPath)) {
+				rmSync(repoPath, { recursive: true, force: true });
+			}
+			throw new Error(`Git clone failed: ${cloneResult.stderr}`);
+		}
+
+		// Check if commit changed
+		const newCommitResult = await execGit(['rev-parse', 'HEAD'], repoPath, env);
+		const newCommit = newCommitResult.stdout.trim();
+		updated = previousCommit !== newCommit;
 
 		// Get current commit hash
 		const commitResult = await execGit(['rev-parse', 'HEAD'], repoPath, env);

@@ -245,7 +245,7 @@
 </script>
 
 <div class="space-y-4">
-	<div class="flex flex-wrap justify-between items-center gap-3">
+	<div class="shrink-0 flex flex-wrap justify-between items-center gap-3 min-h-8">
 		<PageHeader icon={Globe} title="Environments">
 			<Badge variant="secondary" class="text-xs">{environments.length} total</Badge>
 		</PageHeader>

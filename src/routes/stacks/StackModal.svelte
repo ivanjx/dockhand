@@ -65,6 +65,9 @@
 	// Error dialog state
 	let operationError = $state<{ title: string; message: string; details?: string } | null>(null);
 
+	// Stack exists warning dialog state
+	let showExistsWarning = $state(false);
+
 
 	// ─── Path State (Simplified) ─────────────────────────────────────────────────
 	// Working paths: what we're currently editing (always strings, never null)
@@ -197,7 +200,7 @@
 
 		// Get the current compose filename
 		const currentComposePath = workingComposePath;
-		const composeFilename = currentComposePath ? currentComposePath.split('/').pop() : 'docker-compose.yml';
+		const composeFilename = currentComposePath ? currentComposePath.split('/').pop() : 'compose.yaml';
 
 		// Build new paths: create a subfolder with the stack name inside selected directory
 		const displayName = mode === 'edit' ? stackName : newStackName;
@@ -371,7 +374,7 @@
 			const stackName = newStackName.trim();
 			if (stackName) {
 				// If we have a stack name, include the subfolder
-				finalPath = `${baseDir}/${stackName}/docker-compose.yml`;
+				finalPath = `${baseDir}/${stackName}/compose.yaml`;
 			} else {
 				// No stack name yet - just show the selected directory
 				finalPath = `${baseDir}/`;
@@ -811,6 +814,26 @@ services:
 
 		if (hasErrors) return;
 
+		const envId = $currentEnvironment?.id ?? null;
+
+		// Check if stack already exists
+		try {
+			const stacksResponse = await fetch(appendEnvParam('/api/stacks', envId));
+			if (stacksResponse.ok) {
+				const stacks = await stacksResponse.json();
+				const existingStack = stacks.find((s: { name: string }) =>
+					s.name.toLowerCase() === newStackName.trim().toLowerCase()
+				);
+				if (existingStack) {
+					showExistsWarning = true;
+					return;
+				}
+			}
+		} catch (e) {
+			console.warn('Failed to check for existing stacks:', e);
+			// Continue with creation if check fails
+		}
+
 		saving = true;
 		error = null;
 
@@ -818,8 +841,6 @@ services:
 		const prepared = envVarsPanelRef?.prepareForSave() || { rawContent: '', variables: [] };
 
 		try {
-			const envId = $currentEnvironment?.id ?? null;
-
 			// Build request body
 			const requestBody: Record<string, unknown> = {
 				name: newStackName.trim(),
@@ -1365,7 +1386,7 @@ services:
 								<PathBarItem
 									label="Compose file"
 									path={workingComposePath || null}
-									placeholder="/path/to/docker-compose.yml"
+									placeholder="/path/to/compose.yaml"
 									copied={composePathCopied}
 									onCopy={() => copyToClipboard(workingComposePath, (v) => composePathCopied = v)}
 									onBrowse={openComposeBrowser}
@@ -1457,7 +1478,7 @@ services:
 									existingSecretKeys={mode === 'edit' ? existingSecretKeys : new Set()}
 									onchange={() => { markDirty(); debouncedValidate(); }}
 									theme={editorTheme}
-									infoText="These variables will be written to a .env file in the stack directory."
+									infoText="These variables will be written to a .env file in the stack directory and passed to the compose command."
 								/>
 							</div>
 						</div>
@@ -1666,6 +1687,26 @@ services:
 					<FolderSync class="w-3.5 h-3.5 mr-1" />
 					Move files
 				{/if}
+			</Button>
+		</div>
+	</Dialog.Content>
+</Dialog.Root>
+
+<!-- Stack already exists warning dialog -->
+<Dialog.Root bind:open={showExistsWarning}>
+	<Dialog.Content class="max-w-sm">
+		<Dialog.Header>
+			<Dialog.Title class="flex items-center gap-2">
+				<TriangleAlert class="w-5 h-5 text-amber-500" />
+				Stack already exists
+			</Dialog.Title>
+			<Dialog.Description>
+				A stack named "{newStackName}" already exists. Please choose a different name.
+			</Dialog.Description>
+		</Dialog.Header>
+		<div class="flex justify-end mt-4">
+			<Button size="sm" onclick={() => showExistsWarning = false}>
+				OK
 			</Button>
 		</div>
 	</Dialog.Content>

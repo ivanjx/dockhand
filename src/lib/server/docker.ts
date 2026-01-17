@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Environment } from './db';
 import { getStackEnvVarsAsRecord } from './db';
+import { isSystemContainer } from './scheduler/tasks/update-utils';
 
 /**
  * Custom error for when an environment is not found.
@@ -736,7 +737,8 @@ export async function listContainers(all = true, envId?: number | null): Promise
 			restartCount: restartCounts.get(container.Id) || 0,
 			mounts,
 			labels: container.Labels || {},
-			command: container.Command || ''
+			command: container.Command || '',
+			systemContainer: isSystemContainer(container.Image || '')
 		};
 	});
 }
@@ -1204,6 +1206,12 @@ function parseImageReference(imageName: string): { registry: string; repo: strin
 		}
 	}
 
+	// Normalize docker.io to index.docker.io (Docker Hub's actual registry host)
+	// docker.io redirects to www.docker.com, while index.docker.io is the real API
+	if (registry === 'docker.io') {
+		registry = 'index.docker.io';
+	}
+
 	// Docker Hub requires library/ prefix for official images
 	if (registry === 'index.docker.io' && !repo.includes('/')) {
 		repo = `library/${repo}`;
@@ -1347,6 +1355,141 @@ async function getRegistryBearerToken(registry: string, repo: string): Promise<s
 		console.error('Failed to get registry bearer token:', e);
 		return null;
 	}
+}
+
+/**
+ * Get authentication header for registry API requests.
+ * Handles the Docker Registry V2 OAuth2 token flow:
+ * 1. Challenge request to /v2/ to get WWW-Authenticate header
+ * 2. Parse realm, service from challenge
+ * 3. Request token from realm with credentials (if available)
+ *
+ * @param registryUrl - Full registry URL (e.g., 'https://ghcr.io')
+ * @param scope - Token scope (e.g., 'registry:catalog:*' or 'repository:user/repo:pull')
+ * @param credentials - Optional credentials { username, password }
+ * @returns Authorization header value (e.g., 'Bearer xxx' or 'Basic xxx') or null
+ */
+export async function getRegistryAuthHeader(
+	registryUrl: string,
+	scope: string,
+	credentials?: { username: string; password: string } | null
+): Promise<string | null> {
+	try {
+		// Normalize URL
+		let baseUrl = registryUrl;
+		if (!baseUrl.startsWith('http')) {
+			baseUrl = `https://${baseUrl}`;
+		}
+		baseUrl = baseUrl.replace(/\/$/, '');
+
+		// Step 1: Challenge request to /v2/
+		const challengeResponse = await fetch(`${baseUrl}/v2/`, {
+			method: 'GET',
+			headers: { 'User-Agent': 'Dockhand/1.0' }
+		});
+
+		// If 200, no auth needed
+		if (challengeResponse.ok) {
+			return null;
+		}
+
+		// If not 401, something else is wrong
+		if (challengeResponse.status !== 401) {
+			console.error(`Registry challenge failed: ${challengeResponse.status}`);
+			return null;
+		}
+
+		// Step 2: Parse WWW-Authenticate header
+		const wwwAuth = challengeResponse.headers.get('WWW-Authenticate') || '';
+		const challenge = wwwAuth.toLowerCase();
+
+		if (challenge.startsWith('basic')) {
+			// Basic auth - use credentials if we have them
+			if (credentials) {
+				const basicAuth = Buffer.from(`${credentials.username}:${credentials.password}`).toString('base64');
+				return `Basic ${basicAuth}`;
+			}
+			return null;
+		}
+
+		if (!challenge.startsWith('bearer')) {
+			console.error(`Unsupported auth type: ${wwwAuth}`);
+			return null;
+		}
+
+		// Parse bearer challenge: Bearer realm="...",service="...",scope="..."
+		const realmMatch = wwwAuth.match(/realm="([^"]+)"/i);
+		const serviceMatch = wwwAuth.match(/service="([^"]+)"/i);
+
+		if (!realmMatch) {
+			console.error('No realm in WWW-Authenticate header');
+			return null;
+		}
+
+		const realm = realmMatch[1];
+		const service = serviceMatch ? serviceMatch[1] : '';
+
+		// Step 3: Request token from realm (with credentials if available)
+		const tokenUrl = new URL(realm);
+		if (service) tokenUrl.searchParams.set('service', service);
+		tokenUrl.searchParams.set('scope', scope);
+
+		const tokenHeaders: Record<string, string> = { 'User-Agent': 'Dockhand/1.0' };
+
+		// Add Basic auth header if we have credentials
+		if (credentials) {
+			const basicAuth = Buffer.from(`${credentials.username}:${credentials.password}`).toString('base64');
+			tokenHeaders['Authorization'] = `Basic ${basicAuth}`;
+		}
+
+		const tokenResponse = await fetch(tokenUrl.toString(), {
+			headers: tokenHeaders
+		});
+
+		if (!tokenResponse.ok) {
+			const errorBody = await tokenResponse.text().catch(() => '');
+			console.error(`Token request failed: ${tokenResponse.status} - ${errorBody}`);
+			return null;
+		}
+
+		const tokenData = await tokenResponse.json() as { token?: string; access_token?: string };
+		const token = tokenData.token || tokenData.access_token || null;
+
+		return token ? `Bearer ${token}` : null;
+
+	} catch (e) {
+		console.error('Failed to get registry auth header:', e);
+		return null;
+	}
+}
+
+/**
+ * Helper to get normalized registry URL and auth header for registry API requests.
+ * Combines URL normalization, credential extraction, and token flow in one call.
+ *
+ * @param registry - Registry object from database
+ * @param scope - Token scope (e.g., 'registry:catalog:*' or 'repository:user/repo:pull')
+ * @returns { baseUrl, authHeader } - Normalized URL and auth header (or null)
+ */
+export async function getRegistryAuth(
+	registry: { url: string; username?: string | null; password?: string | null },
+	scope: string
+): Promise<{ baseUrl: string; authHeader: string | null }> {
+	// Normalize URL
+	let baseUrl = registry.url;
+	if (!baseUrl.startsWith('http')) {
+		baseUrl = `https://${baseUrl}`;
+	}
+	baseUrl = baseUrl.replace(/\/$/, '');
+
+	// Get auth header using proper token flow
+	const credentials = registry.username && registry.password
+		? { username: registry.username, password: registry.password }
+		: null;
+
+	const authHeader = await getRegistryAuthHeader(baseUrl, scope, credentials);
+
+	return { baseUrl, authHeader };
 }
 
 /**
@@ -2161,14 +2304,15 @@ export async function runContainer(options: {
 	binds?: string[];
 	env?: string[];
 	name?: string;
-	autoRemove?: boolean;
 	envId?: number | null;
 }): Promise<{ stdout: string; stderr: string }> {
 	// Add random suffix to avoid naming conflicts
 	const baseName = options.name || `dockhand-temp-${Date.now()}`;
 	const containerName = `${baseName}-${randomSuffix()}`;
 
-	// Create container
+	// Create container - disable AutoRemove since we fetch logs after exit
+	// and clean up manually. AutoRemove causes race condition where container
+	// is removed before we can fetch logs.
 	const containerConfig: any = {
 		Image: options.image,
 		Cmd: options.cmd,
@@ -2176,7 +2320,7 @@ export async function runContainer(options: {
 		Tty: false,
 		HostConfig: {
 			Binds: options.binds || [],
-			AutoRemove: options.autoRemove !== false
+			AutoRemove: false // Never use AutoRemove - we clean up manually after fetching logs
 		}
 	};
 
@@ -2190,15 +2334,21 @@ export async function runContainer(options: {
 	);
 
 	const containerId = createResult.Id;
+	console.log(`[runContainer] Created container ${containerId} for image ${options.image}`);
 
 	try {
 		// Start container
+		console.log(`[runContainer] Starting container ${containerId}...`);
 		await dockerFetch(`/containers/${containerId}/start`, { method: 'POST' }, options.envId);
 
 		// Wait for container to finish
-		await dockerFetch(`/containers/${containerId}/wait`, { method: 'POST' }, options.envId);
+		console.log(`[runContainer] Waiting for container ${containerId} to finish...`);
+		const waitResponse = await dockerFetch(`/containers/${containerId}/wait`, { method: 'POST' }, options.envId);
+		const waitResult = await waitResponse.json().catch(() => ({}));
+		console.log(`[runContainer] Container ${containerId} finished with exit code:`, waitResult?.StatusCode);
 
-		// Get logs
+		// Get logs - container is stopped but NOT removed yet since AutoRemove is false
+		console.log(`[runContainer] Fetching logs for container ${containerId}...`);
 		const logsResponse = await dockerFetch(
 			`/containers/${containerId}/logs?stdout=true&stderr=true`,
 			{},
@@ -2206,15 +2356,20 @@ export async function runContainer(options: {
 		);
 
 		const buffer = Buffer.from(await logsResponse.arrayBuffer());
-		return demuxDockerStream(buffer, { separateStreams: true }) as { stdout: string; stderr: string };
+		console.log(`[runContainer] Got logs buffer, size: ${buffer.length} bytes`);
+
+		const result = demuxDockerStream(buffer, { separateStreams: true }) as { stdout: string; stderr: string };
+		console.log(`[runContainer] Demuxed: stdout=${result.stdout.length} chars, stderr=${result.stderr.length} chars`);
+		if (result.stdout.length === 0 && result.stderr.length === 0 && buffer.length > 0) {
+			console.log(`[runContainer] WARNING: Buffer has data but demux returned empty. First 100 bytes:`, buffer.slice(0, 100));
+		}
+		return result;
 	} finally {
-		// Cleanup container if not auto-removed
-		if (options.autoRemove === false) {
-			try {
-				await dockerFetch(`/containers/${containerId}?force=true`, { method: 'DELETE' }, options.envId);
-			} catch {
-				// Ignore cleanup errors
-			}
+		// Always cleanup container manually
+		try {
+			await dockerFetch(`/containers/${containerId}?force=true`, { method: 'DELETE' }, options.envId);
+		} catch {
+			// Ignore cleanup errors
 		}
 	}
 }
@@ -2230,11 +2385,10 @@ export async function runContainerWithStreaming(options: {
 	onStdout?: (data: string) => void;
 	onStderr?: (data: string) => void;
 }): Promise<string> {
-	// Add random suffix to avoid naming conflicts
 	const baseName = options.name || `dockhand-stream-${Date.now()}`;
 	const containerName = `${baseName}-${randomSuffix()}`;
 
-	// Create container
+	// Create container WITHOUT AutoRemove - we need to fetch logs after it exits
 	const containerConfig: any = {
 		Image: options.image,
 		Cmd: options.cmd,
@@ -2242,123 +2396,135 @@ export async function runContainerWithStreaming(options: {
 		Tty: false,
 		HostConfig: {
 			Binds: options.binds || [],
-			AutoRemove: true
+			AutoRemove: false
 		}
 	};
 
-	// Try to create container, handle 409 conflict by removing stale container
-	let createResult: { Id: string };
-	try {
-		createResult = await dockerJsonRequest<{ Id: string }>(
-			`/containers/create?name=${encodeURIComponent(containerName)}`,
-			{
-				method: 'POST',
-				body: JSON.stringify(containerConfig)
-			},
-			options.envId
-		);
-	} catch (error: any) {
-		// Check for 409 conflict (container name already in use)
-		if (error?.message?.includes('409') || error?.status === 409) {
-			console.log(`[Docker] Container name conflict for ${containerName}, attempting cleanup...`);
-			// Try to force remove the conflicting container
-			try {
-				await dockerFetch(`/containers/${containerName}?force=true`, { method: 'DELETE' }, options.envId);
-				console.log(`[Docker] Removed stale container ${containerName}`);
-			} catch (removeError) {
-				console.error(`[Docker] Failed to remove stale container:`, removeError);
-			}
-			// Retry with a new random suffix
-			const retryName = `${baseName}-${randomSuffix()}`;
-			createResult = await dockerJsonRequest<{ Id: string }>(
-				`/containers/create?name=${encodeURIComponent(retryName)}`,
-				{
-					method: 'POST',
-					body: JSON.stringify(containerConfig)
-				},
-				options.envId
-			);
-		} else {
-			throw error;
-		}
-	}
-
-	const containerId = createResult.Id;
-
-	// Start container
-	await dockerFetch(`/containers/${containerId}/start`, { method: 'POST' }, options.envId);
-
-	// Check if this is an edge environment for streaming approach
-	const config = await getDockerConfig(options.envId ?? undefined);
-
-	// Stream logs while container is running
-	if (config.connectionType === 'hawser-edge' && config.environmentId) {
-		// Edge mode: use sendEdgeStreamRequest for real-time streaming
-		return new Promise<string>((resolve, reject) => {
-			let stdout = '';
-			let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
-
-			const { cancel } = sendEdgeStreamRequest(
-				config.environmentId!,
-				'GET',
-				`/containers/${containerId}/logs?stdout=true&stderr=true&follow=true`,
-				{
-					onData: (data: string) => {
-						try {
-							// Data is base64 encoded from edge agent
-							const decoded = Buffer.from(data, 'base64');
-							buffer = Buffer.concat([buffer, decoded]);
-
-							// Process Docker stream frames
-							const result = processStreamFrames(buffer, options.onStdout, options.onStderr);
-							stdout += result.stdout;
-							buffer = result.remaining;
-						} catch {
-							// If not base64, try as raw data
-							const result = processStreamFrames(Buffer.from(data), options.onStdout, options.onStderr);
-							stdout += result.stdout;
-						}
-					},
-					onEnd: () => {
-						resolve(stdout);
-					},
-					onError: (error: string) => {
-						// If container finished, treat as success
-						if (error.includes('container') && (error.includes('exited') || error.includes('not running'))) {
-							resolve(stdout);
-						} else {
-							reject(new Error(error));
-						}
-					}
-				}
-			);
-		});
-	}
-
-	// Non-edge mode: use regular streaming
-	const logsResponse = await dockerFetch(
-		`/containers/${containerId}/logs?stdout=true&stderr=true&follow=true`,
-		{ streaming: true },
+	const createResult = await dockerJsonRequest<{ Id: string }>(
+		`/containers/create?name=${encodeURIComponent(containerName)}`,
+		{ method: 'POST', body: JSON.stringify(containerConfig) },
 		options.envId
 	);
 
-	let stdout = '';
-	const reader = logsResponse.body?.getReader();
-	if (reader) {
-		let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+	const containerId = createResult.Id;
+	const config = await getDockerConfig(options.envId ?? undefined);
 
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
+	try {
+		// Start container
+		await dockerFetch(`/containers/${containerId}/start`, { method: 'POST' }, options.envId);
 
-			buffer = Buffer.concat([buffer, Buffer.from(value)]);
-			const result = processStreamFrames(buffer, options.onStdout, options.onStderr);
-			stdout += result.stdout;
-			buffer = result.remaining;
+		// Stream stderr for real-time progress while container runs
+		if (config.connectionType === 'hawser-edge' && config.environmentId) {
+			await streamEdgeStderr(config.environmentId, containerId, options.onStderr);
+		} else {
+			await streamLocalStderr(containerId, options.envId, options.onStderr);
+		}
+
+		// Container has exited. Now fetch stdout reliably (no race condition).
+		const stdout = await fetchContainerStdout(containerId, config, options.envId);
+		return stdout;
+	} finally {
+		// Always cleanup container
+		try {
+			await dockerFetch(`/containers/${containerId}?force=true`, { method: 'DELETE' }, options.envId);
+		} catch {
+			// Ignore cleanup errors
 		}
 	}
+}
 
-	return stdout;
+// Stream only stderr for real-time progress (local/standard mode)
+async function streamLocalStderr(
+	containerId: string,
+	envId: number | null | undefined,
+	onStderr?: (data: string) => void
+): Promise<void> {
+	const response = await dockerFetch(
+		`/containers/${containerId}/logs?stdout=false&stderr=true&follow=true`,
+		{ streaming: true },
+		envId
+	);
+
+	const reader = response.body?.getReader();
+	if (!reader) return;
+
+	let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		buffer = Buffer.concat([buffer, Buffer.from(value)]);
+		const result = processStreamFrames(buffer, undefined, onStderr);
+		buffer = result.remaining;
+	}
+}
+
+// Stream only stderr for real-time progress (edge mode)
+async function streamEdgeStderr(
+	environmentId: number,
+	containerId: string,
+	onStderr?: (data: string) => void
+): Promise<void> {
+	return new Promise((resolve, reject) => {
+		let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+
+		sendEdgeStreamRequest(
+			environmentId,
+			'GET',
+			`/containers/${containerId}/logs?stdout=false&stderr=true&follow=true`,
+			{
+				onData: (data: string) => {
+					try {
+						const decoded = Buffer.from(data, 'base64');
+						buffer = Buffer.concat([buffer, decoded]);
+						const result = processStreamFrames(buffer, undefined, onStderr);
+						buffer = result.remaining;
+					} catch {
+						// Ignore decode errors
+					}
+				},
+				onEnd: () => resolve(),
+				onError: (error: string) => {
+					// Container exited = success
+					if (error.includes('container') && (error.includes('exited') || error.includes('not running'))) {
+						resolve();
+					} else {
+						reject(new Error(error));
+					}
+				}
+			}
+		);
+	});
+}
+
+// Fetch stdout after container has exited (reliable, no race)
+async function fetchContainerStdout(
+	containerId: string,
+	config: Awaited<ReturnType<typeof getDockerConfig>>,
+	envId: number | null | undefined
+): Promise<string> {
+	if (config.connectionType === 'hawser-edge' && config.environmentId) {
+		const response = await sendEdgeRequest(
+			config.environmentId,
+			'GET',
+			`/containers/${containerId}/logs?stdout=true&stderr=false&follow=false`
+		);
+		if (!response.body) return '';
+		const bodyData = typeof response.body === 'string'
+			? Buffer.from(response.body, 'base64')
+			: Buffer.from(response.body);
+		const result = processStreamFrames(bodyData, undefined, undefined);
+		return result.stdout;
+	}
+
+	// Local/standard mode
+	const response = await dockerFetch(
+		`/containers/${containerId}/logs?stdout=true&stderr=false&follow=false`,
+		{},
+		envId
+	);
+	const buffer = Buffer.from(await response.arrayBuffer());
+	const result = processStreamFrames(buffer, undefined, undefined);
+	return result.stdout;
 }
 
 // Push image to registry

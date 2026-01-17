@@ -31,7 +31,7 @@ import {
 } from '../../docker';
 import { getScannerSettings, scanImage, type ScanResult, type VulnerabilitySeverity } from '../../scanner';
 import { sendEventNotification } from '../../notifications';
-import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isDockhandContainer } from './update-utils';
+import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer } from './update-utils';
 
 /**
  * Execute a container auto-update.
@@ -98,14 +98,18 @@ export async function runContainerUpdate(
 			return;
 		}
 
-		// Prevent Dockhand from updating itself
-		if (isDockhandContainer(imageNameFromConfig)) {
-			log(`Skipping Dockhand container - cannot auto-update self`);
+		// Prevent system containers (Dockhand/Hawser) from being updated
+		const systemContainerType = isSystemContainer(imageNameFromConfig);
+		if (systemContainerType) {
+			const reason = systemContainerType === 'dockhand'
+				? 'Cannot auto-update Dockhand itself'
+				: 'Cannot auto-update Hawser agent';
+			log(`Skipping ${systemContainerType} container - ${reason}`);
 			await updateScheduleExecution(execution.id, {
 				status: 'skipped',
 				completedAt: new Date().toISOString(),
 				duration: Date.now() - startTime,
-				details: { reason: 'Cannot auto-update Dockhand itself' }
+				details: { reason }
 			});
 			return;
 		}

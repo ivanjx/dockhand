@@ -23,10 +23,22 @@ import {
 	deleteStackEnvVars
 } from './db';
 import { deleteGitStackFiles } from './git';
+import { cleanPem } from '$lib/utils/pem';
+import { rewriteComposeVolumePaths, getHostDataDir } from './host-path';
 
 // =============================================================================
 // TYPES
 // =============================================================================
+
+/**
+ * TLS configuration for remote Docker connections
+ */
+interface TlsConfig {
+	ca?: string;
+	cert?: string;
+	key?: string;
+	skipVerify?: boolean;
+}
 
 /**
  * Stack source types
@@ -82,6 +94,10 @@ export interface DeployStackOptions {
 	envFileVars?: Record<string, string>;
 	sourceDir?: string; // Directory to copy all files from (for git stacks)
 	forceRecreate?: boolean;
+	composePath?: string; // Custom compose file path (for adopted/imported stacks)
+	envPath?: string; // Custom env file path (for adopted/imported stacks)
+	composeFileName?: string; // Compose filename to use (e.g., "docker-compose.yaml") for git stacks
+	envFileName?: string; // Env filename relative to compose dir (e.g., ".env") for git stacks
 }
 
 // =============================================================================
@@ -113,6 +129,24 @@ let _stacksDir: string | null = null;
 
 // Per-stack locking mechanism to prevent race conditions during concurrent operations
 const stackLocks = new Map<string, Promise<void>>();
+
+// Track active TLS temp directories for cleanup on unexpected process exit
+const activeTlsDirs = new Set<string>();
+
+// Register cleanup handlers once at module load
+if (typeof process !== 'undefined') {
+	const cleanupTlsDirs = () => {
+		for (const dir of activeTlsDirs) {
+			try {
+				rmSync(dir, { recursive: true, force: true });
+			} catch { /* ignore */ }
+		}
+		activeTlsDirs.clear();
+	};
+	process.on('exit', cleanupTlsDirs);
+	process.on('SIGINT', () => { cleanupTlsDirs(); process.exit(130); });
+	process.on('SIGTERM', () => { cleanupTlsDirs(); process.exit(143); });
+}
 
 /**
  * Execute a function with exclusive lock on a stack.
@@ -287,9 +321,9 @@ export function listManagedStacks(): string[] {
 	return readdirSync(stacksDir, { withFileTypes: true })
 		.filter((dirent) => dirent.isDirectory())
 		.filter((dirent) => {
-			const composeYml = join(stacksDir, dirent.name, 'docker-compose.yml');
-			const composeYaml = join(stacksDir, dirent.name, 'docker-compose.yaml');
-			return existsSync(composeYml) || existsSync(composeYaml);
+			// Check all valid compose filenames
+			const composeNames = ['compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml'];
+			return composeNames.some(name => existsSync(join(stacksDir, dirent.name, name)));
 		})
 		.map((dirent) => dirent.name);
 }
@@ -381,8 +415,8 @@ export async function getStackComposeFile(
 	const stackDir = await findStackDir(stackName, envId);
 
 	if (stackDir) {
-		// Check all common compose file names
-		const composeFileNames = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml'];
+		// Check all common compose file names (prefer new style first)
+		const composeFileNames = ['compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml'];
 
 		for (const fileName of composeFileNames) {
 			const actualComposePath = join(stackDir, fileName);
@@ -617,7 +651,7 @@ export async function saveStackComposeFile(
 		stackDir = existingDir;
 	}
 
-	const composeFile = join(stackDir, 'docker-compose.yml');
+	const composeFile = join(stackDir, 'compose.yaml');
 	const exists = existsSync(stackDir);
 
 	if (create) {
@@ -720,11 +754,14 @@ interface ComposeCommandOptions {
 	workingDir?: string;
 	/** Full path to the compose file (for imported stacks, to avoid writing to internal dir) */
 	composePath?: string;
+	/** Full path to the env file (for --env-file flag, supports custom names) */
+	envPath?: string;
 }
 
 /**
  * Execute a docker compose command locally via Bun.spawn.
  *
+ * @param tlsConfig - TLS configuration for remote Docker connections (certs written to temp files)
  * @param envVars - Non-secret environment variables (from .env file, passed for backward compat)
  * @param secretVars - Secret environment variables (injected via shell env, NEVER written to disk)
  * @param workingDir - Optional working directory for compose execution (for imported stacks)
@@ -735,13 +772,15 @@ async function executeLocalCompose(
 	stackName: string,
 	composeContent: string,
 	dockerHost?: string,
+	tlsConfig?: TlsConfig,
 	envVars?: Record<string, string>,
 	secretVars?: Record<string, string>,
 	forceRecreate?: boolean,
 	removeVolumes?: boolean,
 	envId?: number | null,
 	workingDir?: string,
-	customComposePath?: string
+	customComposePath?: string,
+	customEnvPath?: string
 ): Promise<StackOperationResult> {
 	const logPrefix = `[Stack:${stackName}]`;
 
@@ -752,19 +791,43 @@ async function executeLocalCompose(
 	let composeFile: string;
 
 	if (customComposePath && workingDir) {
-		// Imported stack: use original location, don't copy files
+		// Custom compose path provided - use the provided working directory and compose file
+		// This applies to:
+		// - Imported/adopted stacks: files exist at original location, no copying needed
+		// - Git stacks: files were already copied to workingDir by deployStack(), use them in-place
+		// In both cases, we don't write the compose file - it already exists
 		stackDir = workingDir;
 		composeFile = customComposePath;
-		// Don't write to the compose file - it already exists at the custom location
-		// The user manages this file externally
 	} else {
 		// Internal stack: use default data directory
 		stackDir = operation === 'up'
 			? await getStackDir(stackName, envId)
 			: (await findStackDir(stackName, envId) || await getStackDir(stackName, envId));
 		mkdirSync(stackDir, { recursive: true });
-		composeFile = join(stackDir, 'docker-compose.yml');
+		composeFile = join(stackDir, 'compose.yaml');
 		await Bun.write(composeFile, composeContent);
+	}
+
+	// Rewrite relative volume paths for host path translation (in memory only, not saved to disk)
+	// This is needed when Dockhand runs inside Docker - the Docker daemon on the host
+	// can't see container paths like /app/data/..., so we translate them to host paths
+	// Only do this for local Docker (no dockerHost) - for remote Docker the paths wouldn't make sense
+	let finalComposeContent = composeContent;
+	if (!dockerHost && getHostDataDir()) {
+		const rewriteResult = rewriteComposeVolumePaths(composeContent, stackDir);
+		if (rewriteResult.modified) {
+			finalComposeContent = rewriteResult.content;
+			console.log(`${logPrefix} [HostPath] Translating relative volume paths for Docker host:`);
+			for (const change of rewriteResult.changes) {
+				console.log(`${logPrefix} [HostPath]${change}`);
+			}
+			console.log(`${logPrefix} [HostPath] Translated compose content:`);
+			console.log(`${logPrefix} [HostPath] ----------------------------------------`);
+			for (const line of finalComposeContent.split('\n')) {
+				console.log(`${logPrefix} [HostPath] ${line}`);
+			}
+			console.log(`${logPrefix} [HostPath] ----------------------------------------`);
+		}
 	}
 
 	// Build spawn environment:
@@ -785,8 +848,58 @@ async function executeLocalCompose(
 		Object.assign(spawnEnv, secretVars);
 	}
 
+	// Handle TLS certificates for remote Docker connections
+	// Docker CLI requires file paths, so we write certs to a temp directory
+	let tlsCertDir: string | undefined;
+
+	if (tlsConfig && (tlsConfig.ca || tlsConfig.cert)) {
+		// Create temp directory for TLS certs in DATA_DIR (guaranteed writable in Docker)
+		// Use resolve() to get absolute path - docker compose runs from a different working dir
+		const dataDir = resolve(process.env.DATA_DIR || './data');
+		tlsCertDir = join(dataDir, 'tmp', `tls-${stackName}-${Date.now()}`);
+		mkdirSync(tlsCertDir, { recursive: true });
+
+		// Track for cleanup on unexpected process exit
+		activeTlsDirs.add(tlsCertDir);
+
+		// Write certs to files (docker-compose expects specific filenames)
+		if (tlsConfig.ca) {
+			const cleanedCa = cleanPem(tlsConfig.ca);
+			if (cleanedCa) await Bun.write(join(tlsCertDir, 'ca.pem'), cleanedCa);
+		}
+		if (tlsConfig.cert) {
+			const cleanedCert = cleanPem(tlsConfig.cert);
+			if (cleanedCert) await Bun.write(join(tlsCertDir, 'cert.pem'), cleanedCert);
+		}
+		if (tlsConfig.key) {
+			const cleanedKey = cleanPem(tlsConfig.key);
+			if (cleanedKey) await Bun.write(join(tlsCertDir, 'key.pem'), cleanedKey);
+		}
+
+		// Set Docker TLS environment variables
+		spawnEnv.DOCKER_TLS = '1';
+		spawnEnv.DOCKER_CERT_PATH = tlsCertDir;
+		spawnEnv.DOCKER_TLS_VERIFY = tlsConfig.skipVerify ? '0' : '1';
+
+		console.log(`${logPrefix} TLS enabled: DOCKER_CERT_PATH=${tlsCertDir}, DOCKER_TLS_VERIFY=${spawnEnv.DOCKER_TLS_VERIFY}`);
+	}
+
 	// Build command based on operation
-	const args = ['docker', 'compose', '-p', stackName, '-f', composeFile];
+	// If we have modified compose content (host path translation), use stdin instead of file
+	const useStdin = finalComposeContent !== composeContent;
+	const args = ['docker', 'compose', '-p', stackName, '-f', useStdin ? '-' : composeFile];
+
+	// Add --env-file flag if env file exists
+	// This makes Docker Compose load the .env file automatically (like Portainer)
+	// Uses custom path if provided, otherwise defaults to .env in stack directory
+	const envFilePath = customEnvPath || join(stackDir, '.env');
+	if (existsSync(envFilePath)) {
+		args.push('--env-file', envFilePath);
+	}
+
+	if (useStdin) {
+		console.log(`${logPrefix} [HostPath] Using stdin for compose content (paths translated)`);
+	}
 
 	switch (operation) {
 		case 'up':
@@ -836,9 +949,16 @@ async function executeLocalCompose(
 		const proc = Bun.spawn(args, {
 			cwd: stackDir,
 			env: spawnEnv,
+			stdin: useStdin ? 'pipe' : 'inherit',
 			stdout: 'pipe',
 			stderr: 'pipe'
 		});
+
+		// If using stdin (host path translation), write the modified compose content
+		if (useStdin && proc.stdin) {
+			proc.stdin.write(finalComposeContent);
+			proc.stdin.end();
+		}
 
 		// Set up timeout with SIGTERM -> SIGKILL escalation
 		let timedOut = false;
@@ -909,6 +1029,17 @@ async function executeLocalCompose(
 			output: '',
 			error: `Failed to run docker compose ${operation}: ${err.message}`
 		};
+	} finally {
+		// Cleanup TLS temp directory (always runs, even on exception)
+		if (tlsCertDir) {
+			activeTlsDirs.delete(tlsCertDir);
+			try {
+				rmSync(tlsCertDir, { recursive: true, force: true });
+				console.log(`${logPrefix} Cleaned up TLS temp directory: ${tlsCertDir}`);
+			} catch {
+				// Ignore cleanup errors
+			}
+		}
 	}
 }
 
@@ -1063,7 +1194,7 @@ async function executeComposeCommand(
 	envVars?: Record<string, string>,
 	secretVars?: Record<string, string>
 ): Promise<StackOperationResult> {
-	const { stackName, envId, forceRecreate, removeVolumes, stackFiles, workingDir, composePath } = options;
+	const { stackName, envId, forceRecreate, removeVolumes, stackFiles, workingDir, composePath, envPath } = options;
 
 	// Get environment configuration
 	const env = envId ? await getEnvironment(envId) : null;
@@ -1074,14 +1205,16 @@ async function executeComposeCommand(
 			operation,
 			stackName,
 			composeContent,
-			undefined,
+			undefined,    // dockerHost
+			undefined,    // tlsConfig
 			envVars,
 			secretVars,
 			forceRecreate,
 			removeVolumes,
 			envId,
 			workingDir,
-			composePath
+			composePath,
+			envPath
 		);
 	}
 
@@ -1103,18 +1236,29 @@ async function executeComposeCommand(
 		case 'direct': {
 			const port = env.port || 2375;
 			const dockerHost = `tcp://${env.host}:${port}`;
+
+			// Build TLS config if using HTTPS
+			const tlsConfig: TlsConfig | undefined = env.protocol === 'https' ? {
+				ca: env.tlsCa || undefined,
+				cert: env.tlsCert || undefined,
+				key: env.tlsKey || undefined,
+				skipVerify: env.tlsSkipVerify ?? false
+			} : undefined;
+
 			return executeLocalCompose(
 				operation,
 				stackName,
 				composeContent,
 				dockerHost,
+				tlsConfig,
 				envVars,
 				secretVars,
 				forceRecreate,
 				removeVolumes,
 				envId,
 				workingDir,
-				composePath
+				composePath,
+				envPath
 			);
 		}
 
@@ -1124,14 +1268,16 @@ async function executeComposeCommand(
 				operation,
 				stackName,
 				composeContent,
-				undefined,
+				undefined,    // dockerHost
+				undefined,    // tlsConfig
 				envVars,
 				secretVars,
 				forceRecreate,
 				removeVolumes,
 				envId,
 				workingDir,
-				composePath
+				composePath,
+				envPath
 			);
 	}
 }
@@ -1437,7 +1583,8 @@ async function requireComposeFile(
 		envVars,
 		secretVars,
 		stackDir: composeResult.stackDir,
-		composePath: composeResult.composePath
+		composePath: composeResult.composePath ?? undefined,
+		envPath: envFilePath ?? undefined
 	};
 }
 
@@ -1458,7 +1605,7 @@ export async function startStack(
 
 	return executeComposeCommand(
 		'up',
-		{ stackName, envId, workingDir: result.stackDir, composePath: result.composePath },
+		{ stackName, envId, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath },
 		result.content!,
 		result.envVars,
 		result.secretVars
@@ -1482,7 +1629,7 @@ export async function stopStack(
 
 	return executeComposeCommand(
 		'stop',
-		{ stackName, envId, workingDir: result.stackDir, composePath: result.composePath },
+		{ stackName, envId, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath },
 		result.content!,
 		result.envVars,
 		result.secretVars
@@ -1506,7 +1653,7 @@ export async function restartStack(
 
 	return executeComposeCommand(
 		'restart',
-		{ stackName, envId, workingDir: result.stackDir, composePath: result.composePath },
+		{ stackName, envId, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath },
 		result.content!,
 		result.envVars,
 		result.secretVars
@@ -1531,7 +1678,7 @@ export async function downStack(
 
 	return executeComposeCommand(
 		'down',
-		{ stackName, envId, removeVolumes, workingDir: result.stackDir, composePath: result.composePath },
+		{ stackName, envId, removeVolumes, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath },
 		result.content!,
 		result.envVars,
 		result.secretVars
@@ -1561,7 +1708,8 @@ export async function removeStack(
 					stackName,
 					envId,
 					workingDir: composeResult.stackDir,
-					composePath: composeResult.composePath
+					composePath: composeResult.composePath ?? undefined,
+					envPath: composeResult.envPath ?? undefined
 				},
 				composeResult.content!,
 				envVars,
@@ -1671,7 +1819,7 @@ export async function removeStack(
  * Uses stack locking to prevent concurrent deployments.
  */
 export async function deployStack(options: DeployStackOptions): Promise<StackOperationResult> {
-	const { name, compose, envId, envFileVars, sourceDir, forceRecreate } = options;
+	const { name, compose, envId, envFileVars, sourceDir, forceRecreate, composePath, envPath, composeFileName, envFileName } = options;
 	const logPrefix = `[Stack:${name}]`;
 
 	console.log(`${logPrefix} ========================================`);
@@ -1680,6 +1828,10 @@ export async function deployStack(options: DeployStackOptions): Promise<StackOpe
 	console.log(`${logPrefix} Environment ID:`, envId ?? '(none - local)');
 	console.log(`${logPrefix} Force recreate:`, forceRecreate ?? false);
 	console.log(`${logPrefix} Source directory:`, sourceDir ?? '(none)');
+	console.log(`${logPrefix} Custom compose path:`, composePath ?? '(none)');
+	console.log(`${logPrefix} Custom env path:`, envPath ?? '(none)');
+	console.log(`${logPrefix} Compose filename:`, composeFileName ?? '(none)');
+	console.log(`${logPrefix} Env filename:`, envFileName ?? '(none)');
 	console.log(`${logPrefix} Env file vars provided:`, envFileVars ? Object.keys(envFileVars).length : 0);
 	if (envFileVars && Object.keys(envFileVars).length > 0) {
 		console.log(`${logPrefix} Env file var keys:`, Object.keys(envFileVars).join(', '));
@@ -1698,31 +1850,56 @@ export async function deployStack(options: DeployStackOptions): Promise<StackOpe
 	}
 
 	return withStackLock(name, async () => {
-		const stackDir = await getStackDir(name, envId);
-
-		// Read all files from source directory if provided (for Hawser deployments)
+		// Determine working directory: use custom composePath directory if provided,
+		// otherwise fall back to internal stack directory
+		let workingDir: string;
+		let actualComposePath: string | undefined;
+		let actualEnvPath: string | undefined = envPath; // Start with provided envPath (for adopted stacks)
 		let stackFiles: Record<string, string> | undefined;
-		if (sourceDir && existsSync(sourceDir)) {
+
+		if (composePath) {
+			// Adopted/imported stack: use the original compose file location
+			// This ensures relative paths in the compose file resolve correctly
+			// Files are NOT copied - we use them in-place at their original location
+			workingDir = dirname(composePath);
+			actualComposePath = composePath;
+			console.log(`${logPrefix} Using custom compose path, workingDir:`, workingDir);
+		} else if (sourceDir && existsSync(sourceDir)) {
+			// Git stack: copy entire source directory to internal stack directory
+			workingDir = await getStackDir(name, envId);
+
+			// Set actualComposePath using the provided compose filename from git stack config
+			if (composeFileName) {
+				actualComposePath = join(workingDir, composeFileName);
+				console.log(`${logPrefix} Using compose filename from git config:`, composeFileName);
+				console.log(`${logPrefix} Actual compose path will be:`, actualComposePath);
+			}
+
+			// Set actualEnvPath using the provided env filename from git stack config
+			// Only if envFileName is provided (env file is optional for git stacks)
+			if (envFileName) {
+				actualEnvPath = join(workingDir, envFileName);
+				console.log(`${logPrefix} Using env filename from git config:`, envFileName);
+				console.log(`${logPrefix} Actual env path will be:`, actualEnvPath);
+			}
+
+			// Read all files for Hawser deployments
 			stackFiles = await readDirFilesAsMap(sourceDir);
 			console.log(`${logPrefix} Read ${Object.keys(stackFiles).length} files from source directory`);
 			console.log(`${logPrefix} Files:`, Object.keys(stackFiles).join(', '));
-		}
 
-		// Handle stack directory setup
-		if (sourceDir && existsSync(sourceDir)) {
-			// Copy entire source directory to stack directory (for git stacks)
+			// Copy source to stack directory
 			console.log(`${logPrefix} Copying source directory to stack directory...`);
-			if (existsSync(stackDir)) {
-				rmSync(stackDir, { recursive: true, force: true });
+			if (existsSync(workingDir)) {
+				rmSync(workingDir, { recursive: true, force: true });
 			}
-			cpSync(sourceDir, stackDir, { recursive: true });
-			console.log(`${logPrefix} Copied ${sourceDir} -> ${stackDir}`);
+			cpSync(sourceDir, workingDir, { recursive: true });
+			console.log(`${logPrefix} Copied ${sourceDir} -> ${workingDir}`);
 		} else {
-			// Traditional behavior: create directory and write compose file only
-			mkdirSync(stackDir, { recursive: true });
-			const composeFile = join(stackDir, 'docker-compose.yml');
-			await Bun.write(composeFile, compose);
-			console.log(`${logPrefix} Compose file written to:`, composeFile);
+			// Internal stack: compose file should already exist (written by saveStackComposeFile)
+			// Just determine the working directory
+			workingDir = await getStackDir(name, envId);
+			console.log(`${logPrefix} Using internal stack directory:`, workingDir);
 		}
 
 		console.log(`${logPrefix} Compose content length:`, compose.length, 'chars');
@@ -1746,7 +1923,20 @@ export async function deployStack(options: DeployStackOptions): Promise<StackOpe
 		}
 
 		console.log(`${logPrefix} Calling executeComposeCommand...`);
-		const result = await executeComposeCommand('up', { stackName: name, envId, forceRecreate, stackFiles }, compose, envVars);
+		const result = await executeComposeCommand(
+			'up',
+			{
+				stackName: name,
+				envId,
+				forceRecreate,
+				stackFiles,
+				workingDir,
+				composePath: actualComposePath,
+				envPath: actualEnvPath
+			},
+			compose,
+			envVars
+		);
 		console.log(`${logPrefix} ========================================`);
 		console.log(`${logPrefix} DEPLOY STACK RESULT`);
 		console.log(`${logPrefix} ========================================`);
@@ -1779,7 +1969,7 @@ export async function pullStackImages(
 
 	return executeComposeCommand(
 		'pull',
-		{ stackName, envId, workingDir: result.stackDir, composePath: result.composePath },
+		{ stackName, envId, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath },
 		result.content!,
 		result.envVars,
 		result.secretVars

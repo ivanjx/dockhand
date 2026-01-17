@@ -10,7 +10,6 @@
 	import CommandPalette from '$lib/components/CommandPalette.svelte';
 	import WhatsNewModal from '$lib/components/WhatsNewModal.svelte';
 	import { SidebarProvider, SidebarTrigger } from '$lib/components/ui/sidebar';
-	import { startStatsCollection, stopStatsCollection } from '$lib/stores/stats';
 	import { connectSSE, disconnectSSE } from '$lib/stores/events';
 	import { currentEnvironment, environments } from '$lib/stores/environment';
 	import { licenseStore, daysUntilExpiry } from '$lib/stores/license';
@@ -70,9 +69,6 @@
 		// Initialize grid preferences
 		gridPreferencesStore.init();
 
-		// Start global stats collection for CPU/Memory graphs
-		startStatsCollection();
-
 		// Connect to SSE for real-time Docker events (global)
 		connectSSE(envId);
 
@@ -86,7 +82,6 @@
 		checkWhatsNew();
 
 		return () => {
-			stopStatsCollection();
 			disconnectSSE();
 		};
 	});

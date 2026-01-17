@@ -79,7 +79,7 @@
 	// Form state - stack deployment config
 	let formStackName = $state('');
 	let formStackNameUserModified = $state(false);
-	let formComposePath = $state('docker-compose.yml');
+	let formComposePath = $state('compose.yaml');
 	let formAutoUpdate = $state(false);
 	let formAutoUpdateCron = $state('0 3 * * *');
 	let formWebhookEnabled = $state(false);
@@ -290,7 +290,7 @@
 			formNewRepoCredentialId = null;
 			formStackName = '';
 			formStackNameUserModified = false;
-			formComposePath = 'docker-compose.yml';
+			formComposePath = 'compose.yaml';
 			formEnvFilePath = null;
 			formAutoUpdate = false;
 			formAutoUpdateCron = '0 3 * * *';
@@ -344,7 +344,7 @@
 		try {
 			let body: any = {
 				stackName: formStackName,
-				composePath: formComposePath || 'docker-compose.yml',
+				composePath: formComposePath || 'compose.yaml',
 				envFilePath: formEnvFilePath,
 				environmentId: environmentId,
 				autoUpdate: formAutoUpdate,
@@ -661,7 +661,7 @@
 
 			<div class="space-y-2">
 				<Label for="compose-path">Compose file path</Label>
-				<Input id="compose-path" bind:value={formComposePath} placeholder="docker-compose.yml" />
+				<Input id="compose-path" bind:value={formComposePath} placeholder="compose.yaml" />
 				<p class="text-xs text-muted-foreground">Path to the compose file within the repository</p>
 			</div>
 

@@ -555,7 +555,7 @@
 					<div class="text-center py-8 text-muted-foreground">
 						<FolderOpen class="w-12 h-12 mx-auto mb-3 opacity-50" />
 						<p class="text-sm">No Docker Compose files found in the configured paths.</p>
-						<p class="text-xs mt-1">Make sure your paths contain docker-compose.yml, compose.yml, or similar files.</p>
+						<p class="text-xs mt-1">Make sure your paths contain compose.yaml, compose.yml, or similar files.</p>
 					</div>
 				{/if}
 

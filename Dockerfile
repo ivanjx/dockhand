@@ -49,6 +49,7 @@ RUN APKO_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") 
     "    - tzdata" \
     "    - docker-cli" \
     "    - docker-compose" \
+    "    - docker-cli-buildx" \
     "    - sqlite" \
     "    - git" \
     "    - openssh-client" \
@@ -142,6 +143,7 @@ ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     PGID=1001
 
 # Create docker compose plugin symlink (we use `docker compose` syntax, Wolfi has standalone binary)
+# Note: docker-cli-buildx package already creates the buildx symlink
 RUN mkdir -p /usr/libexec/docker/cli-plugins \
     && ln -s /usr/bin/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
 

@@ -33,7 +33,7 @@ import {
 } from '../../docker';
 import { sendEventNotification } from '../../notifications';
 import { getScannerSettings, scanImage, type VulnerabilitySeverity } from '../../scanner';
-import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isDockhandContainer } from './update-utils';
+import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer } from './update-utils';
 
 interface UpdateInfo {
 	containerId: string;
@@ -224,9 +224,13 @@ export async function runEnvUpdateCheckJob(
 			const blockedContainers: { name: string; reason: string; scannerResults?: { scanner: string; critical: number; high: number; medium: number; low: number }[] }[] = [];
 
 			for (const update of updatesAvailable) {
-				// Skip Dockhand container - cannot update itself
-				if (isDockhandContainer(update.imageName)) {
-					await log(`\n[${update.containerName}] Skipping - cannot auto-update Dockhand itself`);
+				// Skip system containers (Dockhand/Hawser) - cannot update themselves
+				const systemContainerType = isSystemContainer(update.imageName);
+				if (systemContainerType) {
+					const reason = systemContainerType === 'dockhand'
+						? 'cannot auto-update Dockhand itself'
+						: 'cannot auto-update Hawser agent';
+					await log(`\n[${update.containerName}] Skipping - ${reason}`);
 					continue;
 				}
 

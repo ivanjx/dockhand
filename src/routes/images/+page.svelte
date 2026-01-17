@@ -1,3 +1,7 @@
+<svelte:head>
+	<title>Images - Dockhand</title>
+</svelte:head>
+
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { toast } from 'svelte-sonner';
@@ -65,6 +69,10 @@
 	let images = $state<ImageInfo[]>([]);
 	let loading = $state(true);
 	let envId = $state<number | null>(null);
+
+	// Polling interval - module scope for cleanup in onDestroy
+	let refreshInterval: ReturnType<typeof setInterval> | null = null;
+	let unsubscribeDockerEvent: (() => void) | null = null;
 
 	// Registry state
 	let registries = $state<Registry[]>([]);
@@ -604,22 +612,33 @@
 		document.addEventListener('visibilitychange', handleVisibilityChange);
 		document.addEventListener('resume', handleVisibilityChange);
 
-		const unsubscribe = onDockerEvent((event) => {
+		unsubscribeDockerEvent = onDockerEvent((event) => {
 			if (envId && isImageListChange(event)) {
 				fetchImages();
 			}
 		});
 
-		const interval = setInterval(() => {
+		refreshInterval = setInterval(() => {
 			if (envId) fetchImages();
 		}, 30000);
-		return () => {
-			clearInterval(interval);
-			unsubscribe();
-		};
+
+		// Note: In Svelte 5, cleanup must be in onDestroy, not returned from onMount
 	});
 
+	// Cleanup on component destroy
 	onDestroy(() => {
+		// Clear polling interval
+		if (refreshInterval) {
+			clearInterval(refreshInterval);
+			refreshInterval = null;
+		}
+
+		// Unsubscribe from Docker events
+		if (unsubscribeDockerEvent) {
+			unsubscribeDockerEvent();
+			unsubscribeDockerEvent = null;
+		}
+
 		document.removeEventListener('visibilitychange', handleVisibilityChange);
 		document.removeEventListener('resume', handleVisibilityChange);
 		pendingTimeouts.forEach(id => clearTimeout(id));
@@ -628,7 +647,7 @@
 </script>
 
 <div class="flex-1 min-h-0 flex flex-col gap-3 overflow-hidden">
-	<div class="shrink-0 flex flex-wrap justify-between items-center gap-3">
+	<div class="shrink-0 flex flex-wrap justify-between items-center gap-3 min-h-8">
 		<PageHeader
 			icon={Images}
 			title="Images"
@@ -655,6 +674,7 @@
 				position="left"
 				onConfirm={pruneImages}
 				onOpenChange={(open) => confirmPrune = open}
+				unstyled
 			>
 				{#snippet children({ open })}
 					<span
@@ -682,6 +702,7 @@
 				position="left"
 				onConfirm={pruneUnusedImages}
 				onOpenChange={(open) => confirmPruneUnused = open}
+				unstyled
 			>
 				{#snippet children({ open })}
 					<span
@@ -706,13 +727,14 @@
 		</div>
 	</div>
 
-	<!-- Selection bar -->
-	{#if selectedImages.size > 0}
-		<div class="flex items-center gap-2 text-xs text-muted-foreground">
+	<!-- Selection bar - always reserve space to prevent layout shift -->
+	<div class="h-4 shrink-0">
+		{#if selectedImages.size > 0}
+			<div class="flex items-center gap-1 text-xs text-muted-foreground h-full">
 			<span>{selectedInFilter.length} selected</span>
 			<button
 				type="button"
-				class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-border shadow-sm hover:border-foreground/30 hover:shadow transition-all"
+				class="inline-flex items-center gap-1 px-1.5 py-0 rounded border border-border hover:border-foreground/30 hover:shadow transition-all"
 				onclick={selectNone}
 			>
 				Clear
@@ -720,7 +742,7 @@
 			{#if $canAccess('images', 'remove')}
 			<button
 				type="button"
-				class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-border shadow-sm hover:text-destructive hover:border-destructive/40 hover:shadow transition-all disabled:opacity-50 cursor-pointer"
+				class="inline-flex items-center gap-1 px-1.5 py-0 rounded border border-border hover:text-destructive hover:border-destructive/40 hover:shadow transition-all disabled:opacity-50 cursor-pointer"
 				onclick={bulkRemove}
 				disabled={selectedInFilter.length === 0}
 			>
@@ -728,8 +750,9 @@
 				Delete
 			</button>
 			{/if}
-		</div>
-	{/if}
+			</div>
+		{/if}
+	</div>
 
 	{#if !loading && ($environments.length === 0 || !$currentEnvironment)}
 		<NoEnvironment />
@@ -1027,7 +1050,7 @@
 											itemType="image"
 											itemName={tagInfo.fullRef}
 											title="Remove"
-											onConfirm={() => removeImage(tagInfo.fullRef, tagInfo.fullRef)}
+											onConfirm={() => removeImage(tagInfo.imageId, tagInfo.fullRef)}
 											onOpenChange={(open) => confirmDeleteId = open ? tagInfo.fullRef : null}
 										>
 											{#snippet children({ open })}

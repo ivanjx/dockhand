@@ -47,7 +47,7 @@ export const GET: RequestHandler = async ({ url }) => {
 
 	return json({
 		stackDir,
-		composePath: `${stackDir}/docker-compose.yml`,
+		composePath: `${stackDir}/compose.yaml`,
 		envPath: `${stackDir}/.env`,
 		source: location ? 'custom' : 'default'
 	});

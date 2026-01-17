@@ -9,6 +9,15 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import AutoUpdateSettings from './AutoUpdateSettings.svelte';
 	import type { VulnerabilityCriteria } from '$lib/components/VulnerabilityCriteriaSelector.svelte';
+	import type { SystemContainerType } from '$lib/types';
+
+	// Detect system containers (must match server-side logic in update-utils.ts)
+	function detectSystemContainer(imageName: string): SystemContainerType | null {
+		const lower = imageName.toLowerCase();
+		if (lower.includes('fnsys/dockhand')) return 'dockhand';
+		if (lower.includes('finsys/hawser') || lower.includes('ghcr.io/finsys/hawser')) return 'hawser';
+		return null;
+	}
 
 	// Protocol options for ports
 	const protocolOptions = [
@@ -1263,6 +1272,7 @@
 			bind:enabled={autoUpdateEnabled}
 			bind:cronExpression={autoUpdateCronExpression}
 			bind:vulnerabilityCriteria={vulnerabilityCriteria}
+			systemContainer={detectSystemContainer(image)}
 		/>
 	</div>
 </div>

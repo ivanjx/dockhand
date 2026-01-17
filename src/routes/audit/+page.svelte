@@ -581,6 +581,9 @@
 		}
 	}
 
+	// Resize handler - stored at module scope for cleanup in onDestroy
+	let resizeHandler: (() => void) | null = null;
+
 	onMount(async () => {
 		// Load saved filters from localStorage first
 		loadFiltersFromStorage();
@@ -608,23 +611,28 @@
 		initialLoadDone = true;
 
 		// Update container height on resize
-		const updateHeight = () => {
+		resizeHandler = () => {
 			if (scrollContainer) {
 				containerHeight = scrollContainer.clientHeight;
 			}
 		};
 
-		updateHeight();
-		window.addEventListener('resize', updateHeight);
+		resizeHandler();
+		window.addEventListener('resize', resizeHandler);
+		// Note: In Svelte 5, cleanup must be in onDestroy, not returned from onMount
+	});
 
-		return () => {
-			window.removeEventListener('resize', updateHeight);
-			// Disconnect SSE when component unmounts
-			disconnectAuditSSE();
-			if (unsubscribeSSE) {
-				unsubscribeSSE();
-			}
-		};
+	onDestroy(() => {
+		if (resizeHandler) {
+			window.removeEventListener('resize', resizeHandler);
+			resizeHandler = null;
+		}
+		// Disconnect SSE when component unmounts
+		disconnectAuditSSE();
+		if (unsubscribeSSE) {
+			unsubscribeSSE();
+			unsubscribeSSE = null;
+		}
 	});
 
 	// Refetch when license changes (only after initial mount)

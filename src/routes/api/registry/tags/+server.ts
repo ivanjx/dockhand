@@ -1,6 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getRegistry } from '$lib/server/db';
+import { getRegistryAuth } from '$lib/server/docker';
 
 interface TagInfo {
 	name: string;
@@ -72,21 +73,15 @@ async function fetchDockerHubTags(imageName: string, page: number = 1, pageSize:
 }
 
 async function fetchRegistryTags(registry: any, imageName: string): Promise<TagInfo[]> {
-	// Standard V2 registry API
-	let baseUrl = registry.url;
-	if (!baseUrl.endsWith('/')) {
-		baseUrl += '/';
-	}
-
-	const tagsUrl = `${baseUrl}v2/${imageName}/tags/list`;
+	const { baseUrl, authHeader } = await getRegistryAuth(registry, `repository:${imageName}:pull`);
+	const tagsUrl = `${baseUrl}/v2/${imageName}/tags/list`;
 
 	const headers: HeadersInit = {
 		'Accept': 'application/json'
 	};
 
-	if (registry.username && registry.password) {
-		const credentials = Buffer.from(`${registry.username}:${registry.password}`).toString('base64');
-		headers['Authorization'] = `Basic ${credentials}`;
+	if (authHeader) {
+		headers['Authorization'] = authHeader;
 	}
 
 	const response = await fetch(tagsUrl, {

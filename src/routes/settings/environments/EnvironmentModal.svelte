@@ -1002,7 +1002,7 @@
 			}
 
 			// Refresh scanner status after pull
-			await checkScannerImages();
+			await loadScannerVersionsAsync(environment?.id);
 			grypeUpdateStatus = 'up-to-date';
 			setTimeout(() => { grypeUpdateStatus = 'idle'; }, 3000);
 		} catch (error) {
@@ -1043,7 +1043,7 @@
 			}
 
 			// Refresh scanner status after pull
-			await checkScannerImages();
+			await loadScannerVersionsAsync(environment?.id);
 			trivyUpdateStatus = 'up-to-date';
 			setTimeout(() => { trivyUpdateStatus = 'idle'; }, 3000);
 		} catch (error) {

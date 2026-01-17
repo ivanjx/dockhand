@@ -9,8 +9,8 @@ import { readdirSync, existsSync, statSync } from 'node:fs';
 import { join, basename, dirname, resolve } from 'node:path';
 import { getExternalStackPaths, getStackSources, upsertStackSource, type StackSourceType } from './db';
 
-// Compose file patterns to detect (in order of priority)
-const COMPOSE_PATTERNS = ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml'];
+// Compose file patterns to detect (in order of priority - prefer new style first)
+const COMPOSE_PATTERNS = ['compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml'];
 
 // Directories to skip during scanning
 const SKIP_DIRECTORIES = ['.git', 'node_modules', '.docker', '__pycache__', '.venv', 'venv'];

@@ -6,7 +6,8 @@ import {
 	getContainerEventStats,
 	getContainerEvents,
 	getEnvSetting,
-	getEnvUpdateCheckSettings
+	getEnvUpdateCheckSettings,
+	getPendingContainerUpdates
 } from '$lib/server/db';
 import {
 	listContainers,
@@ -136,7 +137,7 @@ async function getEnvironmentStatsProgressive(
 		labels: parseLabels(env.labels),
 		connectionType: (env.connectionType as 'socket' | 'direct' | 'hawser-standard' | 'hawser-edge') || 'socket',
 		online: false,
-		containers: { total: 0, running: 0, stopped: 0, paused: 0, restarting: 0, unhealthy: 0 },
+		containers: { total: 0, running: 0, stopped: 0, paused: 0, restarting: 0, unhealthy: 0, pendingUpdates: 0 },
 		images: { total: 0, totalSize: 0 },
 		volumes: { total: 0, totalSize: 0 },
 		containersSize: 0,
@@ -174,11 +175,12 @@ async function getEnvironmentStatsProgressive(
 		// Get all database stats in parallel for better performance
 		// NOTE: We do NOT block on getDockerInfo() here - slow environments would block all others
 		// Instead, we determine online status from whether listContainers succeeds
-		const [latestMetrics, eventStats, recentEventsResult, metricsHistory] = await Promise.all([
+		const [latestMetrics, eventStats, recentEventsResult, metricsHistory, pendingUpdates] = await Promise.all([
 			getLatestHostMetrics(env.id),
 			getContainerEventStats(env.id),
 			getContainerEvents({ environmentId: env.id, limit: 10 }),
-			getHostMetrics(30, env.id)
+			getHostMetrics(30, env.id),
+			getPendingContainerUpdates(env.id)
 		]);
 
 		if (latestMetrics) {
@@ -194,6 +196,8 @@ async function getEnvironmentStatsProgressive(
 			total: eventStats.total,
 			today: eventStats.today
 		};
+
+		envStats.containers.pendingUpdates = pendingUpdates.length;
 
 		if (recentEventsResult.events.length > 0) {
 			envStats.recentEvents = recentEventsResult.events.map(e => ({
@@ -221,6 +225,7 @@ async function getEnvironmentStatsProgressive(
 			scannerEnabled: envStats.scannerEnabled,
 			updateCheckEnabled: envStats.updateCheckEnabled,
 			updateCheckAutoUpdate: envStats.updateCheckAutoUpdate,
+			containers: { ...envStats.containers },
 			loading: { ...envStats.loading }
 		});
 
@@ -251,6 +256,7 @@ async function getEnvironmentStatsProgressive(
 				envStats.containers.paused = containers.filter((c: any) => c.state === 'paused').length;
 				envStats.containers.restarting = containers.filter((c: any) => c.state === 'restarting').length;
 				envStats.containers.unhealthy = containers.filter((c: any) => c.health === 'unhealthy').length;
+				// Note: pendingUpdates is already set from DB query, preserve it
 				envStats.loading!.containers = false;
 
 				onPartialUpdate({

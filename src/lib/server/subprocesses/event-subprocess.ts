@@ -544,8 +544,9 @@ async function refreshEventCollectors() {
 			}
 		}
 	} catch (error) {
-		console.error('[EventSubprocess] Failed to refresh collectors:', error);
-		send({ type: 'error', message: `Failed to refresh collectors: ${error}` });
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(`[EventSubprocess] Failed to refresh collectors: ${message}`);
+		send({ type: 'error', message: `Failed to refresh collectors: ${message}` });
 	}
 }
 
@@ -614,7 +615,8 @@ async function start(): Promise<void> {
 		currentPollInterval = await getEventPollInterval();
 		console.log(`[EventSubprocess] Initial mode: ${currentMode}, poll interval: ${currentPollInterval}ms`);
 	} catch (error) {
-		console.error('[EventSubprocess] Failed to load settings, using defaults:', error);
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(`[EventSubprocess] Failed to load settings, using defaults: ${message}`);
 	}
 
 	// Start collectors for all environments
