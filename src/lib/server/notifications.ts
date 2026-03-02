@@ -21,6 +21,13 @@ function escapeTelegramMarkdown(text: string): string {
 		.replace(/`/g, '\\`');   // Backtick (code)
 }
 
+/** Drain a response body to release the underlying socket/TLS connection. */
+async function drainResponse(response: Response): Promise<void> {
+	if (!response.bodyUsed) {
+		try { await response.arrayBuffer(); } catch {}
+	}
+}
+
 export interface NotificationPayload {
 	title: string;
 	message: string;
@@ -35,21 +42,47 @@ export interface NotificationResult {
 	error?: string;
 }
 
+// SMTP transporter cache — reuses connections instead of creating a new TLS pool per notification.
+const transporterCache = new Map<string, { transporter: ReturnType<typeof nodemailer.createTransport>; lastUsed: number }>();
+
+function getOrCreateTransporter(config: SmtpConfig): ReturnType<typeof nodemailer.createTransport> {
+	const key = `${config.host}:${config.port}:${config.secure}:${config.username || ''}`;
+	const cached = transporterCache.get(key);
+	if (cached) {
+		cached.lastUsed = Date.now();
+		return cached.transporter;
+	}
+	const transporter = nodemailer.createTransport({
+		host: config.host,
+		port: config.port,
+		secure: config.secure,
+		auth: config.username ? {
+			user: config.username,
+			pass: config.password
+		} : undefined,
+		tls: config.skipTlsVerify ? {
+			rejectUnauthorized: false
+		} : undefined
+	});
+	transporterCache.set(key, { transporter, lastUsed: Date.now() });
+	return transporter;
+}
+
+// Clean up idle transporters every 10 minutes
+setInterval(() => {
+	const now = Date.now();
+	for (const [key, entry] of transporterCache) {
+		if (now - entry.lastUsed > 10 * 60 * 1000) {
+			entry.transporter.close();
+			transporterCache.delete(key);
+		}
+	}
+}, 10 * 60 * 1000);
+
 // Send notification via SMTP
 async function sendSmtpNotification(config: SmtpConfig, payload: NotificationPayload): Promise<NotificationResult> {
 	try {
-		const transporter = nodemailer.createTransport({
-			host: config.host,
-			port: config.port,
-			secure: config.secure,
-			auth: config.username ? {
-				user: config.username,
-				pass: config.password
-			} : undefined,
-			tls: config.skipTlsVerify ? {
-				rejectUnauthorized: false
-			} : undefined
-		});
+		const transporter = getOrCreateTransporter(config);
 
 		const envBadge = payload.environmentName
 			? `<span style="display: inline-block; background: #3b82f6; color: white; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-left: 8px;">${payload.environmentName}</span>`
@@ -172,6 +205,7 @@ async function sendDiscord(appriseUrl: string, payload: NotificationPayload): Pr
 			const text = await response.text().catch(() => '');
 			return { success: false, error: `Discord error ${response.status}: ${text || response.statusText}` };
 		}
+		await drainResponse(response);
 		return { success: true };
 	} catch (error) {
 		return { success: false, error: `Discord connection failed: ${error instanceof Error ? error.message : String(error)}` };
@@ -204,6 +238,7 @@ async function sendSlack(appriseUrl: string, payload: NotificationPayload): Prom
 			const text = await response.text().catch(() => '');
 			return { success: false, error: `Slack error ${response.status}: ${text || response.statusText}` };
 		}
+		await drainResponse(response);
 		return { success: true };
 	} catch (error) {
 		return { success: false, error: `Slack connection failed: ${error instanceof Error ? error.message : String(error)}` };
@@ -211,7 +246,7 @@ async function sendSlack(appriseUrl: string, payload: NotificationPayload): Prom
 }
 
 // Mattermost webhook
-async function sendMattermost(appriseUrl: string, payload: NotificationPayload): Promise<boolean> {
+async function sendMattermost(appriseUrl: string, payload: NotificationPayload): Promise<NotificationResult> {
 	// mmost://[botname@]hostname[:port][/path]/token or mmosts://...
 	const isSecure = appriseUrl.startsWith('mmosts');
 	const protocol = isSecure ? 'https' : 'http';
@@ -230,8 +265,7 @@ async function sendMattermost(appriseUrl: string, payload: NotificationPayload):
 	// The token is the last segment, everything else is hostname[:port][/path]
 	const lastSlashIndex = urlPart.lastIndexOf('/');
 	if (lastSlashIndex === -1) {
-		console.error('[Notifications] Invalid Mattermost URL format. Expected: mmost://[botname@]hostname[:port][/path]/token');
-		return false;
+		return { success: false, error: 'Invalid Mattermost URL format. Expected: mmost://[botname@]hostname[:port][/path]/token' };
 	}
 
 	const token = urlPart.substring(lastSlashIndex + 1);
@@ -249,13 +283,22 @@ async function sendMattermost(appriseUrl: string, payload: NotificationPayload):
 		body.username = username;
 	}
 
-	const response = await fetch(url, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(body)
-	});
+	try {
+		const response = await fetch(url, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(body)
+		});
 
-	return response.ok;
+		if (!response.ok) {
+			const text = await response.text().catch(() => '');
+			return { success: false, error: `Mattermost error ${response.status}: ${text || response.statusText}` };
+		}
+		await drainResponse(response);
+		return { success: true };
+	} catch (error) {
+		return { success: false, error: `Mattermost connection failed: ${error instanceof Error ? error.message : String(error)}` };
+	}
 }
 
 // Telegram
@@ -290,6 +333,7 @@ async function sendTelegram(appriseUrl: string, payload: NotificationPayload): P
 			const errorMsg = errorData.description || response.statusText;
 			return { success: false, error: `Telegram error ${response.status}: ${errorMsg}` };
 		}
+		await drainResponse(response);
 		return { success: true };
 	} catch (error) {
 		return { success: false, error: `Telegram connection failed: ${error instanceof Error ? error.message : String(error)}` };
@@ -328,6 +372,7 @@ async function sendGotify(appriseUrl: string, payload: NotificationPayload): Pro
 			const text = await response.text().catch(() => '');
 			return { success: false, error: `Gotify error ${response.status}: ${text || response.statusText}` };
 		}
+		await drainResponse(response);
 		return { success: true };
 	} catch (error) {
 		return { success: false, error: `Gotify connection failed: ${error instanceof Error ? error.message : String(error)}` };
@@ -394,6 +439,7 @@ async function sendNtfy(appriseUrl: string, payload: NotificationPayload): Promi
 			const text = await response.text().catch(() => '');
 			return { success: false, error: `ntfy error ${response.status}: ${text || response.statusText}` };
 		}
+		await drainResponse(response);
 		return { success: true };
 	} catch (error) {
 		return { success: false, error: `ntfy connection failed: ${error instanceof Error ? error.message : String(error)}` };
@@ -428,6 +474,7 @@ async function sendPushover(appriseUrl: string, payload: NotificationPayload): P
 			const text = await response.text().catch(() => '');
 			return { success: false, error: `Pushover error ${response.status}: ${text || response.statusText}` };
 		}
+		await drainResponse(response);
 		return { success: true };
 	} catch (error) {
 		return { success: false, error: `Pushover connection failed: ${error instanceof Error ? error.message : String(error)}` };
@@ -455,6 +502,7 @@ async function sendGenericWebhook(appriseUrl: string, payload: NotificationPaylo
 			const text = await response.text().catch(() => '');
 			return { success: false, error: `Webhook error ${response.status}: ${text || response.statusText}` };
 		}
+		await drainResponse(response);
 		return { success: true };
 	} catch (error) {
 		return { success: false, error: `Webhook connection failed: ${error instanceof Error ? error.message : String(error)}` };

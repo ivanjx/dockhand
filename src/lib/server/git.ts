@@ -1,5 +1,7 @@
-import { existsSync, mkdirSync, rmSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve, dirname, basename, relative } from 'node:path';
+import { spawn as nodeSpawn, spawnSync } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import {
 	getGitRepository,
 	getGitCredential,
@@ -13,6 +15,26 @@ import {
 	type GitStackWithRepo
 } from './db';
 import { deployStack, getStackDir } from './stacks';
+
+/**
+ * Collect stdout, stderr and exit code from a spawned process.
+ */
+function collectProcess(proc: ChildProcess): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+	return new Promise((resolve, reject) => {
+		const stdoutChunks: Buffer[] = [];
+		const stderrChunks: Buffer[] = [];
+		proc.stdout?.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
+		proc.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
+		proc.on('error', reject);
+		proc.on('close', (code) => {
+			resolve({
+				exitCode: code ?? 1,
+				stdout: Buffer.concat(stdoutChunks).toString(),
+				stderr: Buffer.concat(stderrChunks).toString()
+			});
+		});
+	});
+}
 
 // Directory for storing cloned repositories
 const dataDir = process.env.DATA_DIR || './data';
@@ -79,7 +101,7 @@ async function ensurePasswdEntry(env: GitEnv): Promise<void> {
 	if (uid === undefined || uid === 0) return; // root or not available
 
 	try {
-		const passwd = await Bun.file('/etc/passwd').text();
+		const passwd = readFileSync('/etc/passwd', 'utf-8');
 		const uidStr = `:${uid}:`;
 		if (passwd.split('\n').some(line => {
 			const parts = line.split(':');
@@ -100,17 +122,17 @@ async function ensurePasswdEntry(env: GitEnv): Promise<void> {
 	// Create temp passwd/group with the missing entry
 	try {
 		const gid = process.getgid?.() ?? uid;
-		const passwd = await Bun.file('/etc/passwd').text();
-		const group = await Bun.file('/etc/group').text();
+		const passwd = readFileSync('/etc/passwd', 'utf-8');
+		const group = readFileSync('/etc/group', 'utf-8');
 
 		const passwdEntry = `dockhand:x:${uid}:${gid}:Dockhand:/home/dockhand:/bin/sh`;
-		await Bun.write(TMP_PASSWD, passwd.trimEnd() + '\n' + passwdEntry + '\n');
+		writeFileSync(TMP_PASSWD, passwd.trimEnd() + '\n' + passwdEntry + '\n');
 
 		const gidExists = group.split('\n').some(line => line.split(':')[2] === String(gid));
 		if (gidExists) {
-			await Bun.write(TMP_GROUP, group);
+			writeFileSync(TMP_GROUP, group);
 		} else {
-			await Bun.write(TMP_GROUP, group.trimEnd() + '\n' + `dockhand:x:${gid}:\n`);
+			writeFileSync(TMP_GROUP, group.trimEnd() + '\n' + `dockhand:x:${gid}:\n`);
 		}
 
 		_nssWrapperNeeded = true;
@@ -135,8 +157,10 @@ async function buildGitEnv(credential: GitCredential | null): Promise<GitEnv> {
 	await ensurePasswdEntry(env);
 
 	if (credential?.authType === 'ssh' && credential.sshPrivateKey) {
-		// Create a temporary SSH key file (use absolute path so SSH can find it)
-		const sshKeyPath = resolve(join(GIT_REPOS_DIR, `.ssh-key-${credential.id}`));
+		// Write SSH key to /tmp instead of data volume — some filesystems (TrueNAS ZFS,
+		// NFS, CIFS) silently ignore chmod, leaving the key group-readable (e.g. 0670).
+		// SSH refuses keys that are accessible by others. /tmp is always a proper filesystem.
+		const sshKeyPath = `/tmp/.ssh-key-${credential.id}`;
 
 		// Ensure SSH key ends with a newline (newer SSH versions are strict about this)
 		let keyContent = credential.sshPrivateKey;
@@ -144,18 +168,19 @@ async function buildGitEnv(credential: GitCredential | null): Promise<GitEnv> {
 			keyContent += '\n';
 		}
 
-		await Bun.write(sshKeyPath, keyContent);
+		writeFileSync(sshKeyPath, keyContent);
 		// Ensure SSH key has correct permissions (0600 = owner read/write only)
-		// Bun.write's mode option doesn't always work reliably, so use chmodSync
+		// writeFileSync's mode option doesn't always work reliably, so use chmodSync
 		chmodSync(sshKeyPath, 0o600);
 
 		// If key has a passphrase, decrypt it in-place so SSH can use it non-interactively
 		if (credential.sshPassphrase) {
-			const result = Bun.spawnSync([
-				'ssh-keygen', '-p', '-f', sshKeyPath,
-				'-P', credential.sshPassphrase, '-N', ''
-			], { env, stderr: 'pipe' });
-			if (result.exitCode !== 0) {
+			const result = spawnSync(
+				'ssh-keygen',
+				['-p', '-f', sshKeyPath, '-P', credential.sshPassphrase, '-N', ''],
+				{ env, stdio: ['pipe', 'pipe', 'pipe'] }
+			);
+			if (result.status !== 0) {
 				const stderr = result.stderr.toString().trim();
 				console.warn(`[git] Failed to decrypt SSH key: ${stderr}`);
 			}
@@ -173,7 +198,7 @@ async function buildGitEnv(credential: GitCredential | null): Promise<GitEnv> {
 
 function cleanupSshKey(credential: GitCredential | null): void {
 	if (credential?.authType === 'ssh') {
-		const sshKeyPath = resolve(join(GIT_REPOS_DIR, `.ssh-key-${credential.id}`));
+		const sshKeyPath = `/tmp/.ssh-key-${credential.id}`;
 		try {
 			if (existsSync(sshKeyPath)) {
 				rmSync(sshKeyPath);
@@ -207,21 +232,15 @@ function buildRepoUrl(url: string, credential: GitCredential | null): string {
 
 async function execGit(args: string[], cwd: string, env: GitEnv): Promise<{ stdout: string; stderr: string; code: number }> {
 	try {
-		const proc = Bun.spawn(['git', ...args], {
+		const proc = nodeSpawn('git', args, {
 			cwd,
 			env,
-			stdout: 'pipe',
-			stderr: 'pipe'
+			stdio: ['pipe', 'pipe', 'pipe']
 		});
 
-		const [stdout, stderr] = await Promise.all([
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text()
-		]);
+		const result = await collectProcess(proc);
 
-		const code = await proc.exited;
-
-		return { stdout: stdout.trim(), stderr: stderr.trim(), code };
+		return { stdout: result.stdout.trim(), stderr: result.stderr.trim(), code: result.exitCode };
 	} catch (err: any) {
 		return { stdout: '', stderr: err.message, code: 1 };
 	}
@@ -350,8 +369,6 @@ async function testRepositoryConnection(options: {
 			env
 		);
 
-		cleanupSshKey(credential);
-
 		if (result.code !== 0) {
 			console.error('[Git] Connection test failed:', result.stderr);
 			return { success: false, error: cleanGitError(result.stderr) };
@@ -366,7 +383,6 @@ async function testRepositoryConnection(options: {
 				process.cwd(),
 				env
 			);
-			cleanupSshKey(credential);
 
 			if (allBranchesResult.code !== 0) {
 				return { success: false, error: cleanGitError(allBranchesResult.stderr) };
@@ -400,8 +416,9 @@ async function testRepositoryConnection(options: {
 			lastCommit
 		};
 	} catch (error: any) {
-		cleanupSshKey(credential);
 		return { success: false, error: error.message };
+	} finally {
+		cleanupSshKey(credential);
 	}
 }
 
@@ -519,7 +536,7 @@ export async function syncRepository(repoId: number): Promise<SyncResult> {
 			throw new Error(`Compose file not found: ${repo.composePath}`);
 		}
 
-		const composeContent = await Bun.file(composePath).text();
+		const composeContent = readFileSync(composePath, 'utf-8');
 
 		// Update repository status
 		await updateGitRepository(repoId, {
@@ -798,7 +815,7 @@ export async function syncGitStack(stackId: number): Promise<SyncResult> {
 			throw new Error(`Compose file not found: ${gitStack.composePath}`);
 		}
 
-		const composeContent = await Bun.file(composePath).text();
+		const composeContent = readFileSync(composePath, 'utf-8');
 		console.log(`${logPrefix} Compose content length:`, composeContent.length, 'chars');
 		console.log(`${logPrefix} Compose content:`);
 		console.log(composeContent);
@@ -819,7 +836,7 @@ export async function syncGitStack(stackId: number): Promise<SyncResult> {
 			if (existsSync(envFilePath)) {
 				try {
 					console.log(`${logPrefix} Reading env file...`);
-					envFileContent = await Bun.file(envFilePath).text();
+					envFileContent = readFileSync(envFilePath, 'utf-8');
 					envFileVars = parseEnvFileContent(envFileContent, gitStack.stackName);
 					console.log(`${logPrefix} Env file parsed, vars count:`, Object.keys(envFileVars).length);
 
@@ -1142,7 +1159,7 @@ export async function deployGitStackWithProgress(
 			throw new Error(`Compose file not found: ${gitStack.composePath}`);
 		}
 
-		const composeContent = await Bun.file(composePath).text();
+		const composeContent = readFileSync(composePath, 'utf-8');
 
 		// Determine the compose directory (for copying all files)
 		const composeDir = dirname(composePath);
@@ -1153,7 +1170,7 @@ export async function deployGitStackWithProgress(
 			const envFilePath = join(repoPath, gitStack.envFilePath);
 			if (existsSync(envFilePath)) {
 				try {
-					const envContent = await Bun.file(envFilePath).text();
+					const envContent = readFileSync(envFilePath, 'utf-8');
 					envFileVars = parseEnvFileContent(envContent, gitStack.stackName);
 				} catch (err) {
 					// Log but don't fail - env file is optional
@@ -1251,12 +1268,11 @@ export async function listGitStackEnvFiles(stackId: number): Promise<{ files: st
 		const maxDepth = 3;
 
 		// Use find to locate all .env* files
-		const proc = Bun.spawn(['find', repoPath, '-maxdepth', String(maxDepth), '-type', 'f', '-name', '.env*'], {
-			stdout: 'pipe',
-			stderr: 'pipe'
+		const proc = nodeSpawn('find', [repoPath, '-maxdepth', String(maxDepth), '-type', 'f', '-name', '.env*'], {
+			stdio: ['pipe', 'pipe', 'pipe']
 		});
-		const output = await new Response(proc.stdout).text();
-		await proc.exited;
+		const findResult = await collectProcess(proc);
+		const output = findResult.stdout;
 
 		const files = output.trim().split('\n').filter(f => f);
 		const envFiles: string[] = [];
@@ -1372,7 +1388,7 @@ export async function readGitStackEnvFile(
 	}
 
 	try {
-		const content = await Bun.file(fullPath).text();
+		const content = readFileSync(fullPath, 'utf-8');
 		const vars = parseEnvFileContent(content);
 		return { vars };
 	} catch (error: any) {
@@ -1426,17 +1442,18 @@ export async function previewRepoEnvFiles(options: PreviewEnvOptions): Promise<P
 		const authenticatedUrl = buildRepoUrl(repoUrl, credential as GitCredential | null);
 
 		// Clone with depth 1 (shallow clone for speed)
-		const cloneProc = Bun.spawn(
-			['git', 'clone', '--depth', '1', '--branch', branch, '--single-branch', authenticatedUrl, tempDir],
+		const cloneProc = nodeSpawn(
+			'git',
+			['clone', '--depth', '1', '--branch', branch, '--single-branch', authenticatedUrl, tempDir],
 			{
-				stdout: 'pipe',
-				stderr: 'pipe',
+				stdio: ['pipe', 'pipe', 'pipe'],
 				env
 			}
 		);
 
-		const cloneStderr = await new Response(cloneProc.stderr).text();
-		const cloneExitCode = await cloneProc.exited;
+		const cloneResult = await collectProcess(cloneProc);
+		const cloneStderr = cloneResult.stderr;
+		const cloneExitCode = cloneResult.exitCode;
 
 		if (cloneExitCode !== 0) {
 			console.error(`${logPrefix} Clone failed:`, cloneStderr);
@@ -1455,7 +1472,7 @@ export async function previewRepoEnvFiles(options: PreviewEnvOptions): Promise<P
 		// Read base .env file if it exists
 		if (existsSync(baseEnvPath)) {
 			console.log(`${logPrefix} Reading .env from: ${baseEnvPath}`);
-			const content = await Bun.file(baseEnvPath).text();
+			const content = readFileSync(baseEnvPath, 'utf-8');
 			const baseVars = parseEnvFileContent(content, 'preview');
 			for (const [key, value] of Object.entries(baseVars)) {
 				vars[key] = value;
@@ -1471,7 +1488,7 @@ export async function previewRepoEnvFiles(options: PreviewEnvOptions): Promise<P
 			const additionalEnvPath = join(tempDir, envFilePath);
 			if (existsSync(additionalEnvPath)) {
 				console.log(`${logPrefix} Reading additional env file: ${additionalEnvPath}`);
-				const content = await Bun.file(additionalEnvPath).text();
+				const content = readFileSync(additionalEnvPath, 'utf-8');
 				const additionalVars = parseEnvFileContent(content, 'preview');
 				for (const [key, value] of Object.entries(additionalVars)) {
 					vars[key] = value;

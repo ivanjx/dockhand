@@ -2,6 +2,7 @@ import { json, type RequestHandler } from '@sveltejs/kit';
 import { scanImage, type ScanProgress, type ScanResult } from '$lib/server/scanner';
 import { saveVulnerabilityScan, getLatestScanForImage } from '$lib/server/db';
 import { authorize } from '$lib/server/authorize';
+import { createJob, appendLine, completeJob, failJob } from '$lib/server/jobs';
 
 // Helper to convert ScanResult to database format
 function scanResultToDbFormat(result: ScanResult, envId?: number) {
@@ -23,7 +24,7 @@ function scanResultToDbFormat(result: ScanResult, envId?: number) {
 	};
 }
 
-// POST - Start a scan (returns SSE stream for progress)
+// POST - Start a scan (returns { jobId } for progress polling)
 export const POST: RequestHandler = async ({ request, url, cookies }) => {
 	const auth = await authorize(cookies);
 
@@ -42,75 +43,47 @@ export const POST: RequestHandler = async ({ request, url, cookies }) => {
 		return json({ error: 'Image name is required' }, { status: 400 });
 	}
 
-	// Create a readable stream for SSE
-	const stream = new ReadableStream({
-		async start(controller) {
-			const encoder = new TextEncoder();
-			let controllerClosed = false;
+	// Job pattern: create job, run in background, return jobId immediately
+	const job = createJob();
 
-			const sendProgress = (progress: ScanProgress) => {
-				if (controllerClosed) return;
-				try {
-					const data = `data: ${JSON.stringify(progress)}\n\n`;
-					controller.enqueue(encoder.encode(data));
-				} catch {
-					controllerClosed = true;
-				}
-			};
+	const sendProgress = (progress: ScanProgress) => {
+		appendLine(job, { data: progress });
+	};
 
-			// Send SSE keepalive comments every 5s to prevent Traefik timeout
-			const keepaliveInterval = setInterval(() => {
-				if (controllerClosed) return;
-				try {
-					controller.enqueue(encoder.encode(`: keepalive\n\n`));
-				} catch {
-					controllerClosed = true;
-				}
-			}, 5000);
+	(async () => {
+		try {
+			const results = await scanImage(imageName, envId, sendProgress, forceScannerType);
 
-			try {
-				const results = await scanImage(imageName, envId, sendProgress, forceScannerType);
-
-				// Save results to database
-				for (const result of results) {
-					await saveVulnerabilityScan(scanResultToDbFormat(result, envId));
-				}
-
-				// Send final complete message with all results
-				sendProgress({
-					stage: 'complete',
-					message: `Scan complete - found ${results.reduce((sum, r) => sum + r.vulnerabilities.length, 0)} vulnerabilities`,
-					progress: 100,
-					result: results[0],
-					results: results // Include all scanner results
-				});
-			} catch (error) {
-				const errorMsg = error instanceof Error ? error.message : String(error);
-				sendProgress({
-					stage: 'error',
-					message: `Scan failed: ${errorMsg}`,
-					error: errorMsg
-				});
-			} finally {
-				clearInterval(keepaliveInterval);
-				if (!controllerClosed) {
-					try {
-						controller.close();
-					} catch {
-						// Already closed
-					}
-				}
+			// Save results to database
+			for (const result of results) {
+				await saveVulnerabilityScan(scanResultToDbFormat(result, envId));
 			}
+
+			// Send final complete message with all results
+			const completeProgress: ScanProgress = {
+				stage: 'complete',
+				message: `Scan complete - found ${results.reduce((sum, r) => sum + r.vulnerabilities.length, 0)} vulnerabilities`,
+				progress: 100,
+				result: results[0],
+				results: results // Include all scanner results
+			};
+			sendProgress(completeProgress);
+			completeJob(job, completeProgress);
+		} catch (error) {
+			const errorMsg = error instanceof Error ? error.message : String(error);
+			const errorProgress: ScanProgress = {
+				stage: 'error',
+				message: `Scan failed: ${errorMsg}`,
+				error: errorMsg
+			};
+			sendProgress(errorProgress);
+			failJob(job, errorMsg);
 		}
+	})().catch((err) => {
+		failJob(job, err instanceof Error ? err.message : String(err));
 	});
 
-	return new Response(stream, {
-		headers: {
-			'Content-Type': 'text/event-stream',
-			'Cache-Control': 'no-cache',
-			'Connection': 'keep-alive'
-		}
-	});
+	return json({ jobId: job.id });
 };
 
 // GET - Get cached scan results for an image

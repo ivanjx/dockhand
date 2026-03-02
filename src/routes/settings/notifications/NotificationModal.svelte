@@ -177,24 +177,28 @@
 		testResult = 'idle';
 
 		try {
-			const config = getFormConfig();
+			// When editing with no password entered, use stored credentials via [id]/test
+			// to avoid sending blank password and getting "Missing credentials" from SMTP server
+			const useStoredCredentials = isEditing && formType === 'smtp' && !formSmtpPassword && notification?.id;
 
-			// For editing, if password is empty, we can't test without the original password
-			if (isEditing && formType === 'smtp' && !formSmtpPassword && notification?.config?.username) {
-				formError = 'Please enter the password to test the connection';
-				formTesting = false;
-				return;
+			let response: Response;
+			if (useStoredCredentials) {
+				response = await fetch(`/api/notifications/${notification!.id}/test`, {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' }
+				});
+			} else {
+				const config = getFormConfig();
+				response = await fetch('/api/notifications/test', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						type: formType,
+						name: formName.trim() || 'Test',
+						config
+					})
+				});
 			}
-
-			const response = await fetch('/api/notifications/test', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					type: formType,
-					name: formName.trim() || 'Test',
-					config
-				})
-			});
 
 			const data = await response.json();
 

@@ -3,7 +3,7 @@
 </svelte:head>
 
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import { page } from '$app/stores';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
@@ -45,28 +45,91 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 	let selectedContainerIds = $state<Set<string>>(new Set());
 	let groupedContainerInfo = $state<Map<string, { name: string; color: string }>>(new Map());
 	let mergedLogs = $state<Array<{ containerId: string; containerName: string; color: string; text: string; timestamp?: string; stream?: string }>>([]);
+	let mergedHtml = $state(''); // Pre-built HTML string for fast rendering (like single mode's `logs`)
 	let stackName = $state<string | null>(null);
 
-	// Batching for log updates to prevent UI blocking
+	// Batching for grouped mode log updates to prevent UI blocking
 	let pendingLogs: Array<{ containerId: string; containerName: string; color: string; text: string; timestamp?: string; stream?: string }> = [];
 	let batchTimeout: ReturnType<typeof setTimeout> | null = null;
 	const BATCH_INTERVAL = 50; // ms - batch logs for 50ms before updating state
+	// Initial buffering: accumulate all tail lines before first render to avoid line-by-line appearance
+	let initialBuffering = false;
+	let initialBufferTimeout: ReturnType<typeof setTimeout> | null = null;
+	const INITIAL_BUFFER_DELAY = 400; // ms - wait for all initial tail lines before first render
+
+	// Batching for single mode SSE logs
+	let pendingText = '';
+	let flushTimer: ReturnType<typeof setTimeout> | null = null;
+	const FLUSH_INTERVAL = 100; // ms
+
+	// RAF-based auto-scroll
+	let scrollRafPending = false;
 
 	// Flush pending logs to state (called on timer)
 	function flushPendingLogs() {
-		if (pendingLogs.length === 0) return;
-
-		// Batch all pending logs into a single state update
-		let newLogs = [...mergedLogs, ...pendingLogs];
-		pendingLogs = [];
-
-		// Keep only last 5000 lines to prevent memory issues
-		if (newLogs.length > 5000) {
-			newLogs = newLogs.slice(-4000);
+		if (pendingLogs.length === 0) {
+			batchTimeout = null;
+			return;
 		}
 
-		mergedLogs = newLogs;
+		// Build HTML for new lines and append (like single mode's logs += pendingText)
+		let newHtml = '';
+		for (const log of pendingLogs) {
+			const content = ansiToHtml(log.text);
+			newHtml += `<span style="color:${log.color};font-weight:600">[${escapeHtml(log.containerName)}]</span> ${content}`;
+		}
+
+		// Push into array (kept for copy/download)
+		mergedLogs.push(...pendingLogs);
+		pendingLogs = [];
+
+		// Keep only last 2000 lines to prevent memory issues
+		if (mergedLogs.length > 2000) {
+			const removed = mergedLogs.length - 1600;
+			mergedLogs.splice(0, removed);
+			// Rebuild HTML from trimmed array
+			mergedHtml = '';
+			for (const log of mergedLogs) {
+				mergedHtml += `<span style="color:${log.color};font-weight:600">[${escapeHtml(log.containerName)}]</span> ${ansiToHtml(log.text)}`;
+			}
+		} else {
+			mergedHtml += newHtml;
+		}
+
 		batchTimeout = null;
+		scrollToBottom();
+	}
+
+	// Flush buffered single-mode text to state
+	function flushSingleLogs() {
+		if (flushTimer) {
+			clearTimeout(flushTimer);
+			flushTimer = null;
+		}
+		if (!pendingText) return;
+
+		logs += pendingText;
+		pendingText = '';
+
+		// Apply log buffer size limit (convert KB to characters)
+		const maxSize = $appSettings.logBufferSizeKb * 1024;
+		if (logs.length > maxSize) {
+			logs = logs.substring(logs.length - Math.floor(maxSize * 0.8));
+		}
+
+		scrollToBottom();
+	}
+
+	// Scroll to bottom after Svelte finishes rendering.
+	// Uses tick() to wait for DOM update, then RAF for smooth visual timing.
+	async function scrollToBottom(force = false) {
+		if ((!force && !autoScroll) || !logsRef || scrollRafPending) return;
+		scrollRafPending = true;
+		await tick();
+		requestAnimationFrame(() => {
+			if (logsRef) logsRef.scrollTop = logsRef.scrollHeight;
+			scrollRafPending = false;
+		});
 	}
 
 	// Multi-mode selection state (for merge feature)
@@ -187,7 +250,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 			// selectedContainer stays as is, streaming continues
 			// Just clear grouped mode data
 			selectedContainerIds = new Set();
-			mergedLogs = [];
+			mergedLogs = []; mergedHtml = '';
 			// Save state if we have a container selected (carrying over selection)
 			if (selectedContainer) {
 				saveState();
@@ -202,7 +265,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 					// Stop grouped streaming and start single streaming
 					stopStreaming();
 					selectedContainerIds = new Set();
-					mergedLogs = [];
+					mergedLogs = []; mergedHtml = '';
 					selectedContainer = container;
 					if (streamingEnabled) {
 						startStreaming(container);
@@ -213,7 +276,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 				// Multiple containers - just stop streaming
 				stopStreaming();
 				selectedContainerIds = new Set();
-				mergedLogs = [];
+				mergedLogs = []; mergedHtml = '';
 			}
 			// If selectedContainer already exists (from multi mode), keep it streaming
 			// Save state if we have a container selected (carrying over selection)
@@ -230,8 +293,6 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 	}
 	let logsRef: HTMLDivElement | undefined;
 	let envId = $state<number | null>(null);
-	let isInitialLoad = $state(true);
-
 	// Polling interval - module scope for cleanup in onDestroy
 	let containerInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -249,7 +310,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 	const fontSizeOptions = [10, 12, 14, 16];
 
 	// Subscribe to environment changes - restore state and fetch data
-	currentEnvironment.subscribe(async (env) => {
+	const unsubscribeEnv = currentEnvironment.subscribe(async (env) => {
 		envId = env?.id ?? null;
 		if (!env) return;
 
@@ -295,7 +356,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 			} else {
 				// No running containers found - show empty state for this stack
 				selectedContainerIds = new Set();
-				mergedLogs = [];
+				mergedLogs = []; mergedHtml = '';
 				saveState();
 			}
 			return;
@@ -627,7 +688,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 			const response = await fetch(appendEnvParam(`/api/containers/${selectedContainer.id}/logs?tail=${tail}`, envId));
 			const data = await response.json();
 			logs = data.logs || 'No logs available';
-			// Scrolling is handled by the $effect that watches logs changes
+			scrollToBottom(true); // Force scroll on initial load
 		} catch (error) {
 			console.error('Failed to fetch logs:', error);
 			logs = 'Failed to fetch logs: ' + String(error);
@@ -671,21 +732,17 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 						// Add container name prefix to each line if available
 						let text = data.text;
 						if (data.containerName) {
-							// Split by lines, prefix each non-empty line, rejoin
 							const lines = text.split('\n');
 							text = lines.map((line: string, i: number) => {
-								// Don't prefix empty lines at the end
 								if (line === '' && i === lines.length - 1) return line;
 								if (line === '') return line;
 								return `[${data.containerName}] ${line}`;
 							}).join('\n');
 						}
-						logs += text;
-
-						// Apply log buffer size limit (convert KB to characters)
-						const maxSize = $appSettings.logBufferSizeKb * 1024;
-						if (logs.length > maxSize) {
-							logs = logs.substring(logs.length - Math.floor(maxSize * 0.8));
+						// Buffer text and schedule flush
+						pendingText += text;
+						if (!flushTimer) {
+							flushTimer = setTimeout(flushSingleLogs, FLUSH_INTERVAL);
 						}
 					}
 				} catch {
@@ -750,13 +807,15 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 					// Parse and add logs
 					const lines = data.logs.split('\n').filter((line: string) => line.trim());
 					for (const line of lines) {
+						const text = line + '\n';
 						mergedLogs.push({
 							containerId,
 							containerName,
 							color,
-							text: line + '\n',
+							text,
 							timestamp: new Date().toISOString()
 						});
+						mergedHtml += `<span style="color:${color};font-weight:600">[${escapeHtml(containerName)}]</span> ${ansiToHtml(text)}`;
 					}
 					mergedLogs = mergedLogs;
 				}
@@ -770,6 +829,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 		}
 		// Mark loading done if only stopped containers
 		loading = false;
+		scrollToBottom(true);
 	}
 
 	// Check if any selected container is running (for reconnection logic)
@@ -793,7 +853,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 		loading = true;
 		// Clear container info for fresh selection (prevents icon accumulation)
 		groupedContainerInfo = new Map();
-		mergedLogs = [];
+		mergedLogs = []; mergedHtml = '';
 
 		// Separate running and stopped containers
 		const allIds = Array.from(selectedContainerIds);
@@ -826,7 +886,6 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 
 			eventSource.addEventListener('connected', (event) => {
 				isConnected = true;
-				loading = false;
 				connectionError = null;
 				reconnectAttempts = 0;
 
@@ -845,6 +904,17 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 				} catch {
 					// Ignore parse errors
 				}
+
+				// Start initial buffering phase: accumulate all tail lines,
+				// then flush once after a delay to avoid line-by-line rendering
+				initialBuffering = true;
+				if (initialBufferTimeout) clearTimeout(initialBufferTimeout);
+				initialBufferTimeout = setTimeout(() => {
+					initialBuffering = false;
+					initialBufferTimeout = null;
+					loading = false;
+					flushPendingLogs();
+				}, INITIAL_BUFFER_DELAY);
 			});
 
 			eventSource.addEventListener('log', (event) => {
@@ -862,8 +932,9 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 							timestamp: data.timestamp,
 							stream: data.stream
 						});
-						// Schedule flush if not already scheduled
-						if (!batchTimeout) {
+						// During initial buffering, just accumulate - don't schedule flushes
+						// The initial buffer timeout will flush everything in one go
+						if (!initialBuffering && !batchTimeout) {
 							batchTimeout = setTimeout(flushPendingLogs, BATCH_INTERVAL);
 						}
 					}
@@ -885,6 +956,16 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 			eventSource.addEventListener('end', () => {
 				isConnected = false;
 				connectionError = 'Stream ended';
+				// If we're still in initial buffering, flush immediately
+				if (initialBuffering) {
+					initialBuffering = false;
+					if (initialBufferTimeout) {
+						clearTimeout(initialBufferTimeout);
+						initialBufferTimeout = null;
+					}
+					loading = false;
+					flushPendingLogs();
+				}
 			});
 
 			eventSource.onerror = () => {
@@ -902,6 +983,16 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 	function handleStreamError() {
 		isConnected = false;
 		loading = false;
+
+		// Cancel initial buffering on error and flush what we have
+		if (initialBuffering) {
+			initialBuffering = false;
+			if (initialBufferTimeout) {
+				clearTimeout(initialBufferTimeout);
+				initialBufferTimeout = null;
+			}
+			flushPendingLogs();
+		}
 
 		// Close the broken connection
 		if (eventSource) {
@@ -949,7 +1040,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 		reconnectAttempts = 0;
 		connectionError = null;
 		logs = '';
-		mergedLogs = [];
+		mergedLogs = []; mergedHtml = '';
 		loading = true;
 		if (layoutMode === 'grouped') {
 			startGroupedStreaming();
@@ -960,6 +1051,14 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 
 	// Stop SSE streaming
 	function stopStreaming(resetAttempts = true) {
+		// Flush any buffered data before stopping
+		initialBuffering = false;
+		if (initialBufferTimeout) {
+			clearTimeout(initialBufferTimeout);
+			initialBufferTimeout = null;
+		}
+		flushSingleLogs();
+		flushPendingLogs();
 		if (reconnectTimeout) {
 			clearTimeout(reconnectTimeout);
 			reconnectTimeout = null;
@@ -987,7 +1086,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 		saveState();
 		if (streamingEnabled) {
 			logs = '';
-			mergedLogs = [];
+			mergedLogs = []; mergedHtml = '';
 			reconnectAttempts = 0;
 			connectionError = null;
 			loading = true;
@@ -1008,7 +1107,6 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 		selectedContainer = container;
 		searchQuery = '';
 		dropdownOpen = false;
-		isInitialLoad = true; // Reset so we scroll to bottom on new container
 		logs = ''; // Clear previous logs
 
 		// Save selection for persistence
@@ -1043,14 +1141,14 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 			startGroupedStreaming();
 		} else if (newSet.size === 0) {
 			stopStreaming();
-			mergedLogs = [];
+			mergedLogs = []; mergedHtml = '';
 		}
 	}
 
 	// Start grouped streaming with current selection
 	function startGroupedView() {
 		if (selectedContainerIds.size === 0) return;
-		mergedLogs = [];
+		mergedLogs = []; mergedHtml = '';
 		loading = true;
 		startGroupedStreaming();
 	}
@@ -1065,7 +1163,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 	function clearContainerSelection() {
 		selectedContainerIds = new Set();
 		stopStreaming();
-		mergedLogs = [];
+		mergedLogs = []; mergedHtml = '';
 	}
 
 	// Multi-mode: toggle a container in the multi-select list
@@ -1336,34 +1434,26 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 		return highlighted;
 	});
 
-	// Format merged logs with container prefixes
-	let formattedMergedLogs = $derived(() => {
-		return mergedLogs.map(log => {
-			const content = ansiToHtml(log.text);
-			let highlighted = content;
+	// Format merged logs HTML — uses pre-built mergedHtml string, only applies search highlighting when needed
+	let formattedMergedHtml = $derived(() => {
+		if (!mergedHtml) return '';
+		if (!logSearchQuery.trim()) return mergedHtml;
 
-			if (logSearchQuery.trim()) {
-				const query = logSearchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-				const escapedQuery = escapeHtml(query);
-				const parts = content.split(/(<[^>]*>)/);
-				highlighted = parts.map(part => {
-					if (part.startsWith('<')) return part;
-					const regex = new RegExp(`(${escapedQuery})`, 'gi');
-					return part.replace(regex, '<mark class="search-match">$1</mark>');
-				}).join('');
-			}
-
-			return {
-				...log,
-				formattedText: highlighted
-			};
-		});
+		// Apply search highlighting (same approach as single mode's highlightedLogs)
+		const query = logSearchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		const escapedQuery = escapeHtml(query);
+		const searchRegex = new RegExp(`(${escapedQuery})`, 'gi');
+		const parts = mergedHtml.split(/(<[^>]*>)/);
+		return parts.map(part => {
+			if (part.startsWith('<')) return part;
+			return part.replace(searchRegex, '<mark class="search-match">$1</mark>');
+		}).join('');
 	});
 
 	// Update match count after render
 	$effect(() => {
 		// Track highlighted logs to re-run when content changes
-		const html = layoutMode === 'grouped' ? formattedMergedLogs() : highlightedLogs();
+		const html = layoutMode === 'grouped' ? formattedMergedHtml() : highlightedLogs();
 
 		if (logSearchQuery && logsRef) {
 			setTimeout(() => {
@@ -1383,23 +1473,6 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 	});
 
 
-	// Scroll to bottom when logs change (for initial load or auto-scroll)
-	$effect(() => {
-		// Track logs to trigger on content change
-		const _ = layoutMode === 'grouped' ? mergedLogs : logs;
-		if (logsRef && (logs || mergedLogs.length > 0) && (isInitialLoad || autoScroll)) {
-			// Use tick/setTimeout to wait for DOM update
-			setTimeout(() => {
-				if (logsRef) {
-					logsRef.scrollTop = logsRef.scrollHeight;
-					if (isInitialLoad) {
-						isInitialLoad = false;
-					}
-				}
-			}, 100);
-		}
-	});
-
 	onMount(() => {
 		// All initialization is handled in currentEnvironment.subscribe
 		// This just sets up the refresh interval
@@ -1408,10 +1481,14 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 	});
 
 	onDestroy(() => {
+		unsubscribeEnv();
 		if (containerInterval) {
 			clearInterval(containerInterval);
 			containerInterval = null;
 		}
+		// Flush pending text and clean up timers
+		flushSingleLogs();
+		flushPendingLogs();
 		stopStreaming();
 	});
 </script>
@@ -1948,14 +2025,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 								<RefreshCw class="w-8 h-8 animate-spin {darkMode ? 'text-zinc-400' : 'text-gray-500'}" />
 							</div>
 						{/if}
-						<div class="font-mono {wordWrap ? 'whitespace-pre-wrap' : 'whitespace-pre'}" style="font-size: {fontSize}px;">
-							{#each formattedMergedLogs() as log}
-								<div class="flex">
-									<span class="shrink-0 font-semibold mr-2" style="color: {log.color}">[{log.containerName}]</span>
-									<span class="{darkMode ? 'text-zinc-50' : 'text-gray-900'}">{@html log.formattedText}</span>
-								</div>
-							{/each}
-						</div>
+						<pre class="font-mono {wordWrap ? 'whitespace-pre-wrap' : 'whitespace-pre'} {darkMode ? 'text-zinc-50' : 'text-gray-900'}" style="font-size: {fontSize}px;">{@html formattedMergedHtml()}</pre>
 					</div>
 				{/if}
 			{:else if !selectedContainer}

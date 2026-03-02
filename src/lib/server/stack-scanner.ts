@@ -5,7 +5,7 @@
  * Discovered stacks are editable - compose and .env files are modified in their original location.
  */
 
-import { readdirSync, existsSync, statSync } from 'node:fs';
+import { readdirSync, existsSync, statSync, readFileSync } from 'node:fs';
 import { join, basename, dirname, resolve } from 'node:path';
 import yaml from 'js-yaml';
 import { getExternalStackPaths, getStackSources, upsertStackSource, type StackSourceType } from './db';
@@ -57,8 +57,7 @@ export function normalizeStackName(name: string): string {
  */
 async function isComposeFile(filePath: string): Promise<boolean> {
 	try {
-		const file = Bun.file(filePath);
-		const content = await file.text();
+		const content = readFileSync(filePath, 'utf-8');
 		// Basic check for services key - could be more sophisticated
 		return /^services:/m.test(content) || /\nservices:/m.test(content);
 	} catch {
@@ -72,8 +71,7 @@ async function isComposeFile(filePath: string): Promise<boolean> {
  */
 async function countServices(filePath: string): Promise<number> {
 	try {
-		const file = Bun.file(filePath);
-		const content = await file.text();
+		const content = readFileSync(filePath, 'utf-8');
 		const doc = yaml.load(content) as Record<string, unknown> | null;
 		if (doc?.services && typeof doc.services === 'object') {
 			return Object.keys(doc.services).length;

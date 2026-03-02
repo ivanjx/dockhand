@@ -1,11 +1,12 @@
 import { json } from '@sveltejs/kit';
-import { pullImage } from '$lib/server/docker';
+import { pullImage, buildRegistryAuthHeader } from '$lib/server/docker';
 import type { RequestHandler } from './$types';
 import { getScannerSettings, scanImage } from '$lib/server/scanner';
 import { saveVulnerabilityScan, getEnvironment } from '$lib/server/db';
 import { authorize } from '$lib/server/authorize';
 import { auditImage } from '$lib/server/audit';
 import { sendEdgeStreamRequest, isEdgeConnected } from '$lib/server/hawser';
+import { createJob, appendLine, completeJob, failJob } from '$lib/server/jobs';
 
 /**
  * Check if environment is edge mode
@@ -73,49 +74,26 @@ export const POST: RequestHandler = async (event) => {
 	// Check if this is an edge environment
 	const edgeCheck = await isEdgeMode(envId);
 
-	const encoder = new TextEncoder();
-	let controllerClosed = false;
-	let controller: ReadableStreamDefaultController<Uint8Array>;
-	let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-	let cancelEdgeStream: (() => void) | null = null;
+	// Job pattern: create job, run in background, return jobId immediately
+	const job = createJob();
 
-	const safeEnqueue = (data: string) => {
-		if (!controllerClosed) {
-			try {
-				controller.enqueue(encoder.encode(data));
-			} catch {
-				controllerClosed = true;
-			}
-		}
-	};
-
-	const cleanup = () => {
-		if (heartbeatInterval) {
-			clearInterval(heartbeatInterval);
-			heartbeatInterval = null;
-		}
-		if (cancelEdgeStream) {
-			cancelEdgeStream();
-			cancelEdgeStream = null;
-		}
-		controllerClosed = true;
+	const sendData = (data: unknown) => {
+		appendLine(job, { data });
 	};
 
 	/**
 	 * Handle scan-on-pull after image is pulled
 	 */
 	const handleScanOnPull = async () => {
-		// Skip if caller explicitly requested no scan (e.g., CreateContainerModal handles scanning separately)
 		if (skipScanOnPull) return;
 
 		const { scanner } = await getScannerSettings(envId);
-		// Scan if scanning is enabled (scanner !== 'none')
 		if (scanner !== 'none') {
-			safeEnqueue(`data: ${JSON.stringify({ status: 'scanning', message: 'Starting vulnerability scan...' })}\n\n`);
+			sendData({ status: 'scanning', message: 'Starting vulnerability scan...' });
 
 			try {
 				const results = await scanImage(image, envId, (progress) => {
-					safeEnqueue(`data: ${JSON.stringify({ status: 'scan-progress', ...progress })}\n\n`);
+					sendData({ status: 'scan-progress', ...progress });
 				});
 
 				for (const result of results) {
@@ -138,128 +116,99 @@ export const POST: RequestHandler = async (event) => {
 				}
 
 				const totalVulns = results.reduce((sum, r) => sum + r.vulnerabilities.length, 0);
-				safeEnqueue(`data: ${JSON.stringify({
+				sendData({
 					status: 'scan-complete',
 					message: `Scan complete - found ${totalVulns} vulnerabilities`,
 					results
-				})}\n\n`);
+				});
 			} catch (scanError) {
 				console.error('Scan-on-pull failed:', scanError);
-				safeEnqueue(`data: ${JSON.stringify({
+				sendData({
 					status: 'scan-error',
 					error: scanError instanceof Error ? scanError.message : String(scanError)
-				})}\n\n`);
+				});
 			}
 		}
 	};
 
-	const stream = new ReadableStream({
-		async start(ctrl) {
-			controller = ctrl;
+	// Run operation in background
+	(async () => {
+		console.log(`Starting pull for image: ${image}${edgeCheck.isEdge ? ' (edge mode)' : ''}`);
 
-			// Start heartbeat to keep connection alive through Traefik (10s idle timeout)
-			heartbeatInterval = setInterval(() => {
-				safeEnqueue(`: keepalive\n\n`);
-			}, 5000);
+		if (edgeCheck.isEdge && edgeCheck.environmentId) {
+			if (!isEdgeConnected(edgeCheck.environmentId)) {
+				sendData({ status: 'error', error: 'Edge agent not connected' });
+				failJob(job, 'Edge agent not connected');
+				return;
+			}
 
-			console.log(`Starting pull for image: ${image}${edgeCheck.isEdge ? ' (edge mode)' : ''}`);
+			const pullUrl = buildPullUrl(image);
+			const authHeaders = await buildRegistryAuthHeader(image);
 
-			// Handle edge mode with streaming
-			if (edgeCheck.isEdge && edgeCheck.environmentId) {
-				if (!isEdgeConnected(edgeCheck.environmentId)) {
-					safeEnqueue(`data: ${JSON.stringify({ status: 'error', error: 'Edge agent not connected' })}\n\n`);
-					cleanup();
-					controller.close();
-					return;
-				}
-
-				const pullUrl = buildPullUrl(image);
-
+			await new Promise<void>((resolve) => {
 				const { cancel } = sendEdgeStreamRequest(
-					edgeCheck.environmentId,
+					edgeCheck.environmentId!,
 					'POST',
 					pullUrl,
 					{
 						onData: (data: string) => {
-							// Data is base64 encoded JSON lines from Docker
 							try {
 								const decoded = Buffer.from(data, 'base64').toString('utf-8');
-								// Docker sends newline-delimited JSON
-								const lines = decoded.split('\n').filter(line => line.trim());
+								const lines = decoded.split('\n').filter((line) => line.trim());
 								for (const line of lines) {
 									try {
-										const progress = JSON.parse(line);
-										safeEnqueue(`data: ${JSON.stringify(progress)}\n\n`);
+										sendData(JSON.parse(line));
 									} catch {
 										// Ignore parse errors for partial lines
 									}
 								}
 							} catch {
-								// If not base64, try as-is
 								try {
-									const progress = JSON.parse(data);
-									safeEnqueue(`data: ${JSON.stringify(progress)}\n\n`);
+									sendData(JSON.parse(data));
 								} catch {
 									// Ignore
 								}
 							}
 						},
 						onEnd: async () => {
-							safeEnqueue(`data: ${JSON.stringify({ status: 'complete' })}\n\n`);
-
-							// Handle scan-on-pull
+							sendData({ status: 'complete' });
 							await handleScanOnPull();
-
-							cleanup();
-							controller.close();
+							completeJob(job, { status: 'complete' });
+							resolve();
 						},
 						onError: (error: string) => {
 							console.error('Edge pull error:', error);
-							safeEnqueue(`data: ${JSON.stringify({ status: 'error', error })}\n\n`);
-							cleanup();
-							controller.close();
+							sendData({ status: 'error', error });
+							failJob(job, error);
+							resolve();
 						}
-					}
+					},
+					undefined,
+					authHeaders
 				);
 
-				cancelEdgeStream = cancel;
-			} else {
-				// Non-edge mode: use existing pullImage function
-				try {
-					await pullImage(image, (progress) => {
-						const data = JSON.stringify(progress) + '\n';
-						safeEnqueue(`data: ${data}\n\n`);
-					}, envId);
+				// Store cancel reference (not used currently but available)
+				void cancel;
+			});
+		} else {
+			try {
+				await pullImage(image, (progress) => {
+					sendData(progress);
+				}, envId);
 
-					safeEnqueue(`data: ${JSON.stringify({ status: 'complete' })}\n\n`);
-
-					// Handle scan-on-pull
-					await handleScanOnPull();
-
-					cleanup();
-					controller.close();
-				} catch (error) {
-					console.error('Error pulling image:', error);
-					safeEnqueue(`data: ${JSON.stringify({
-						status: 'error',
-						error: String(error)
-					})}\n\n`);
-					cleanup();
-					controller.close();
-				}
+				sendData({ status: 'complete' });
+				await handleScanOnPull();
+				completeJob(job, { status: 'complete' });
+			} catch (error) {
+				console.error('Error pulling image:', error);
+				const errMsg = String(error);
+				sendData({ status: 'error', error: errMsg });
+				failJob(job, errMsg);
 			}
-		},
-		cancel() {
-			cleanup();
 		}
+	})().catch((err) => {
+		failJob(job, err instanceof Error ? err.message : String(err));
 	});
 
-	return new Response(stream, {
-		headers: {
-			'Content-Type': 'text/event-stream',
-			'Cache-Control': 'no-cache',
-			'Connection': 'keep-alive',
-			'X-Accel-Buffering': 'no'
-		}
-	});
+	return json({ jobId: job.id });
 };

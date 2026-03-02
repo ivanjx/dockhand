@@ -113,7 +113,7 @@ export const POST: RequestHandler = async (event) => {
 			await setEnvironmentPublicIp(env.id, data.publicIp);
 		}
 
-		// Notify subprocesses to pick up the new environment
+		// Notify event collectors to pick up the new environment
 		refreshSubprocessEnvironments();
 
 		// Auto-assign Admin role to creator (Enterprise only)

@@ -1,3 +1,4 @@
+import { gzipSync } from 'node:zlib';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getVolumeArchive } from '$lib/server/docker';
@@ -31,9 +32,9 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
 		let body: ReadableStream<Uint8Array> | Uint8Array = response.body!;
 
 		if (format === 'tar.gz') {
-			// Compress with gzip using Bun's native implementation
+			// Compress with gzip
 			const tarData = new Uint8Array(await response.arrayBuffer());
-			body = Bun.gzipSync(tarData);
+			body = gzipSync(tarData);
 			contentType = 'application/gzip';
 			extension = '.tar.gz';
 		}

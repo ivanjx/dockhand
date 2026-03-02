@@ -1,3 +1,4 @@
+import { gzipSync } from 'node:zlib';
 import { getContainerArchive, statContainerPath } from '$lib/server/docker';
 import { authorize } from '$lib/server/authorize';
 import type { RequestHandler } from './$types';
@@ -50,9 +51,9 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
 		let extension = '.tar';
 
 		if (format === 'tar.gz') {
-			// Compress with gzip using Bun's native implementation
+			// Compress with gzip
 			const tarData = new Uint8Array(await response.arrayBuffer());
-			body = Bun.gzipSync(tarData);
+			body = gzipSync(tarData);
 			contentType = 'application/gzip';
 			extension = '.tar.gz';
 		}

@@ -1,19 +1,15 @@
 import { json } from '@sveltejs/kit';
 import { authorize } from '$lib/server/authorize';
 import { getOwnContainerId } from '$lib/server/host-path';
-import { getRegistryManifestDigest } from '$lib/server/docker';
+import { getRegistryManifestDigest, unixSocketRequest } from '$lib/server/docker';
+import { compareVersions } from '$lib/utils/version';
 import type { RequestHandler } from './$types';
 
-/**
- * Fetch from the local Docker socket directly (not through environment routing)
- */
-async function localDockerFetch(path: string, options: RequestInit = {}): Promise<Response> {
-	const socketPath = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
-	return fetch(`http://localhost${path}`, {
-		...options,
-		// @ts-ignore - Bun supports unix sockets
-		unix: socketPath
-	});
+const DOCKER_SOCKET = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
+
+/** Fetch from the local Docker socket directly (not through environment routing) */
+function localDockerFetch(path: string, options: RequestInit = {}): Promise<Response> {
+	return unixSocketRequest(DOCKER_SOCKET, path, options);
 }
 
 /**
@@ -78,6 +74,92 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			});
 		}
 
+		// Extract tag from image name
+		const colonIdx = currentImage.lastIndexOf(':');
+		const tag = colonIdx > -1 ? currentImage.substring(colonIdx + 1) : 'latest';
+		const imageWithoutTag = colonIdx > -1 ? currentImage.substring(0, colonIdx) : currentImage;
+
+		// Check if this is a versioned tag (e.g., v1.0.18, 1.0.18, v1.0.18-baseline)
+		const versionMatch = tag.match(/^(v?\d+\.\d+\.\d+)(-baseline)?$/);
+
+		if (versionMatch) {
+			// Version-based check: compare against latest released version from changelog
+			const currentTagVersion = versionMatch[1];
+			const suffix = versionMatch[2] || ''; // '-baseline' or ''
+
+			try {
+				const changelogResponse = await fetch(
+					'https://raw.githubusercontent.com/Finsys/dockhand/main/src/lib/data/changelog.json',
+					{ signal: AbortSignal.timeout(5000) }
+				);
+
+				if (!changelogResponse.ok) {
+					return json({
+						updateAvailable: false,
+						currentImage,
+						containerName,
+						isComposeManaged,
+						error: 'Could not fetch changelog from GitHub'
+					});
+				}
+
+				const changelog = await changelogResponse.json() as Array<{
+					version: string;
+					comingSoon?: boolean;
+					date?: string;
+					changes?: Array<{ type: string; text: string }>;
+				}>;
+
+				// Find latest released version (first entry without comingSoon)
+				const latestRelease = changelog.find(entry => !entry.comingSoon);
+
+				if (!latestRelease) {
+					return json({
+						updateAvailable: false,
+						currentImage,
+						containerName,
+						isComposeManaged,
+						error: 'No released version found in changelog'
+					});
+				}
+
+				const latestVersion = latestRelease.version;
+				const hasNewer = compareVersions(latestVersion, currentTagVersion) > 0;
+
+				if (hasNewer) {
+					// Build new image tag preserving registry prefix and suffix
+					const newTag = `v${latestVersion.replace(/^v/, '')}${suffix}`;
+					const newImage = `${imageWithoutTag}:${newTag}`;
+
+					return json({
+						updateAvailable: true,
+						currentImage,
+						newImage,
+						latestVersion: latestVersion.replace(/^v/, ''),
+						containerName,
+						isComposeManaged
+					});
+				}
+
+				return json({
+					updateAvailable: false,
+					currentImage,
+					containerName,
+					isComposeManaged
+				});
+			} catch (err) {
+				return json({
+					updateAvailable: false,
+					currentImage,
+					containerName,
+					isComposeManaged,
+					error: 'Version check failed: ' + String(err)
+				});
+			}
+		}
+
+		// Digest-based check for mutable tags (:latest, :baseline, etc.)
+
 		// Inspect image via local Docker socket to get RepoDigests
 		const imageResponse = await localDockerFetch(`/images/${encodeURIComponent(currentImageId)}/json`);
 		if (!imageResponse.ok) {
@@ -105,6 +187,7 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			return json({
 				updateAvailable: false,
 				currentImage,
+				newImage: currentImage,
 				containerName,
 				isComposeManaged,
 				isLocalImage: true
@@ -117,6 +200,7 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			return json({
 				updateAvailable: false,
 				currentImage,
+				newImage: currentImage,
 				containerName,
 				isComposeManaged,
 				error: 'Could not query registry'
@@ -128,6 +212,7 @@ export const GET: RequestHandler = async ({ cookies }) => {
 		return json({
 			updateAvailable: hasUpdate,
 			currentImage,
+			newImage: currentImage,
 			currentDigest: localDigests[0],
 			newDigest: registryDigest,
 			containerName,

@@ -452,9 +452,22 @@
 				healthcheckTimeout = Math.floor((healthcheck.Timeout || 30e9) / 1e9);
 				healthcheckRetries = healthcheck.Retries || 3;
 				healthcheckStartPeriod = Math.floor((healthcheck.StartPeriod || 0) / 1e9);
+			} else {
+				healthcheckEnabled = false;
+				healthcheckCommand = '';
+				healthcheckInterval = 30;
+				healthcheckTimeout = 30;
+				healthcheckRetries = 3;
+				healthcheckStartPeriod = 0;
 			}
 
-			// Parse advanced options - Resources
+			// Parse advanced options - Resources (reset first to avoid stale values)
+			memoryLimit = '';
+			memoryReservation = '';
+			cpuShares = '';
+			nanoCpus = '';
+			cpuQuota = '';
+			cpuPeriod = '';
 			if (data.HostConfig.Memory) {
 				memoryLimit = formatBytes(data.HostConfig.Memory);
 			}

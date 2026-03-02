@@ -569,9 +569,9 @@ export async function runContainerUpdate(
 		// =============================================================================
 
 		log(`Recreating container with full config passthrough...`);
-		const success = await recreateContainer(containerName, envId, log, imageNameFromConfig);
+		const result = await recreateContainer(containerName, envId, log, imageNameFromConfig);
 
-		if (success) {
+		if (result.success) {
 			await updateAutoUpdateLastUpdated(containerName, envId);
 			log(`Successfully updated container: ${containerName}`);
 
@@ -594,7 +594,7 @@ export async function runContainerUpdate(
 				type: 'success'
 			}, envId);
 		} else {
-			throw new Error('Failed to recreate container');
+			throw new Error(result.error || 'Failed to recreate container');
 		}
 
 	} catch (error: any) {
@@ -628,14 +628,14 @@ export async function recreateContainer(
 	envId?: number,
 	log?: (msg: string) => void,
 	imageNameOverride?: string
-): Promise<boolean> {
+): Promise<{ success: boolean; error?: string }> {
 	try {
 		const containers = await listContainers(true, envId);
 		const container = containers.find(c => c.name === containerName);
 
 		if (!container) {
 			log?.(`Container not found: ${containerName}`);
-			return false;
+			return { success: false, error: `Container not found: ${containerName}` };
 		}
 
 		const inspectData = await inspectContainer(container.id, envId) as any;
@@ -644,10 +644,10 @@ export async function recreateContainer(
 		log?.(`Recreating container: ${containerName} (image: ${imageName})`);
 
 		await recreateContainerFromInspect(inspectData, imageName, envId, log);
-		return true;
+		return { success: true };
 	} catch (error: any) {
 		log?.(`Failed to recreate container: ${error.message}`);
-		return false;
+		return { success: false, error: error.message };
 	}
 }
 

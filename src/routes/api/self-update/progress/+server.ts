@@ -1,16 +1,13 @@
 import { json } from '@sveltejs/kit';
 import { authorize } from '$lib/server/authorize';
+import { unixSocketRequest } from '$lib/server/docker';
 import type { RequestHandler } from './$types';
 
-/**
- * Fetch from the local Docker socket directly
- */
-async function localDockerFetch(path: string): Promise<Response> {
-	const socketPath = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
-	return fetch(`http://localhost${path}`, {
-		// @ts-ignore - Bun supports unix sockets
-		unix: socketPath
-	});
+const DOCKER_SOCKET = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
+
+/** Fetch from the local Docker socket directly */
+function localDockerFetch(path: string): Promise<Response> {
+	return unixSocketRequest(DOCKER_SOCKET, path);
 }
 
 /**

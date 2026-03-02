@@ -27,6 +27,7 @@
 	import { onDockerEvent, isImageListChange } from '$lib/stores/events';
 	import { canAccess } from '$lib/stores/auth';
 	import { formatDate, appSettings } from '$lib/stores/settings';
+	import { readJobResponse } from '$lib/utils/sse-fetch';
 	import { EmptyState, NoEnvironment } from '$lib/components/ui/empty-state';
 	import PageHeader from '$lib/components/PageHeader.svelte';
 	import { DataGrid } from '$lib/components/data-grid';
@@ -485,9 +486,9 @@
 		confirmPrune = false;
 		try {
 			const response = await fetch(appendEnvParam('/api/prune/images', envId), { method: 'POST' });
-			if (response.ok) {
+			const data = await readJobResponse(response);
+			if (data.success) {
 				pruneStatus = 'success';
-				const data = await response.json();
 				const deleted = data.result?.ImagesDeleted;
 				const spaceReclaimed = data.result?.SpaceReclaimed ?? 0;
 				const count = deleted?.length ?? 0;
@@ -499,7 +500,7 @@
 				await fetchImages();
 			} else {
 				pruneStatus = 'error';
-				toast.error('Failed to prune images');
+				toast.error(data.error || 'Failed to prune images');
 			}
 		} catch (error) {
 			pruneStatus = 'error';
@@ -513,9 +514,9 @@
 		confirmPruneUnused = false;
 		try {
 			const response = await fetch(appendEnvParam('/api/prune/images?dangling=false', envId), { method: 'POST' });
-			if (response.ok) {
+			const data = await readJobResponse(response);
+			if (data.success) {
 				pruneUnusedStatus = 'success';
-				const data = await response.json();
 				const deleted = data.result?.ImagesDeleted;
 				const spaceReclaimed = data.result?.SpaceReclaimed ?? 0;
 				const count = deleted?.length ?? 0;
@@ -527,7 +528,7 @@
 				await fetchImages();
 			} else {
 				pruneUnusedStatus = 'error';
-				toast.error('Failed to prune unused images');
+				toast.error(data.error || 'Failed to prune unused images');
 			}
 		} catch (error) {
 			pruneUnusedStatus = 'error';
@@ -1060,7 +1061,7 @@
 							{:else if column.id === 'used'}
 								{#if tagInfo.containers > 0}
 									<a
-										href="/containers?image={encodeURIComponent(tagInfo.fullRef)}"
+										href="/containers?search={encodeURIComponent(tagInfo.fullRef)}"
 										class="text-muted-foreground hover:text-foreground hover:underline"
 										title="View containers using this image"
 									>

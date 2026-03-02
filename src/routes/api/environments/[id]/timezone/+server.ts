@@ -8,7 +8,7 @@ import {
 } from '$lib/server/db';
 import { refreshSchedulesForEnvironment } from '$lib/server/scheduler';
 
-/** Map of modern IANA timezone names to their canonical equivalents recognized by Bun/ICU */
+/** Map of modern IANA timezone names to their canonical equivalents recognized by ICU */
 const TIMEZONE_ALIASES: Record<string, string> = {
 	'Europe/Kyiv': 'Europe/Kiev',
 	'Asia/Ho_Chi_Minh': 'Asia/Saigon',

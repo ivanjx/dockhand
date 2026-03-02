@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
+	import { readJobResponse } from '$lib/utils/sse-fetch';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import * as Dialog from '$lib/components/ui/dialog';
@@ -1114,18 +1115,9 @@
 				throw new Error('Failed to pull Grype image');
 			}
 
-			// Read SSE stream to completion
-			const reader = response.body?.getReader();
-			if (reader) {
-				const decoder = new TextDecoder();
-				while (true) {
-					const { done, value } = await reader.read();
-					if (done) break;
-					const text = decoder.decode(value, { stream: true });
-					if (text.includes('"status":"error"')) {
-						throw new Error('Pull failed');
-					}
-				}
+			const result = await readJobResponse(response);
+			if (result.success === false) {
+				throw new Error(result.error as string || 'Pull failed');
 			}
 
 			// Refresh scanner status after pull
@@ -1155,18 +1147,9 @@
 				throw new Error('Failed to pull Trivy image');
 			}
 
-			// Read SSE stream to completion
-			const reader = response.body?.getReader();
-			if (reader) {
-				const decoder = new TextDecoder();
-				while (true) {
-					const { done, value } = await reader.read();
-					if (done) break;
-					const text = decoder.decode(value, { stream: true });
-					if (text.includes('"status":"error"')) {
-						throw new Error('Pull failed');
-					}
-				}
+			const result = await readJobResponse(response);
+			if (result.success === false) {
+				throw new Error(result.error as string || 'Pull failed');
 			}
 
 			// Refresh scanner status after pull

@@ -521,16 +521,12 @@
 				// Add to beginning of events (prepend new events) - use Set for fast duplicate check
 				if (!eventIds.has(newEvent.id)) {
 					eventIds.add(newEvent.id);
-					// Use unshift() for in-place mutation instead of spread for O(n) copy
-					events.unshift(newEvent);
-					events = events; // Trigger Svelte reactivity
+					events = [newEvent, ...events];
 					total = total + 1;
 
 					// Add container to list if not already there
 					if (newEvent.containerName && !containers.includes(newEvent.containerName)) {
-						containers.push(newEvent.containerName);
-						containers.sort();
-						containers = containers; // Trigger Svelte reactivity
+						containers = [...containers, newEvent.containerName].sort();
 					}
 				}
 			} catch {
@@ -622,6 +618,11 @@
 			initialized = true;
 			return fetchContainers();
 		}).then(() => {
+			connectSSE();
+			initialLoadDone = true;
+		}).catch((err) => {
+			console.error('[Activity] Init chain failed:', err);
+			// Connect SSE anyway so live events still work
 			connectSSE();
 			initialLoadDone = true;
 		});

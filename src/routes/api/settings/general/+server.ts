@@ -29,7 +29,7 @@ import {
 } from '$lib/server/db';
 import { authorize } from '$lib/server/authorize';
 import { refreshSystemJobs } from '$lib/server/scheduler';
-import { sendToEventSubprocess, sendToMetricsSubprocess, type UpdateIntervalCommand } from '$lib/server/subprocess-manager';
+import { sendToEventSubprocess, sendToMetricsSubprocess } from '$lib/server/subprocess-manager';
 
 export type TimeFormat = '12h' | '24h';
 export type DateFormat = 'MM/DD/YYYY' | 'DD/MM/YYYY' | 'YYYY-MM-DD' | 'DD.MM.YYYY';

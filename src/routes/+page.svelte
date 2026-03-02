@@ -920,6 +920,7 @@
 		}
 		unsubscribeDashboardData();
 		unsubscribePrefs();
+		mobileWatcher.destroy();
 	});
 </script>
 

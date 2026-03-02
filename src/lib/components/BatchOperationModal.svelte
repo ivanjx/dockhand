@@ -70,7 +70,7 @@
 	let successCount = $state(0);
 	let failCount = $state(0);
 	let cancelledCount = $state(0);
-	let abortController: AbortController | null = null;
+	let cancelled = false;
 
 	// Progress calculation
 	const progress = $derived(() => {
@@ -88,9 +88,7 @@
 
 	// Cleanup on destroy
 	onDestroy(() => {
-		if (abortController) {
-			abortController.abort();
-		}
+		cancelled = true;
 	});
 
 	async function startOperation() {
@@ -106,20 +104,13 @@
 		successCount = 0;
 		failCount = 0;
 		cancelledCount = 0;
-
-		abortController = new AbortController();
+		cancelled = false;
 
 		try {
 			const response = await fetch(`/api/batch${envId ? `?env=${envId}` : ''}`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					operation,
-					entityType,
-					items,
-					options
-				}),
-				signal: abortController.signal
+				body: JSON.stringify({ operation, entityType, items, options })
 			});
 
 			if (!response.ok) {
@@ -127,52 +118,44 @@
 				throw new Error(error.error || 'Request failed');
 			}
 
-			if (!response.body) {
-				throw new Error('No response body');
-			}
+			const data = await response.json();
+			const { jobId } = data;
 
-			const reader = response.body.getReader();
-			const decoder = new TextDecoder();
-			let buffer = '';
+			// Poll job for progress events
+			let cursor = 0;
+			while (!cancelled) {
+				const jobRes = await fetch(`/api/jobs/${jobId}`);
+				if (!jobRes.ok) break;
+				const job = await jobRes.json();
 
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split('\n\n');
-				buffer = lines.pop() || '';
-
-				for (const line of lines) {
-					if (line.startsWith('data: ')) {
-						try {
-							const event: BatchEvent = JSON.parse(line.slice(6));
-							handleEvent(event);
-						} catch {
-							// Ignore parse errors
-						}
-					}
+				// Process new lines since last poll
+				const newLines = job.lines.slice(cursor);
+				cursor = job.lines.length;
+				for (const line of newLines) {
+					handleEvent(line.data as BatchEvent);
 				}
+
+				if (job.status !== 'running') break;
+				await new Promise((r) => setTimeout(r, 500));
 			}
-		} catch (error: any) {
-			if (error.name === 'AbortError') {
-				// User cancelled - mark remaining as cancelled
-				let cancelled = 0;
+
+			if (cancelled) {
+				// Mark remaining items as cancelled
+				let cancelCount = 0;
 				itemStates = itemStates.map(item => {
 					if (item.status === 'pending' || item.status === 'processing') {
-						cancelled++;
+						cancelCount++;
 						return { ...item, status: 'cancelled' as ItemStatus };
 					}
 					return item;
 				});
-				cancelledCount = cancelled;
-			} else {
-				console.error('Batch operation error:', error);
+				cancelledCount = cancelCount;
 			}
+		} catch (error: any) {
+			console.error('Batch operation error:', error);
 		} finally {
 			isRunning = false;
 			isComplete = true;
-			abortController = null;
 		}
 	}
 
@@ -195,9 +178,7 @@
 	}
 
 	function handleCancel() {
-		if (abortController) {
-			abortController.abort();
-		}
+		cancelled = true;
 	}
 
 	function handleClose() {

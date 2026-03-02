@@ -14,7 +14,7 @@ export const containerColumns: ColumnConfig[] = [
 	{ id: 'networkIO', label: 'Net I/O', width: 85, minWidth: 70, align: 'right' },
 	{ id: 'diskIO', label: 'Disk I/O', width: 85, minWidth: 70, align: 'right' },
 	{ id: 'ip', label: 'IP', sortable: true, sortField: 'ip', width: 100, minWidth: 80 },
-	{ id: 'ports', label: 'Ports', width: 120, minWidth: 60 },
+	{ id: 'ports', label: 'Ports', sortable: true, sortField: 'ports', width: 120, minWidth: 60 },
 	{ id: 'autoUpdate', label: 'Auto-update', width: 95, minWidth: 70 },
 	{ id: 'stack', label: 'Stack', sortable: true, sortField: 'stack', width: 100, minWidth: 60 },
 	{ id: 'actions', label: '', fixed: 'end', width: 200, minWidth: 150, resizable: true }

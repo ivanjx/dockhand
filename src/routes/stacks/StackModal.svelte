@@ -20,6 +20,8 @@
 	import { copyToClipboard } from '$lib/utils/clipboard';
 	import * as Alert from '$lib/components/ui/alert';
 	import { ErrorDialog } from '$lib/components/ui/error-dialog';
+	import { readJobResponse } from '$lib/utils/sse-fetch';
+	import { toast } from 'svelte-sonner';
 	import ComposeGraphViewer from './ComposeGraphViewer.svelte';
 	import { useSidebar } from '$lib/components/ui/sidebar/context.svelte';
 
@@ -37,7 +39,11 @@
 		onSuccess: () => void; // Called after create or save
 	}
 
-	let { open = $bindable(), mode, stackName = '', onClose, onSuccess }: Props = $props();
+	let { open = $bindable(), mode: propMode, stackName: propStackName = '', onClose, onSuccess }: Props = $props();
+
+	// Local effective state - can transition from create → edit after failed deploy
+	let mode = $state(propMode);
+	let stackName = $state(propStackName);
 
 	// Form state
 	let newStackName = $state('');
@@ -930,11 +936,17 @@ services:
 				body: JSON.stringify(requestBody)
 			});
 
-			if (!response.ok) {
-				const data = await response.json();
+			// When start=true, response is a job or JSON; when start=false, it's plain JSON
+			const data = start ? await readJobResponse(response) : await response.json();
+
+			if (!response.ok && !data.success) {
 				throw new Error((typeof data.error === 'string' ? data.error : data.message) || 'Failed to create stack');
 			}
+			if (data.success === false) {
+				throw new Error(data.error || 'Failed to create stack');
+			}
 
+			toast.success(`Created stack "${newStackName.trim()}"`);
 			onSuccess();
 			handleClose();
 		} catch (e: any) {
@@ -943,6 +955,13 @@ services:
 				message: e.message || 'An error occurred while creating the stack',
 				details: e.details
 			};
+			// If start=true, files were saved and stack is in DB — transition to edit mode
+			// so the user can fix and redeploy without leaving the modal
+			if (start) {
+				mode = 'edit';
+				stackName = newStackName.trim();
+				onSuccess(); // refresh stack list so the new stack appears
+			}
 		} finally {
 			saving = false;
 		}
@@ -1094,13 +1113,18 @@ services:
 				}
 			);
 
-			const data = await response.json();
+			// When restart=true, response is a job or JSON; when restart=false, it's plain JSON
+			const data = restart ? await readJobResponse(response) : await response.json();
 
-			if (!response.ok) {
+			if (!response.ok && !data.success) {
 				throw new Error((typeof data.error === 'string' ? data.error : data.message) || 'Failed to save compose file');
+			}
+			if (data.success === false) {
+				throw new Error(data.error || 'Failed to save compose file');
 			}
 
 			isDirty = false; // Reset dirty flag after successful save
+			toast.success(restart ? 'Stack applied' : 'Stack saved');
 			onSuccess();
 
 			if (!restart) {
@@ -1147,6 +1171,9 @@ services:
 			clearTimeout(validateTimer);
 			validateTimer = null;
 		}
+		// Reset mode back to prop values
+		mode = propMode;
+		stackName = propStackName;
 		// Reset all state
 		newStackName = '';
 		error = null;
@@ -1196,6 +1223,9 @@ services:
 	$effect(() => {
 		if (open && !hasInitialized) {
 			hasInitialized = true;
+			// Reset mode to prop values on each open
+			mode = propMode;
+			stackName = propStackName;
 			if (mode === 'edit' && stackName) {
 				loadComposeFile().then(() => {
 					// Auto-validate after loading

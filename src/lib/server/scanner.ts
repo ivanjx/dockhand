@@ -15,7 +15,7 @@ import {
 } from './docker';
 import { getEnvironment, getEnvSetting, getSetting } from './db';
 import { sendEventNotification } from './notifications';
-import { getHostDockerSocket, getHostDataDir, extractUidFromSocketPath } from './host-path';
+import { getHostDockerSocket, getHostDataDir, extractUidFromSocketPath, getOwnDockerHost, getOwnNetworkMode } from './host-path';
 import { resolve } from 'node:path';
 import { mkdir, chown } from 'node:fs/promises';
 
@@ -306,8 +306,18 @@ export function sanitizeJsonString(json: string): string {
 			const ch2 = json[i];
 			if ('"\\\/bfnrtu'.includes(ch2)) {
 				result += ch2;
+			} else if (ch < 0x20) {
+				// Backslash followed by a raw control character (e.g. \ + 0x0A)
+				// The backslash was already added to result — escape it as \\
+				// then also escape the control character
+				result += '\\';
+				if (ch === 0x0A) result += '\\n';
+				else if (ch === 0x0D) result += '\\r';
+				else if (ch === 0x09) result += '\\t';
+				else result += `\\u${ch.toString(16).padStart(4, '0')}`;
+				sanitized++;
 			} else {
-				// Invalid escape like \x, \a, \0, \_ — convert backslash to literal \\
+				// Invalid escape like \x, \a, \e — convert backslash to literal \\
 				result += '\\' + ch2;
 				sanitized++;
 			}
@@ -341,7 +351,7 @@ export function sanitizeJsonString(json: string): string {
 	}
 
 	if (sanitized > 0) {
-		console.warn(`[Scanner] Sanitized ${sanitized} control characters in JSON output`);
+		console.warn(`[Scanner] Sanitized ${sanitized} control/escape characters in JSON output`);
 	}
 
 	return result;
@@ -359,12 +369,10 @@ function parseGrypeOutput(output: string): { vulnerabilities: Vulnerability[]; s
 		unknown: 0
 	};
 
-	console.log('[Grype] Raw output length:', output.length);
-	console.log('[Grype] Output starts with:', output.slice(0, 200));
-	console.log('[Grype] Output ends with:', JSON.stringify(output.slice(-50)));
-
 	try {
-		const data = JSON.parse(sanitizeJsonString(extractJson(output)));
+		const extracted = extractJson(output);
+		const sanitized = sanitizeJsonString(extracted);
+		const data = JSON.parse(sanitized);
 
 		if (data.matches) {
 			for (const match of data.matches) {
@@ -587,42 +595,45 @@ async function runScannerContainerCore(
 	const basePath = scannerType === 'grype' ? '/cache/grype' : '/cache/trivy';
 	const dbPath = basePath;
 
-	// Detect the host Docker socket path based on connection type
-	// For local socket environments, detect the actual host socket path (handles rootless Docker)
-	// For remote environments (hawser/direct with host), scanner runs remotely and uses standard path
+	// Detect how the scanner container should access Docker.
+	// Strategy: mirror Dockhand's own Docker connection when running locally.
 	const env = envId ? await getEnvironment(envId) : undefined;
 	const connectionType = env?.connectionType;
 
-	// Determine if this is a local socket environment:
-	// - connectionType === 'socket' (explicit)
-	// - connectionType is null/undefined (default behavior)
-	// - connectionType === 'direct' but no host specified (legacy local environments)
-	const isLocalSocket = !connectionType ||
-		connectionType === 'socket' ||
-		(connectionType === 'direct' && !env?.host);
+	const isHawser = connectionType === 'hawser-standard' || connectionType === 'hawser-edge';
 
-	let hostSocketPath: string;
+	let hostSocketPath: string | null = null;
 	let rootlessUid: string | undefined;
+	let scannerNetworkMode: string | undefined;
+	let scannerDockerHost: string | undefined;
 
-	if (isLocalSocket) {
-		// Local socket environment - detect host socket path (handles rootless Docker)
+	// Check if Dockhand itself uses TCP to reach Docker (e.g., socket proxy).
+	// Detected at startup from Dockhand's own container inspect data.
+	// This applies to ALL non-hawser environments since the scanner container
+	// runs on the same Docker daemon and needs the same access method.
+	const ownDockerHost = getOwnDockerHost();
+
+	if (!isHawser && ownDockerHost?.startsWith('tcp://')) {
+		// TCP mode: scanner uses the same DOCKER_HOST + network as Dockhand
+		scannerDockerHost = ownDockerHost;
+		scannerNetworkMode = getOwnNetworkMode() ?? undefined;
+		console.log(`[Scanner] TCP mode (from container inspect) - DOCKER_HOST=${scannerDockerHost}, network=${scannerNetworkMode ?? 'default'}`);
+	} else if (isHawser) {
+		// Hawser: scanner runs on remote host, uses remote host's standard Docker socket
+		hostSocketPath = '/var/run/docker.sock';
+		console.log(`[Scanner] Remote scan via Hawser (${connectionType}) - using standard socket path`);
+	} else {
+		// Local socket — detect host socket path (handles rootless Docker)
 		hostSocketPath = getHostDockerSocket();
 		console.log(`[Scanner] Local socket scan (${connectionType || 'default'}) - detected host Docker socket: ${hostSocketPath}`);
 
 		// For user-specific Docker sockets (rootless Docker), detect UID for cache ownership
-		// but do NOT set container user — in rootless Docker, root inside the container
-		// maps to the socket-owning UID on the host via user namespace remapping
 		const uid = extractUidFromSocketPath(hostSocketPath);
 		if (uid) {
 			rootlessUid = uid;
 			console.log(`[Scanner] Rootless Docker detected (UID ${rootlessUid})`);
 			console.log(`[Scanner] Scanner will run as root inside container (maps to UID ${rootlessUid} on host via user namespace)`);
 		}
-	} else {
-		// Remote environment (direct with host/hawser-standard/hawser-edge)
-		// Scanner runs on remote host, uses remote host's standard Docker socket
-		hostSocketPath = '/var/run/docker.sock';
-		console.log(`[Scanner] Remote scan (${connectionType}, host: ${env?.host}) - using standard socket path: ${hostSocketPath}`);
 	}
 
 	// Determine cache storage strategy based on environment
@@ -643,10 +654,12 @@ async function runScannerContainerCore(
 		console.log(`[Scanner] Standard mode - using volume: ${volumeName}`);
 	}
 
-	const binds = [
-		`${hostSocketPath}:/var/run/docker.sock:ro`,
-		cacheBind
-	];
+	// Build binds — only include socket mount when using socket mode
+	const binds: string[] = [];
+	if (hostSocketPath) {
+		binds.push(`${hostSocketPath}:/var/run/docker.sock:ro`);
+	}
+	binds.push(cacheBind);
 
 	console.log(`[Scanner] Container bind mounts: ${JSON.stringify(binds)}`);
 
@@ -654,6 +667,11 @@ async function runScannerContainerCore(
 	const envVars = scannerType === 'grype'
 		? [`GRYPE_DB_CACHE_DIR=${dbPath}`]
 		: [`TRIVY_CACHE_DIR=${dbPath}`];
+
+	// In TCP mode, pass DOCKER_HOST so scanner connects to Docker via TCP
+	if (scannerDockerHost) {
+		envVars.push(`DOCKER_HOST=${scannerDockerHost}`);
+	}
 
 	console.log(`[Scanner] Running ${scannerType} with cache mounted at ${basePath}`);
 	console.log(`[Scanner] Container command: ${cmd.join(' ')}`);
@@ -665,6 +683,7 @@ async function runScannerContainerCore(
 		env: envVars,
 		name: `dockhand-${scannerType}-${Date.now()}`,
 		envId,
+		networkMode: scannerNetworkMode,
 		timeout: 600_000, // 10 minutes
 		onStderr: (data) => {
 			// Stream stderr lines for real-time progress output
@@ -680,8 +699,8 @@ async function runScannerContainerCore(
 	console.log(`[Scanner] ${scannerType} container completed, output length: ${output.length}`);
 	if (output.length === 0) {
 		console.error(`[Scanner] WARNING: Empty output from ${scannerType} container`);
-		console.error(`[Scanner] This may indicate the scanner couldn't access Docker socket`);
-		console.error(`[Scanner] Host socket path used: ${hostSocketPath}`);
+		console.error(`[Scanner] This may indicate the scanner couldn't access Docker`);
+		console.error(`[Scanner] Docker access: ${scannerDockerHost ? `TCP ${scannerDockerHost}` : `socket ${hostSocketPath}`}`);
 	} else if (output.length < 100) {
 		console.log(`[Scanner] ${scannerType} output preview: ${output}`);
 	}

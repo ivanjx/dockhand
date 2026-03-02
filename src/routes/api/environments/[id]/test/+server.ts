@@ -71,7 +71,7 @@ export const POST: RequestHandler = async ({ params }) => {
 		}
 
 		// For Hawser Standard mode, fetch Docker info and Hawser info in parallel
-		// (sequential calls can fail due to Bun TLS connection reuse issues)
+		// (parallel calls are more efficient and avoid sequential connection issues)
 		let info: any;
 		let hawserInfo = null;
 		if (env.connectionType === 'hawser-standard') {

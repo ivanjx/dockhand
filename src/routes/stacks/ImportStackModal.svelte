@@ -150,9 +150,14 @@
 			}
 
 			scanResults = discovered;
+			const skippedCount = (data.skipped || []).length;
 
 			if (discovered.length === 0) {
-				toast.info('No compose stacks found in this directory');
+				if (skippedCount > 0) {
+					toast.info(`All ${skippedCount} stack(s) in this directory are already adopted`);
+				} else {
+					toast.info('No compose stacks found in this directory');
+				}
 			} else {
 				const selections = new Map<string, boolean>();
 				for (const stack of discovered) {

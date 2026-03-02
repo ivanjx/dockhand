@@ -352,9 +352,9 @@ export async function runEnvUpdateCheckJob(
 
 					// Recreate container with full config passthrough
 					await log(`  Recreating container...`);
-					const ok = await recreateContainer(update.containerName, environmentId,
+					const result = await recreateContainer(update.containerName, environmentId,
 						(msg) => { log(`  ${msg}`); });
-					if (!ok) throw new Error('Container recreation failed');
+					if (!result.success) throw new Error(result.error || 'Container recreation failed');
 
 					await log(`  Updated successfully`);
 					successCount++;

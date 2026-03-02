@@ -1,6 +1,8 @@
 import type { RequestHandler } from './$types';
 import { authorize } from '$lib/server/authorize';
 import { getEnvironment } from '$lib/server/db';
+import { unixSocketRequest, unixSocketStreamRequest, httpsAgentRequest } from '$lib/server/docker';
+import type { DockerClientConfig as BaseDockerClientConfig } from '$lib/server/docker';
 import { sendEdgeRequest, sendEdgeStreamRequest, isEdgeConnected } from '$lib/server/hawser';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -424,37 +426,20 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
 					let inspectResponse: Response;
 
 					if (config.type === 'socket') {
-						inspectResponse = await fetch(`http://localhost${inspectPath}`, {
-							// @ts-ignore - Bun supports unix socket
-							unix: config.socketPath
-						});
+						inspectResponse = await unixSocketRequest(config.socketPath, inspectPath);
+					} else if (config.type === 'https') {
+						const extraHeaders: Record<string, string> = {};
+						if (config.hawserToken) extraHeaders['X-Hawser-Token'] = config.hawserToken;
+						inspectResponse = await httpsAgentRequest(config as BaseDockerClientConfig, inspectPath, {}, false, extraHeaders);
 					} else {
-						const inspectUrl = `${config.type}://${config.host}:${config.port}${inspectPath}`;
+						const inspectUrl = `http://${config.host}:${config.port}${inspectPath}`;
 						const inspectHeaders: Record<string, string> = {};
 						if (config.hawserToken) inspectHeaders['X-Hawser-Token'] = config.hawserToken;
-
-						// Build fetch options - only include tls for HTTPS
-						const fetchOptions: any = {
-							headers: inspectHeaders,
-							signal: AbortSignal.timeout(30000)
-						};
-						if (config.type === 'https') {
-							fetchOptions.tls = {
-								sessionTimeout: 0,
-								servername: config.host,
-								rejectUnauthorized: !config.skipVerify
-							};
-							if (config.ca) fetchOptions.tls.ca = [config.ca];
-							if (config.cert) fetchOptions.tls.cert = [config.cert];
-							if (config.key) fetchOptions.tls.key = config.key;
-							fetchOptions.keepalive = false;
-							if (process.env.DEBUG_TLS) fetchOptions.verbose = true;
-						}
-
-						inspectResponse = await fetch(inspectUrl, fetchOptions);
+						inspectResponse = await fetch(inspectUrl, { headers: inspectHeaders, signal: AbortSignal.timeout(30000) });
 					}
 
 					if (!inspectResponse.ok) {
+						await inspectResponse.arrayBuffer().catch(() => {});
 						console.log(`[merged-logs] Inspect failed for ${containerId.slice(0, 12)}, skipping`);
 						return null;
 					}
@@ -468,39 +453,20 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
 					let logsResponse: Response;
 
 					if (config.type === 'socket') {
-						logsResponse = await fetch(`http://localhost${logsPath}`, {
-							// @ts-ignore - Bun supports unix socket
-							unix: config.socketPath,
-							signal: abortController.signal
-						});
+						logsResponse = await unixSocketStreamRequest(config.socketPath, logsPath);
+					} else if (config.type === 'https') {
+						const extraHeaders: Record<string, string> = {};
+						if (config.hawserToken) extraHeaders['X-Hawser-Token'] = config.hawserToken;
+						logsResponse = await httpsAgentRequest(config as BaseDockerClientConfig, logsPath, {}, true, extraHeaders);
 					} else {
-						const logsUrl = `${config.type}://${config.host}:${config.port}${logsPath}`;
+						const logsUrl = `http://${config.host}:${config.port}${logsPath}`;
 						const logsHeaders: Record<string, string> = {};
 						if (config.hawserToken) logsHeaders['X-Hawser-Token'] = config.hawserToken;
-
-						// For logs streaming, use the cleanup abort controller without a timeout
-						// (the stream needs to stay open indefinitely)
-						const fetchOptions: any = {
-							headers: logsHeaders,
-							signal: abortController.signal
-						};
-						if (config.type === 'https') {
-							fetchOptions.tls = {
-								sessionTimeout: 0,
-								servername: config.host,
-								rejectUnauthorized: !config.skipVerify
-							};
-							if (config.ca) fetchOptions.tls.ca = [config.ca];
-							if (config.cert) fetchOptions.tls.cert = [config.cert];
-							if (config.key) fetchOptions.tls.key = config.key;
-							fetchOptions.keepalive = false;
-							if (process.env.DEBUG_TLS) fetchOptions.verbose = true;
-						}
-
-						logsResponse = await fetch(logsUrl, fetchOptions);
+						logsResponse = await fetch(logsUrl, { headers: logsHeaders, signal: abortController.signal });
 					}
 
 					if (!logsResponse.ok) {
+						await logsResponse.arrayBuffer().catch(() => {});
 						console.error(`[merged-logs] Failed to get logs for container ${containerId}: ${logsResponse.status}`);
 						return null;
 					}
@@ -647,7 +613,8 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
 			for (const source of sources) {
 				if (source.reader) {
 					try {
-						source.reader.releaseLock();
+						await source.reader.cancel().catch(() => {});
+					source.reader.releaseLock();
 					} catch {
 						// Ignore
 					}

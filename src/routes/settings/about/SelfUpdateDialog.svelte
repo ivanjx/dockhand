@@ -22,10 +22,13 @@
 		newDigest?: string;
 		containerName: string;
 		isComposeManaged?: boolean;
+		latestVersion?: string;
 		onclose: () => void;
 	}
 
-	let { open = $bindable(), currentImage, newImage, currentDigest = '', newDigest = '', containerName, isComposeManaged = false, onclose }: Props = $props();
+	let { open = $bindable(), currentImage, newImage, currentDigest = '', newDigest = '', containerName, isComposeManaged = false, latestVersion, onclose }: Props = $props();
+
+	const isVersionUpdate = $derived(currentImage !== newImage);
 
 	// Phase management
 	type Phase = 'confirm' | 'preparing' | 'updating' | 'restarting' | 'completed' | 'error';
@@ -210,7 +213,7 @@
 		try {
 			const response = await fetch('/api/self-update', {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
+				headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
 				body: JSON.stringify({ newImage })
 			});
 
@@ -511,19 +514,30 @@
 							{containerName}
 						</span>
 					</div>
-					<div class="flex items-center justify-between text-sm">
-						<span class="text-muted-foreground">Image</span>
-						<Badge variant="secondary" class="font-mono text-xs">{currentImage}</Badge>
-					</div>
-					{#if currentDigest || newDigest}
+					{#if isVersionUpdate}
 						<div class="flex items-center justify-between text-sm">
-							<span class="text-muted-foreground">Current digest</span>
-							<span class="font-mono text-xs text-muted-foreground">{currentDigest ? currentDigest.replace('sha256:', '').slice(0, 12) : 'unknown'}</span>
+							<span class="text-muted-foreground">Current image</span>
+							<Badge variant="secondary" class="font-mono text-xs">{currentImage}</Badge>
 						</div>
 						<div class="flex items-center justify-between text-sm">
-							<span class="text-muted-foreground">New digest</span>
-							<span class="font-mono text-xs text-amber-500">{newDigest ? newDigest.replace('sha256:', '').slice(0, 12) : 'unknown'}</span>
+							<span class="text-muted-foreground">New image</span>
+							<Badge variant="default" class="font-mono text-xs">{newImage}</Badge>
 						</div>
+					{:else}
+						<div class="flex items-center justify-between text-sm">
+							<span class="text-muted-foreground">Image</span>
+							<Badge variant="secondary" class="font-mono text-xs">{currentImage}</Badge>
+						</div>
+						{#if currentDigest || newDigest}
+							<div class="flex items-center justify-between text-sm">
+								<span class="text-muted-foreground">Current digest</span>
+								<span class="font-mono text-xs text-muted-foreground">{currentDigest ? currentDigest.replace('sha256:', '').slice(0, 12) : 'unknown'}</span>
+							</div>
+							<div class="flex items-center justify-between text-sm">
+								<span class="text-muted-foreground">New digest</span>
+								<span class="font-mono text-xs text-amber-500">{newDigest ? newDigest.replace('sha256:', '').slice(0, 12) : 'unknown'}</span>
+							</div>
+						{/if}
 					{/if}
 				</div>
 

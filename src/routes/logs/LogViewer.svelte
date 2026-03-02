@@ -33,6 +33,9 @@
 	let wordWrap = $state(true);
 	let fontSize = $state(12);
 
+	// RAF-based auto-scroll
+	let scrollRafPending = false;
+
 	// Search state
 	let logSearchActive = $state(false);
 	let logSearchQuery = $state('');
@@ -51,9 +54,13 @@
 	// Auto-scroll when logs change
 	$effect(() => {
 		if (autoScroll && logsRef && logs) {
-			setTimeout(() => {
-				logsRef.scrollTop = logsRef.scrollHeight;
-			}, 50);
+			if (!scrollRafPending) {
+				scrollRafPending = true;
+				requestAnimationFrame(() => {
+					if (logsRef) logsRef.scrollTop = logsRef.scrollHeight;
+					scrollRafPending = false;
+				});
+			}
 		}
 	});
 

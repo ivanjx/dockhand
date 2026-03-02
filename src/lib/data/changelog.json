@@ -1,5 +1,24 @@
 [
   {
+    "version": "1.0.19",
+    "comingSoon": true,
+    "changes": [
+      { "type": "feature", "text": "Inline logs panel on stacks page — view container logs without leaving the page" },
+      { "type": "feature", "text": "Make ports column sortable in containers grid" },
+      { "type": "feature", "text": "Structured auth logging with client IP (login/logout/MFA/OIDC events)" },
+      { "type": "fix", "text": "Fix memory leak: TLS context accumulation for HTTPS environments (Bun)" },
+      { "type": "fix", "text": "Fix security scanning on Docker with custom logging drivers (Loki, Fluentd, etc.)" },
+      { "type": "fix", "text": "Fix grouped log viewer not auto-scrolling on new entries" },
+      { "type": "fix", "text": "Fix container recreation error messages not surfacing actual Docker errors" },
+      { "type": "fix", "text": "Fix LDAP group-to-role mapping" },
+      { "type": "fix", "text": "Fix container file browser hiding old files" },
+      { "type": "fix", "text": "Fix SSH key permission issues on NAS filesystems" },
+      { "type": "fix", "text": "Fix binary file corruption when syncing stacks to Hawser agents" },
+      { "type": "fix", "text": "Fix UI timeout issues for long running operations" }
+    ],
+    "imageTag": "fnsys/dockhand:v1.0.19"
+  },
+  {
     "version": "1.0.18",
     "date": "2026-02-16",
     "changes": [

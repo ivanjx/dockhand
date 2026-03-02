@@ -91,7 +91,7 @@ export const PUT: RequestHandler = async (event) => {
 			return json({ error: 'Environment not found' }, { status: 404 });
 		}
 
-		// Notify subprocesses if collectActivity or collectMetrics setting changed
+		// Notify event collectors if collectActivity or collectMetrics setting changed
 		if (data.collectActivity !== undefined || data.collectMetrics !== undefined) {
 			refreshSubprocessEnvironments();
 		}
@@ -178,7 +178,7 @@ export const DELETE: RequestHandler = async (event) => {
 		await deleteImagePruneSettings(id);
 		unregisterSchedule(id, 'image_prune');
 
-		// Notify subprocesses to stop collecting from deleted environment
+		// Notify event collectors to stop collecting from deleted environment
 		refreshSubprocessEnvironments();
 
 		// Audit log

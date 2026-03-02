@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import { X, GripHorizontal, RefreshCw, Copy, Download, WrapText, ArrowDownToLine, Search, ChevronUp, ChevronDown, Sun, Moon, Wifi, WifiOff, Pause, Play } from 'lucide-svelte';
 	import { copyToClipboard } from '$lib/utils/clipboard';
 	import * as Select from '$lib/components/ui/select';
@@ -38,6 +38,14 @@
 	const RECONNECT_DELAY = 3000;
 	const OFFLINE_POLL_INTERVAL = 5000; // Check every 5 seconds when offline
 	let offlinePollingInterval: ReturnType<typeof setInterval> | null = null;
+
+	// SSE batching - buffer incoming text and flush to state periodically
+	let pendingText = '';
+	let flushTimer: ReturnType<typeof setTimeout> | null = null;
+	const FLUSH_INTERVAL = 100; // ms
+
+	// RAF-based auto-scroll
+	let scrollRafPending = false;
 
 	// Search state
 	let logSearchActive = $state(false);
@@ -146,6 +154,37 @@
 		return `${url}${separator}env=${envId}`;
 	}
 
+	// Flush buffered text to state
+	function flushLogs() {
+		if (flushTimer) {
+			clearTimeout(flushTimer);
+			flushTimer = null;
+		}
+		if (!pendingText) return;
+
+		logs += pendingText;
+		pendingText = '';
+
+		// Apply log buffer size limit (convert KB to characters, roughly 1 char = 1 byte)
+		const maxSize = $appSettings.logBufferSizeKb * 1024;
+		if (logs.length > maxSize) {
+			logs = logs.substring(logs.length - Math.floor(maxSize * 0.8));
+		}
+
+		scrollToBottom();
+	}
+
+	// RAF-based scroll to bottom (coalesces multiple calls into one frame)
+	async function scrollToBottom() {
+		if (!autoScroll || !logsRef || scrollRafPending) return;
+		scrollRafPending = true;
+		await tick();
+		requestAnimationFrame(() => {
+			if (logsRef) logsRef.scrollTop = logsRef.scrollHeight;
+			scrollRafPending = false;
+		});
+	}
+
 	// Start SSE streaming for logs
 	function startStreaming() {
 		if (!containerId || !streamingEnabled) return;
@@ -173,29 +212,17 @@
 						// Add container name prefix to each line if available
 						let text = data.text;
 						if (data.containerName) {
-							// Split by lines, prefix each non-empty line, rejoin
 							const lines = text.split('\n');
 							text = lines.map((line: string, i: number) => {
-								// Don't prefix empty lines at the end
 								if (line === '' && i === lines.length - 1) return line;
 								if (line === '') return line;
 								return `[${data.containerName}] ${line}`;
 							}).join('\n');
 						}
-						logs += text;
-
-						// Apply log buffer size limit (convert KB to characters, roughly 1 char = 1 byte)
-						const maxSize = $appSettings.logBufferSizeKb * 1024;
-						if (logs.length > maxSize) {
-							// Truncate from the beginning, keeping 80% of max size
-							logs = logs.substring(logs.length - Math.floor(maxSize * 0.8));
-						}
-
-						// Auto-scroll to bottom
-						if (autoScroll && logsRef) {
-							setTimeout(() => {
-								logsRef.scrollTop = logsRef.scrollHeight;
-							}, 50);
+						// Buffer text and schedule flush
+						pendingText += text;
+						if (!flushTimer) {
+							flushTimer = setTimeout(flushLogs, FLUSH_INTERVAL);
 						}
 					}
 				} catch {
@@ -293,6 +320,8 @@
 
 	// Stop SSE streaming
 	function stopStreaming(resetAttempts = true) {
+		// Flush any buffered text before stopping
+		flushLogs();
 		if (reconnectTimeout) {
 			clearTimeout(reconnectTimeout);
 			reconnectTimeout = null;
@@ -382,12 +411,7 @@
 				return;
 			}
 			logs = data.logs || '';
-			// Auto-scroll to bottom
-			if (autoScroll && logsRef) {
-				setTimeout(() => {
-					logsRef.scrollTop = logsRef.scrollHeight;
-				}, 50);
-			}
+			scrollToBottom();
 		} catch (error) {
 			console.error('Failed to fetch logs:', error);
 			logs = `Failed to fetch logs: ${error instanceof Error ? error.message : 'Unknown error'}`;
@@ -653,6 +677,8 @@
 		document.removeEventListener('mouseup', stopDrag);
 		document.removeEventListener('visibilitychange', handleVisibilityChange);
 		document.removeEventListener('resume', handleVisibilityChange);
+		// Flush pending text and clean up timers
+		flushLogs();
 		stopStreaming();
 	});
 </script>

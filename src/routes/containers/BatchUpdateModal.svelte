@@ -12,6 +12,7 @@
 	import VulnerabilityCriteriaBadge from '$lib/components/VulnerabilityCriteriaBadge.svelte';
 	import UpdateSummaryStats from '$lib/components/UpdateSummaryStats.svelte';
 	import ScannerSeverityPills from '$lib/components/ScannerSeverityPills.svelte';
+	import { watchJob } from '$lib/utils/sse-fetch';
 
 	interface Props {
 		open: boolean;
@@ -131,140 +132,123 @@
 				throw new Error(data.error || 'Failed to start update');
 			}
 
-			const reader = response.body?.getReader();
-			if (!reader) {
-				throw new Error('No response body');
-			}
-
-			const decoder = new TextDecoder();
-			let buffer = '';
+			const { jobId } = await response.json();
 			const successIds: string[] = [];
 			const failedIds: string[] = [];
 			const blockedIds: string[] = [];
 
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
+			await watchJob(jobId, (line) => {
+				try {
+					const data = line.data as any;
+					scrollTick++;
 
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split('\n');
-				buffer = lines.pop() || '';
+					if (data.type === 'start') {
+						totalCount = data.total;
+					} else if (data.type === 'progress') {
+						currentIndex = data.current;
 
-				for (const line of lines) {
-					if (!line.trim() || !line.startsWith('data: ')) continue;
+						// Update or add progress entry
+						const existingIndex = progress.findIndex(p => p.containerId === data.containerId);
+						if (existingIndex >= 0) {
+							progress[existingIndex].step = data.step;
+							progress[existingIndex].success = data.success;
+							progress[existingIndex].error = data.error;
+							progress = [...progress]; // Trigger reactivity
+						} else {
+							progress = [...progress, {
+								containerId: data.containerId,
+								containerName: data.containerName,
+								step: data.step,
+								success: data.success,
+								error: data.error,
+								pullLogs: [],
+								scanLogs: [],
+								showLogs: true,
+							}];
+						}
 
-					try {
-						const data = JSON.parse(line.slice(6));
-						scrollTick++;
-
-						if (data.type === 'start') {
-							totalCount = data.total;
-						} else if (data.type === 'progress') {
-							currentIndex = data.current;
-
-							// Update or add progress entry
-							const existingIndex = progress.findIndex(p => p.containerId === data.containerId);
-							if (existingIndex >= 0) {
-								progress[existingIndex].step = data.step;
-								progress[existingIndex].success = data.success;
-								progress[existingIndex].error = data.error;
-								progress = [...progress]; // Trigger reactivity
-							} else {
-								progress = [...progress, {
-									containerId: data.containerId,
-									containerName: data.containerName,
-									step: data.step,
-									success: data.success,
-									error: data.error,
-									pullLogs: [],
-									scanLogs: [],
-									showLogs: true,
-								}];
-							}
-
-							// Track success/failed for onComplete callback
-							if (data.success === true) {
-								successIds.push(data.containerId);
-							} else if (data.success === false && data.step === 'failed') {
-								failedIds.push(data.containerId);
-							}
-						} else if (data.type === 'pull_log') {
-							// Add pull log to the container's log list
-							const containerProgress = progress.find(p => p.containerId === data.containerId);
-							if (containerProgress) {
-								// For layer progress, update existing entry or add new
-								if (data.pullId) {
-									const existingLog = containerProgress.pullLogs.find(l => l.id === data.pullId);
-									if (existingLog) {
-										existingLog.status = data.pullStatus;
-										existingLog.progress = data.pullProgress;
-									} else {
-										containerProgress.pullLogs.push({
-											status: data.pullStatus,
-											id: data.pullId,
-											progress: data.pullProgress
-										});
-									}
+						// Track success/failed for onComplete callback
+						if (data.success === true) {
+							successIds.push(data.containerId);
+						} else if (data.success === false && data.step === 'failed') {
+							failedIds.push(data.containerId);
+						}
+					} else if (data.type === 'pull_log') {
+						// Add pull log to the container's log list
+						const containerProgress = progress.find(p => p.containerId === data.containerId);
+						if (containerProgress) {
+							// For layer progress, update existing entry or add new
+							if (data.pullId) {
+								const existingLog = containerProgress.pullLogs.find((l: any) => l.id === data.pullId);
+								if (existingLog) {
+									existingLog.status = data.pullStatus;
+									existingLog.progress = data.pullProgress;
 								} else {
-									// General status message (no layer ID)
 									containerProgress.pullLogs.push({
-										status: data.pullStatus
+										status: data.pullStatus,
+										id: data.pullId,
+										progress: data.pullProgress
 									});
 								}
-								progress = [...progress]; // Trigger reactivity
-							}
-						} else if (data.type === 'scan_start') {
-							// Update step to scanning
-							const containerProgress = progress.find(p => p.containerId === data.containerId);
-							if (containerProgress) {
-								containerProgress.step = 'scanning';
-								progress = [...progress];
-							}
-						} else if (data.type === 'scan_log') {
-							// Add scan log to the container's log list
-							const containerProgress = progress.find(p => p.containerId === data.containerId);
-							if (containerProgress) {
-								containerProgress.scanLogs.push({
-									scanner: data.scanner,
-									message: data.message
+							} else {
+								// General status message (no layer ID)
+								containerProgress.pullLogs.push({
+									status: data.pullStatus
 								});
-								progress = [...progress];
 							}
-						} else if (data.type === 'scan_complete') {
-							// Store scan result, individual scanner results, and vulnerabilities
-							const containerProgress = progress.find(p => p.containerId === data.containerId);
-							if (containerProgress) {
-								containerProgress.scanResult = data.scanResult;
-								containerProgress.scannerResults = data.scannerResults;
-								containerProgress.vulnerabilities = data.vulnerabilities;
-								progress = [...progress];
-							}
-						} else if (data.type === 'blocked') {
-							// Mark container as blocked
-							const existingIndex = progress.findIndex(p => p.containerId === data.containerId);
-							if (existingIndex >= 0) {
-								progress[existingIndex].step = 'blocked';
-								progress[existingIndex].success = false;
-								progress[existingIndex].scanResult = data.scanResult;
-								progress[existingIndex].scannerResults = data.scannerResults;
-								progress[existingIndex].blockReason = data.blockReason;
-								progress = [...progress];
-							}
-							blockedIds.push(data.containerId);
-							currentIndex = data.current;
-						} else if (data.type === 'complete') {
-							status = 'complete';
-							summary = data.summary;
-							onComplete({ success: successIds, failed: failedIds, blocked: blockedIds });
-						} else if (data.type === 'error') {
-							status = 'error';
-							errorMessage = data.error || 'Unknown error occurred';
+							progress = [...progress]; // Trigger reactivity
 						}
-					} catch (e) {
-						console.error('Failed to parse SSE data:', e);
+					} else if (data.type === 'scan_start') {
+						// Update step to scanning
+						const containerProgress = progress.find(p => p.containerId === data.containerId);
+						if (containerProgress) {
+							containerProgress.step = 'scanning';
+							progress = [...progress];
+						}
+					} else if (data.type === 'scan_log') {
+						// Add scan log to the container's log list
+						const containerProgress = progress.find(p => p.containerId === data.containerId);
+						if (containerProgress) {
+							containerProgress.scanLogs.push({
+								scanner: data.scanner,
+								message: data.message
+							});
+							progress = [...progress];
+						}
+					} else if (data.type === 'scan_complete') {
+						// Store scan result, individual scanner results, and vulnerabilities
+						const containerProgress = progress.find(p => p.containerId === data.containerId);
+						if (containerProgress) {
+							containerProgress.scanResult = data.scanResult;
+							containerProgress.scannerResults = data.scannerResults;
+							containerProgress.vulnerabilities = data.vulnerabilities;
+							progress = [...progress];
+						}
+					} else if (data.type === 'blocked') {
+						// Mark container as blocked
+						const existingIndex = progress.findIndex(p => p.containerId === data.containerId);
+						if (existingIndex >= 0) {
+							progress[existingIndex].step = 'blocked';
+							progress[existingIndex].success = false;
+							progress[existingIndex].scanResult = data.scanResult;
+							progress[existingIndex].scannerResults = data.scannerResults;
+							progress[existingIndex].blockReason = data.blockReason;
+							progress = [...progress];
+						}
+						blockedIds.push(data.containerId);
+						currentIndex = data.current;
+					} else if (data.type === 'complete') {
+						status = 'complete';
+						summary = data.summary;
+						onComplete({ success: successIds, failed: failedIds, blocked: blockedIds });
+					} else if (data.type === 'error') {
+						status = 'error';
+						errorMessage = data.error || 'Unknown error occurred';
 					}
+				} catch (e) {
+					console.error('Failed to process job line:', e);
 				}
-			}
+			});
 		} catch (error: any) {
 			console.error('Failed to update containers:', error);
 			status = 'error';
@@ -343,63 +327,41 @@ const severityOrder: Record<string, number> = { critical: 0, high: 1, medium: 2,
 				throw new Error(data.error || 'Failed to start update');
 			}
 
-			const reader = response.body?.getReader();
-			if (!reader) {
-				throw new Error('No response body');
-			}
+			const { jobId } = await response.json();
+			await watchJob(jobId, (line) => {
+				const data = line.data as any;
 
-			const decoder = new TextDecoder();
-			let buffer = '';
+				if (data.type === 'progress') {
+					item.step = data.step;
+					item.success = data.success;
+					item.error = data.error;
+					progress = [...progress];
 
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split('\n');
-				buffer = lines.pop() || '';
-
-				for (const line of lines) {
-					if (!line.trim() || !line.startsWith('data: ')) continue;
-
-					try {
-						const data = JSON.parse(line.slice(6));
-
-						if (data.type === 'progress') {
-							item.step = data.step;
-							item.success = data.success;
-							item.error = data.error;
-							progress = [...progress];
-
-							// Update summary if container succeeded
-							if (data.success === true && summary) {
-								summary.blocked--;
-								summary.success++;
-								summary = { ...summary };
-							}
-						} else if (data.type === 'pull_log') {
-							if (data.pullId) {
-								const existingLog = item.pullLogs.find(l => l.id === data.pullId);
-								if (existingLog) {
-									existingLog.status = data.pullStatus;
-									existingLog.progress = data.pullProgress;
-								} else {
-									item.pullLogs.push({
-										status: data.pullStatus,
-										id: data.pullId,
-										progress: data.pullProgress
-									});
-								}
-							} else {
-								item.pullLogs.push({ status: data.pullStatus });
-							}
-							progress = [...progress];
-						}
-					} catch (e) {
-						console.error('Failed to parse SSE data:', e);
+					// Update summary if container succeeded
+					if (data.success === true && summary) {
+						summary.blocked--;
+						summary.success++;
+						summary = { ...summary };
 					}
+				} else if (data.type === 'pull_log') {
+					if (data.pullId) {
+						const existingLog = item.pullLogs.find(l => l.id === data.pullId);
+						if (existingLog) {
+							existingLog.status = data.pullStatus;
+							existingLog.progress = data.pullProgress;
+						} else {
+							item.pullLogs.push({
+								status: data.pullStatus,
+								id: data.pullId,
+								progress: data.pullProgress
+							});
+						}
+					} else {
+						item.pullLogs.push({ status: data.pullStatus });
+					}
+					progress = [...progress];
 				}
-			}
+			});
 		} catch (error: any) {
 			console.error('Failed to force update container:', error);
 			item.step = 'failed';

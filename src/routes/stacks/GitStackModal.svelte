@@ -14,6 +14,7 @@
 	import { type EnvVar, type ValidationResult } from '$lib/components/StackEnvVarsEditor.svelte';
 	import { toast } from 'svelte-sonner';
 	import { focusFirstInput } from '$lib/utils';
+	import { readJobResponse } from '$lib/utils/sse-fetch';
 	import { useSidebar } from '$lib/components/ui/sidebar/context.svelte';
 
 	// Get sidebar state to adjust modal positioning
@@ -465,7 +466,7 @@
 				body: JSON.stringify(body)
 			});
 
-			const data = await response.json();
+			const data = await readJobResponse(response);
 
 			if (!response.ok) {
 				formError = data.error || 'Failed to save git stack';
