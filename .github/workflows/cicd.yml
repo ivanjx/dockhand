@@ -5,11 +5,12 @@ on:
   push:
     branches: [ main ]
     paths:
+      - '.github/workflows/cicd.yml'
       - 'Dockerfile'
-      - 'Dockerfile.baseline'
       - 'docker-entrypoint.sh'
       - 'docker-entrypoint-node.sh'
       - 'package.json'
+      - 'package-lock.json'
       - 'src/**'
 
 jobs:

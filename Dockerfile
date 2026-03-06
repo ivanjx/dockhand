@@ -77,7 +77,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy package manifest and install dependencies with npm.
 # Runtime stays Node.js because better-sqlite3 is not supported by Bun runtime.
-COPY package.json ./
+COPY package.json package-lock.json ./
 RUN npm install --include=dev
 
 # Copy source code and build
