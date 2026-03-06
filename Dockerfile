@@ -135,6 +135,7 @@ RUN addgroup -g 1001 dockhand \
 COPY --from=app-builder --chown=dockhand:dockhand /app/node_modules ./node_modules
 COPY --from=app-builder --chown=dockhand:dockhand /app/package.json ./
 COPY --from=app-builder --chown=dockhand:dockhand /app/build ./build
+COPY --from=app-builder --chown=dockhand:dockhand /app/server.js ./
 
 # Copy Go collector binary
 COPY --from=go-builder --chown=dockhand:dockhand /app/bin/collection-worker ./bin/collection-worker
@@ -164,4 +165,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:3000/ || exit 1
 
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
-CMD ["node", "/app/build/index.js"]
+CMD ["node", "/app/server.js"]

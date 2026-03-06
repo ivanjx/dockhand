@@ -8,9 +8,9 @@ PGID=${PGID:-1001}
 
 # Default command (--expose-gc allows forced GC from /api/debug/memory?gc=true)
 if [ "$MEMORY_MONITOR" = "true" ]; then
-    DEFAULT_CMD="node --expose-gc /app/build/index.js"
+    DEFAULT_CMD="node --expose-gc /app/server.js"
 else
-    DEFAULT_CMD="node /app/build/index.js"
+    DEFAULT_CMD="node /app/server.js"
 fi
 
 # === Detect if running as root ===
