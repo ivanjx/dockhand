@@ -75,17 +75,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && cp "$(dpkg -L libnss-wrapper | grep 'libnss_wrapper\.so$')" /usr/local/lib/libnss_wrapper.so
 
-# Copy package files and install dependencies
-COPY package.json package-lock.json ./
-RUN npm ci
+# Copy package manifest and install dependencies with npm.
+# Runtime stays Node.js because better-sqlite3 is not supported by Bun runtime.
+COPY package.json ./
+RUN npm install --include=dev
 
 # Copy source code and build
 COPY . .
-RUN npm run build
+RUN NODE_OPTIONS=--max-old-space-size=4096 npm run build
 
-# Production dependencies only (rebuilds native addons like better-sqlite3)
-RUN rm -rf node_modules \
-    && npm ci --omit=dev \
+# Prune to production dependencies while preserving compiled native addons.
+RUN npm prune --omit=dev \
     && rm -rf node_modules/@types
 
 # Build Go collector
@@ -135,7 +135,6 @@ RUN addgroup -g 1001 dockhand \
 COPY --from=app-builder --chown=dockhand:dockhand /app/node_modules ./node_modules
 COPY --from=app-builder --chown=dockhand:dockhand /app/package.json ./
 COPY --from=app-builder --chown=dockhand:dockhand /app/build ./build
-COPY --from=app-builder --chown=dockhand:dockhand /app/server.js ./
 
 # Copy Go collector binary
 COPY --from=go-builder --chown=dockhand:dockhand /app/bin/collection-worker ./bin/collection-worker
@@ -165,4 +164,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:3000/ || exit 1
 
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
-CMD ["node", "/app/server.js"]
+CMD ["node", "/app/build/index.js"]
