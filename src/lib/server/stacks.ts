@@ -1126,7 +1126,7 @@ async function executeLocalCompose(
 	switch (operation) {
 		case 'up':
 			args.push('up', '-d', '--remove-orphans');
-			if (forceRecreate) args.push('--force-recreate');
+			// if (forceRecreate) args.push('--force-recreate');
 			// If targeting a specific service, only update that service
 			if (serviceName) {
 				args.push(serviceName);
