@@ -35,6 +35,7 @@ import {
 	disconnectContainerFromNetwork,
 	recreateContainerFromInspect
 } from '../../docker';
+import { updateStackService } from '../../stacks';
 import { getScannerSettings, scanImage, type ScanResult, type VulnerabilitySeverity } from '../../scanner';
 import { sendEventNotification } from '../../notifications';
 import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer } from './update-utils';
@@ -640,6 +641,28 @@ export async function recreateContainer(
 
 		const inspectData = await inspectContainer(container.id, envId) as any;
 		const imageName = imageNameOverride || inspectData.Config?.Image;
+		const labels = inspectData.Config?.Labels || {};
+		const stackName = labels['com.docker.compose.project'];
+		const serviceName = labels['com.docker.compose.service'];
+		const composeConfigPath = labels['com.docker.compose.project.config_files']
+			?.split(',')
+			.map((path: string) => path.trim())
+			.find(Boolean);
+
+		if (stackName && serviceName) {
+			log?.(`Updating stack service: ${stackName}/${serviceName}`);
+
+			const result = await updateStackService(stackName, serviceName, envId, composeConfigPath);
+
+			if (!result.success) {
+				const error = result.error || `Failed to update stack service ${stackName}/${serviceName}`;
+				log?.(`Stack service update failed: ${error}`);
+				return { success: false, error };
+			}
+
+			log?.(`Stack service updated successfully: ${stackName}/${serviceName}`);
+			return { success: true };
+		}
 
 		log?.(`Recreating container: ${containerName} (image: ${imageName})`);
 
