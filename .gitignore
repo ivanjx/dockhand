@@ -2,6 +2,5 @@
 .DS_Store
 node_modules/
 .svelte-kit/
-data/db
-data/.encryption_key
+data/
 build/
