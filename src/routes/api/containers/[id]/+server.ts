@@ -30,8 +30,11 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
 
 		const details = await inspectContainer(params.id, envIdNum);
 		return json(details);
-	} catch (error) {
-		console.error('Error inspecting container:', error);
+	} catch (error: any) {
+		if (error?.statusCode === 404) {
+			return json({ error: error.json?.message || 'Container not found' }, { status: 404 });
+		}
+		console.error('Error inspecting container:', error?.message || error);
 		return json({ error: 'Failed to inspect container' }, { status: 500 });
 	}
 };
@@ -96,8 +99,11 @@ export const DELETE: RequestHandler = async (event) => {
 		}
 
 		return json({ success: true });
-	} catch (error) {
-		console.error('Error removing container:', error);
+	} catch (error: any) {
+		if (error?.statusCode === 404) {
+			return json({ error: error.json?.message || 'Container not found' }, { status: 404 });
+		}
+		console.error('Error removing container:', error?.message || error);
 		return json({ error: 'Failed to remove container' }, { status: 500 });
 	}
 };

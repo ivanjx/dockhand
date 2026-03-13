@@ -215,28 +215,26 @@
 
 		testingAll = true;
 
-		// Process environments sequentially to avoid overwhelming the system
-		// This is especially important for Edge environments that have longer timeouts
-		for (const env of environments) {
-			// Mark this environment as testing
-			testingEnvs.add(env.id);
-			testingEnvs = new Set(testingEnvs);
+		// Show all spinners immediately, then test all envs in parallel.
+		// Sequential testing was wrong for edge envs: 30s timeout × N envs = N×30s total wait.
+		// Parallel: all timeouts run concurrently, total wait is max(individual timeouts) = 30s.
+		environments.forEach(env => testingEnvs.add(env.id));
+		testingEnvs = new Set(testingEnvs);
 
-			try {
-				const response = await fetch(`/api/environments/${env.id}/test`, {
-					method: 'POST'
-				});
-				const result = await response.json();
-				testResults[env.id] = result;
-			} catch (error) {
-				testResults[env.id] = { success: false, error: 'Connection failed' };
-			}
-			testResults = { ...testResults };
-
-			// Mark this environment as done
-			testingEnvs.delete(env.id);
-			testingEnvs = new Set(testingEnvs);
-		}
+		await Promise.all(
+			environments.map(async (env) => {
+				try {
+					const response = await fetch(`/api/environments/${env.id}/test`, { method: 'POST' });
+					testResults[env.id] = await response.json();
+				} catch {
+					testResults[env.id] = { success: false, error: 'Connection failed' };
+				} finally {
+					testingEnvs.delete(env.id);
+					testingEnvs = new Set(testingEnvs);
+				}
+				testResults = { ...testResults };
+			})
+		);
 
 		testingAll = false;
 	}

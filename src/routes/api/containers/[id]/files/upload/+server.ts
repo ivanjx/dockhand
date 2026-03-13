@@ -140,7 +140,7 @@ export const POST: RequestHandler = async ({ params, url, request, cookies }) =>
 			errors: errors.length > 0 ? errors : undefined
 		});
 	} catch (error: any) {
-		console.error('Error uploading to container:', error);
+		console.error('Error uploading to container:', error?.message || error);
 
 		if (error.message?.includes('Permission denied')) {
 			return json({ error: 'Permission denied to write to this path' }, { status: 403 });

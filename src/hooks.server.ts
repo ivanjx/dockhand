@@ -1,4 +1,5 @@
 // v1.0.12
+import '$lib/server/dns-dispatcher.js';
 import { initDatabase, hasAdminUser } from '$lib/server/db';
 import { startSubprocesses, stopSubprocesses } from '$lib/server/subprocess-manager';
 import { startScheduler } from '$lib/server/scheduler';

@@ -1,13 +1,17 @@
 import { json } from '@sveltejs/kit';
 import { authorize } from '$lib/server/authorize';
+import { getOwnDockerHost } from '$lib/server/host-path';
 import { unixSocketRequest } from '$lib/server/docker';
 import type { RequestHandler } from './$types';
 
-const DOCKER_SOCKET = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
-
-/** Fetch from the local Docker socket directly */
+/** Fetch from the local Docker directly. Supports TCP and Unix socket. */
 function localDockerFetch(path: string): Promise<Response> {
-	return unixSocketRequest(DOCKER_SOCKET, path);
+	const dockerHost = process.env.DOCKER_HOST || getOwnDockerHost();
+	if (dockerHost?.startsWith('tcp://')) {
+		return fetch(dockerHost.replace('tcp://', 'http://') + path);
+	}
+	const socketPath = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
+	return unixSocketRequest(socketPath, path);
 }
 
 /**

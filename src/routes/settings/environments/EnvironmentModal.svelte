@@ -307,7 +307,21 @@
 	 * Strip protocol and port from a host/IP string
 	 */
 	function stripHostProtocol(value: string): string {
-		return value.replace(/^(?:\w+:\/\/)/, '').replace(/[:/].*$/, '');
+		// Strip protocol prefix (e.g., tcp://, https://)
+		const stripped = value.replace(/^(?:\w+:\/\/)/, '');
+
+		// Handle bracketed IPv6 with optional port: [::1]:port → ::1
+		if (stripped.startsWith('[')) {
+			return stripped.replace(/^\[([^\]]+)\].*$/, '$1');
+		}
+
+		// Handle plain IPv6 (2+ colons = IPv6, not IPv4:port or hostname:port)
+		if ((stripped.match(/:/g) || []).length > 1) {
+			return stripped;
+		}
+
+		// IPv4 or hostname: strip :port and path
+		return stripped.replace(/[:/].*$/, '');
 	}
 
 	/**

@@ -6,11 +6,14 @@ set -e
 PUID=${PUID:-1001}
 PGID=${PGID:-1001}
 
+# Increase body size limit for container file uploads (default 512KB is too small)
+export BODY_SIZE_LIMIT=${BODY_SIZE_LIMIT:-2G}
+
 # Default command (--expose-gc allows forced GC from /api/debug/memory?gc=true)
 if [ "$MEMORY_MONITOR" = "true" ]; then
-    DEFAULT_CMD="node --expose-gc /app/server.js"
+    DEFAULT_CMD="node --use-openssl-ca --dns-result-order=ipv4first --no-network-family-autoselection --expose-gc /app/server.js"
 else
-    DEFAULT_CMD="node /app/server.js"
+    DEFAULT_CMD="node --use-openssl-ca --dns-result-order=ipv4first --no-network-family-autoselection /app/server.js"
 fi
 
 # === Detect if running as root ===

@@ -274,7 +274,11 @@ func buildTLSConfig(cfg *EnvConfig) (*tls.Config, error) {
 	}
 
 	if cfg.CA != "" {
-		pool := x509.NewCertPool()
+		// Start from system cert pool so intermediate CAs can chain to system roots
+		pool, err := x509.SystemCertPool()
+		if err != nil {
+			pool = x509.NewCertPool()
+		}
 		if !pool.AppendCertsFromPEM([]byte(cfg.CA)) {
 			return nil, fmt.Errorf("failed to parse CA certificate")
 		}
@@ -928,6 +932,11 @@ func main() {
 		}
 	}
 
+	// stdin closed — parent process exited or pipe broke. Shut down cleanly
+	// so Node.js can restart us if needed.
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[collector] stdin read error: %v\n", err)
+	}
 	fmt.Fprintf(os.Stderr, "[collector] stdin closed, exiting\n")
 	mgr.shutdown()
 }

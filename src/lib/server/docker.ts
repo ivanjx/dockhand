@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import * as http from 'node:http';
 import * as https from 'node:https';
+import * as tls from 'node:tls';
 import { createHash } from 'node:crypto';
 import type { Environment } from './db';
 import { getStackEnvVarsAsRecord } from './db';
@@ -345,7 +346,12 @@ function getHttpsAgent(config: DockerClientConfig): https.Agent {
 		timeout: 30000,
 	};
 
-	if (config.ca) agentOptions.ca = config.ca;
+	if (config.ca) {
+		// Include both the custom CA and Node.js built-in root certificates.
+		// Node.js replaces the entire CA store when `ca` is set, unlike Bun which appends.
+		// Without this, certs signed by intermediate CAs fail with "unable to get local issuer certificate".
+		agentOptions.ca = [config.ca, ...tls.rootCertificates];
+	}
 	if (config.cert) agentOptions.cert = config.cert;
 	if (config.key) agentOptions.key = config.key;
 	if (config.skipVerify) agentOptions.rejectUnauthorized = false;
@@ -874,7 +880,8 @@ export async function dockerFetch(
 				headers,
 				streaming || false,
 				(streaming || path === '/_hawser/compose') ? 300000 : 30000, // 5 min for streaming/compose, 30s for normal
-				isBinary
+				isBinary,
+				fetchOptions.signal ?? undefined
 			);
 			const elapsed = Date.now() - startTime;
 			// Only warn for slow requests, but skip /stats which is expected to be slow (5-10s)
@@ -1233,7 +1240,7 @@ export interface CreateContainerOptions {
 	networkIpv6Address?: string;
 	/** Gateway priority for the primary network (Docker Engine 28+) */
 	networkGwPriority?: number;
-	user?: string;
+	user?: string | null;
 	privileged?: boolean;
 	healthcheck?: HealthcheckConfig;
 	memory?: number;
@@ -1286,7 +1293,7 @@ export interface CreateContainerOptions {
 	// Device requests (GPU access, etc.)
 	deviceRequests?: DeviceRequest[];
 	// Container runtime (e.g., 'runc', 'nvidia' for GPU containers)
-	runtime?: string;
+	runtime?: string | null;
 	// Read-only root filesystem
 	readonlyRootfs?: boolean;
 	// CPU pinning (e.g., "0-3", "0,1")
@@ -1322,8 +1329,8 @@ export async function createContainer(options: CreateContainerOptions, envId?: n
 		containerConfig.Cmd = options.cmd;
 	}
 
-	if (options.user) {
-		containerConfig.User = options.user;
+	if (options.user !== undefined) {
+		containerConfig.User = options.user ?? '';
 	}
 
 	if (options.healthcheck) {
@@ -1436,7 +1443,7 @@ export async function createContainer(options: CreateContainerOptions, envId?: n
 		};
 	}
 
-	if (options.privileged) {
+	if (options.privileged !== undefined) {
 		containerConfig.HostConfig.Privileged = options.privileged;
 	}
 
@@ -1614,8 +1621,8 @@ export async function createContainer(options: CreateContainerOptions, envId?: n
 	}
 
 	// Container runtime (e.g., 'nvidia' for GPU containers)
-	if (options.runtime) {
-		containerConfig.HostConfig.Runtime = options.runtime;
+	if (options.runtime !== undefined) {
+		containerConfig.HostConfig.Runtime = options.runtime ?? '';
 	}
 
 	// Read-only root filesystem
@@ -1782,6 +1789,13 @@ export async function recreateContainerFromInspect(
 		HostConfig: hostConfig
 	};
 
+	// Strip default MemorySwappiness — Podman + cgroupv2 rejects it.
+	// Docker returns -1, Podman returns 0 when unset.
+	const swappiness = createConfig.HostConfig?.MemorySwappiness;
+	if (swappiness == null || swappiness === -1 || swappiness === 0) {
+		delete createConfig.HostConfig.MemorySwappiness;
+	}
+
 	// container:<name> mode shares the network namespace — Docker rejects
 	// networking-related fields on the dependent container since they're
 	// owned by the network provider container
@@ -1883,6 +1897,11 @@ export async function recreateContainerFromInspect(
 				[initialNetworkName]: endpointConfig
 			}
 		};
+		// Container-level MacAddress conflicts with endpoint-level MacAddress.
+		// Docker requires them to match or the top-level one to be empty.
+		// The MAC is preserved in the endpoint config (correct location per API v1.44+),
+		// so clear the top-level one to avoid the conflict error.
+		delete createConfig.MacAddress;
 	}
 
 	// 5. Create new container
@@ -2236,7 +2255,7 @@ export function extractContainerOptions(inspectData: any): CreateContainerOption
 		groupAdd: hostConfig.GroupAdd?.length > 0 ? hostConfig.GroupAdd : undefined,
 
 		// Memory swappiness
-		memorySwappiness: hostConfig.MemorySwappiness !== null ? hostConfig.MemorySwappiness : undefined,
+		memorySwappiness: hostConfig.MemorySwappiness != null && hostConfig.MemorySwappiness !== -1 && hostConfig.MemorySwappiness !== 0 ? hostConfig.MemorySwappiness : undefined,
 
 		// User namespace mode
 		usernsMode: hostConfig.UsernsMode || undefined
@@ -2665,6 +2684,10 @@ async function getRegistryBearerToken(registry: string, repo: string): Promise<s
 		const cause = (e as any)?.cause;
 		const causeMsg = cause ? ` (cause: ${cause})` : '';
 		console.error('[Registry] Failed to get bearer token:', errorMsg + causeMsg);
+		const causeStr = String(cause ?? errorMsg);
+		if (causeStr.includes('EAI_AGAIN') || causeStr.includes('ENOTFOUND')) {
+			console.error('[Registry] DNS resolution failed. If you are on a NAS (Synology, uGreen, QNAP), try adding --dns=8.8.8.8 to your docker run command or set {"dns": ["8.8.8.8"]} in /etc/docker/daemon.json');
+		}
 		return null;
 	}
 }
@@ -2845,9 +2868,16 @@ export async function getRegistryManifestDigest(imageName: string): Promise<stri
 			return null;
 		}
 
-		return response.headers.get('Docker-Content-Digest');
+		const digest = response.headers.get('Docker-Content-Digest');
+		await drainResponse(response);
+		return digest;
 	} catch (e) {
-		console.error(`[Registry] ${imageName}: ${e}`);
+		const causeStr = String((e as any)?.cause ?? e);
+		if (causeStr.includes('EAI_AGAIN') || causeStr.includes('ENOTFOUND')) {
+			console.error(`[Registry] ${imageName}: DNS resolution failed. If you are on a NAS (Synology, uGreen, QNAP), add --dns=8.8.8.8 to your docker run command.`);
+		} else {
+			console.error(`[Registry] ${imageName}: ${e}`);
+		}
 		return null;
 	}
 }
@@ -3111,15 +3141,18 @@ export async function getDockerVersion(envId?: number | null) {
  */
 export async function dockerPing(envId: number): Promise<boolean> {
 	try {
+		// Edge connections go WebSocket → agent → Docker daemon, which adds latency on slow hosts.
+		// Use a longer timeout for edge to avoid false negatives on overloaded NAS/VPS devices.
+		const config = await getDockerConfig(envId).catch(() => null);
+		const timeoutMs = config?.connectionType === 'hawser-edge' ? 20000 : 5000;
 		const response = await dockerFetch('/_ping', {
-			signal: AbortSignal.timeout(5000)
+			signal: AbortSignal.timeout(timeoutMs)
 		}, envId);
 		await drainResponse(response);
 		return response.ok;
 	} catch (error: any) {
 		const msg = error?.message || String(error);
 		if (msg.includes('unreachable')) {
-			const config = await getDockerConfig(envId).catch(() => null);
 			console.warn(`[Docker] ${config?.connectionType || 'direct'} ${config?.host || envId}: /_ping failed - host unreachable`);
 		}
 		return false;
@@ -3286,24 +3319,7 @@ export interface NetworkInfo {
 export async function listNetworks(envId?: number | null): Promise<NetworkInfo[]> {
 	const networks = await dockerJsonRequest<any[]>('/networks', {}, envId);
 
-	// Docker's /networks endpoint returns empty Containers - we need to inspect each network
-	// to get the actual connected containers. Run inspections in parallel for performance.
-	const networkDetails = await Promise.all(
-		networks.map(async (network: any) => {
-			try {
-				const details = await dockerJsonRequest<any>(`/networks/${network.Id}`, {}, envId);
-				return {
-					...network,
-					Containers: details.Containers || {}
-				};
-			} catch {
-				// If inspection fails, return network with empty containers
-				return network;
-			}
-		})
-	);
-
-	return networkDetails.map((network: any) => ({
+	return networks.map((network: any) => ({
 		id: network.Id,
 		name: network.Name,
 		driver: network.Driver,

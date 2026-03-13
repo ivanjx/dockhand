@@ -360,7 +360,7 @@ function dockerHttpRequest(method: string, path: string, target: DockerTarget, b
 			opts.host = target.host;
 			opts.port = target.port;
 			opts.rejectUnauthorized = target.tls.rejectUnauthorized ?? true;
-			if (target.tls.ca) opts.ca = [target.tls.ca];
+			if (target.tls.ca) opts.ca = [target.tls.ca, ...tls.rootCertificates];
 			if (target.tls.cert) opts.cert = [target.tls.cert];
 			if (target.tls.key) opts.key = target.tls.key;
 			req = https.request(opts);
@@ -556,11 +556,14 @@ function webSocketPlugin(): Plugin {
 			const wss = new WebSocketServer({ server: httpServer });
 
 			// Per-connection metadata
-			const wsMetadata = new Map<WsWebSocket, { url: string; connId?: string; edgeExecId?: string }>();
+			const wsMetadata = new Map<WsWebSocket, { url: string; connId?: string; edgeExecId?: string; remoteIp?: string }>();
 
 			wss.on('connection', (ws: WsWebSocket, req: any) => {
 				const url = new URL(req.url || '/', `http://localhost:${WS_PORT}`);
-				const meta = { url: req.url || '/' };
+				const remoteIp = (req.headers?.['x-forwarded-for'] || '').split(',')[0].trim()
+					|| req.socket?.remoteAddress
+					|| 'unknown';
+				const meta = { url: req.url || '/', remoteIp };
 				wsMetadata.set(ws, meta);
 
 				// Handle connection open logic
@@ -630,7 +633,7 @@ function webSocketPlugin(): Plugin {
 								servername: target.host,
 								rejectUnauthorized: target.tls.rejectUnauthorized ?? true
 							};
-							if (target.tls.ca) tlsOpts.ca = [target.tls.ca];
+							if (target.tls.ca) tlsOpts.ca = [target.tls.ca, ...tls.rootCertificates];
 							if (target.tls.cert) tlsOpts.cert = [target.tls.cert];
 							if (target.tls.key) tlsOpts.key = target.tls.key;
 							dockerStream = tls.connect(tlsOpts);
@@ -814,7 +817,7 @@ function webSocketPlugin(): Plugin {
 
 // Rate limiter for failed Hawser token auth (dev mode)
 const hawserAuthFailCache = new Map<string, number>();
-const HAWSER_AUTH_FAIL_COOLDOWN_MS = 60_000;
+const HAWSER_AUTH_FAIL_COOLDOWN_MS = 5 * 60_000; // 5 minutes
 
 // ─── Reconnection storm throttle (mirrors hawser.ts) ───
 interface ReconnectTrackerEntry {
@@ -871,8 +874,10 @@ async function handleHawserMessage(ws: any, msg: any) {
 		const agentId = msg.agentId || 'unknown';
 		console.log(`[Hawser WS] Hello from agent: ${msg.agentName} (${agentId})`);
 
-		// Rate-limit agents that recently failed auth - skip expensive Argon2id verification
-		const lastFail = hawserAuthFailCache.get(agentId);
+		// Rate-limit by remote IP (not agentId which is attacker-controlled)
+		const meta = wsMetadata.get(ws);
+		const rateLimitKey = meta?.remoteIp || agentId;
+		const lastFail = hawserAuthFailCache.get(rateLimitKey);
 		if (lastFail && (Date.now() - lastFail) < HAWSER_AUTH_FAIL_COOLDOWN_MS) {
 			ws.send(JSON.stringify({ type: 'error', error: 'Rate limited - retry later' }));
 			ws.close();
@@ -887,12 +892,15 @@ async function handleHawserMessage(ws: any, msg: any) {
 			return;
 		}
 
-		// Token validation using proper Argon2id verification (same as production)
-		const tokens = db.prepare('SELECT * FROM hawser_tokens WHERE is_active = 1').all() as any[];
+		// Fast path: lookup by token prefix (first 8 chars) instead of iterating all tokens.
+		// This reduces O(N) Argon2id verifications to O(1) DB lookup + 1 verify.
+		const prefix = msg.token.substring(0, 8);
+		const candidates = db.prepare(
+			'SELECT * FROM hawser_tokens WHERE token_prefix = ? AND is_active = 1'
+		).all(prefix) as any[];
 
-		// Validate token using Argon2id hash verification
 		let matchedToken: any = null;
-		for (const t of tokens) {
+		for (const t of candidates) {
 			try {
 				const isValid = await argon2.verify(t.token, msg.token);
 				if (isValid) {
@@ -900,19 +908,19 @@ async function handleHawserMessage(ws: any, msg: any) {
 					break;
 				}
 			} catch {
-				// If verification fails, continue to next token
+				// Invalid hash format, skip
 			}
 		}
 
 		if (!matchedToken) {
-			console.log('[Hawser WS] Invalid token');
-			hawserAuthFailCache.set(agentId, Date.now());
+			console.log(`[Hawser WS] Invalid token (IP: ${rateLimitKey})`);
+			hawserAuthFailCache.set(rateLimitKey, Date.now());
 			ws.send(JSON.stringify({ type: 'error', error: 'Invalid token' }));
 			ws.close();
 			return;
 		}
 		// Clear any previous failure on successful auth
-		hawserAuthFailCache.delete(agentId);
+		hawserAuthFailCache.delete(rateLimitKey);
 
 		const environmentId = matchedToken.environment_id;
 
@@ -1010,19 +1018,8 @@ async function handleHawserMessage(ws: any, msg: any) {
 			message: `Welcome ${msg.agentName}! Connected to Dockhand dev server.`
 		}));
 
-		// Start server-side ping interval to keep connection alive through Traefik/proxies
-		// Traefik has ~10s idle timeout, so we ping every 5 seconds
-		connection.pingInterval = setInterval(() => {
-			try {
-				ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
-			} catch (e) {
-				// Connection likely closed, clear interval
-				if (connection.pingInterval) {
-					clearInterval(connection.pingInterval);
-					connection.pingInterval = undefined;
-				}
-			}
-		}, 5000);
+		// Note: server-side ping interval is managed by hawser.ts handleEdgeConnection()
+		// via the shared edgeConnections map — no duplicate interval needed here.
 
 		console.log(`[Hawser WS] Agent ${msg.agentName} connected for environment ${environmentId}`);
 	} else if (msg.type === 'ping') {

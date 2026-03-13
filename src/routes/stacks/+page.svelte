@@ -1797,7 +1797,7 @@
 								{/if}
 							{/if}
 						{/if}
-						{#if $canAccess('stacks', 'stop')}
+						{#if $canAccess('stacks', 'stop') && stack.status !== 'created' && stack.status !== 'not deployed'}
 							<ConfirmPopover
 								open={confirmDownName === stack.name}
 								action="Down"

@@ -19,6 +19,7 @@
 	let confirmDestructive = $derived($appSettings.confirmDestructive);
 	let showStoppedContainers = $derived($appSettings.showStoppedContainers);
 	let highlightUpdates = $derived($appSettings.highlightUpdates);
+	let compactPorts = $derived($appSettings.compactPorts);
 	let timeFormat = $derived($appSettings.timeFormat);
 	let dateFormat = $derived($appSettings.dateFormat);
 	let downloadFormat = $derived($appSettings.downloadFormat);
@@ -177,6 +178,20 @@
 									/>
 								</div>
 								<p class="text-xs text-muted-foreground">Highlight container rows in amber when updates are available</p>
+							</div>
+							<div class="space-y-1">
+								<div class="flex items-center gap-3">
+									<Label>Compact port display</Label>
+									<TogglePill
+										checked={compactPorts}
+										onchange={() => {
+											appSettings.setCompactPorts(!compactPorts);
+											toast.success(compactPorts ? 'Showing all ports' : 'Compact port display enabled');
+										}}
+										disabled={!$canAccess('settings', 'edit')}
+									/>
+								</div>
+								<p class="text-xs text-muted-foreground">Show first port with +N count instead of all ports</p>
 							</div>
 							<div class="space-y-1">
 								<div class="flex items-center gap-3">

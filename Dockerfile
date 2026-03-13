@@ -37,7 +37,7 @@ RUN APKO_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") 
     "    - busybox" \
     "    - tzdata" \
     "    - docker-cli" \
-    "    - docker-compose" \
+    "    - docker-compose=5.0.2-r1" \
     "    - docker-cli-buildx" \
     "    - sqlite" \
     "    - postgresql-client" \
@@ -162,7 +162,7 @@ RUN mkdir -p /home/dockhand/.dockhand/stacks /app/data \
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:3000/ || exit 1
+    CMD curl -f http://localhost:${PORT:-3000}/ || exit 1
 
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
-CMD ["node", "/app/server.js"]
+CMD []

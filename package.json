@@ -1,7 +1,7 @@
 {
 	"name": "dockhand",
 	"private": true,
-	"version": "1.0.20",
+	"version": "1.0.21",
 	"type": "module",
 	"scripts": {
 		"dev": "npx vite dev",
@@ -71,6 +71,7 @@
 		"@codemirror/view": "6.39.11",
 		"@lezer/highlight": "1.2.3",
 		"@lucide/lab": "^0.1.2",
+		"ansi_up": "6.0.6",
 		"argon2": "^0.41.1",
 		"better-sqlite3": "^11.7.0",
 		"codemirror": "6.0.2",
@@ -86,6 +87,7 @@
 		"qrcode": "^1.5.4",
 		"svelte-dnd-action": "0.9.69",
 		"svelte-sonner": "1.0.7",
+		"undici": "7.22.0",
 		"ws": "^8.18.0"
 	},
 	"devDependencies": {

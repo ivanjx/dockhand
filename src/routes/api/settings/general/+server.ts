@@ -65,6 +65,8 @@ export interface GeneralSettings {
 	gridFontSize: string;
 	terminalFont: string;
 	editorFont: string;
+	// Compact ports
+	compactPorts: boolean;
 	// External stack paths
 	externalStackPaths: string[];
 	// Primary stack location
@@ -85,6 +87,7 @@ const DEFAULT_SETTINGS: Omit<GeneralSettings, 'scheduleRetentionDays' | 'eventRe
 	eventCollectionMode: 'stream',
 	eventPollInterval: 60000,
 	metricsCollectionInterval: 30000,
+	compactPorts: false,
 	lightTheme: 'default',
 	darkTheme: 'default',
 	font: 'system',
@@ -140,6 +143,7 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			gridFontSize,
 			terminalFont,
 			editorFont,
+			compactPorts,
 			externalStackPaths,
 			primaryStackLocation
 		] = await Promise.all([
@@ -169,6 +173,7 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			getSetting('theme_grid_font_size'),
 			getSetting('theme_terminal_font'),
 			getSetting('theme_editor_font'),
+			getSetting('compact_ports'),
 			getExternalStackPaths(),
 			getPrimaryStackLocation()
 		]);
@@ -200,6 +205,7 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			gridFontSize: gridFontSize ?? DEFAULT_SETTINGS.gridFontSize,
 			terminalFont: terminalFont ?? DEFAULT_SETTINGS.terminalFont,
 			editorFont: editorFont ?? DEFAULT_SETTINGS.editorFont,
+			compactPorts: compactPorts ?? DEFAULT_SETTINGS.compactPorts,
 			externalStackPaths,
 			primaryStackLocation
 		};
@@ -219,7 +225,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 
 	try {
 		const body = await request.json();
-		const { confirmDestructive, showStoppedContainers, highlightUpdates, timeFormat, dateFormat, downloadFormat, defaultGrypeArgs, defaultTrivyArgs, scheduleRetentionDays, eventRetentionDays, scheduleCleanupCron, eventCleanupCron, scheduleCleanupEnabled, eventCleanupEnabled, logBufferSizeKb, defaultTimezone, eventCollectionMode, eventPollInterval, metricsCollectionInterval, lightTheme, darkTheme, font, fontSize, gridFontSize, terminalFont, editorFont, externalStackPaths, primaryStackLocation } = body;
+		const { confirmDestructive, showStoppedContainers, highlightUpdates, timeFormat, dateFormat, downloadFormat, defaultGrypeArgs, defaultTrivyArgs, scheduleRetentionDays, eventRetentionDays, scheduleCleanupCron, eventCleanupCron, scheduleCleanupEnabled, eventCleanupEnabled, logBufferSizeKb, defaultTimezone, eventCollectionMode, eventPollInterval, metricsCollectionInterval, lightTheme, darkTheme, font, fontSize, gridFontSize, terminalFont, editorFont, compactPorts, externalStackPaths, primaryStackLocation } = body;
 
 		if (confirmDestructive !== undefined) {
 			await setSetting('confirm_destructive', confirmDestructive);
@@ -312,6 +318,9 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 		if (editorFont !== undefined && VALID_EDITOR_FONTS.includes(editorFont)) {
 			await setSetting('theme_editor_font', editorFont);
 		}
+		if (compactPorts !== undefined) {
+			await setSetting('compact_ports', compactPorts);
+		}
 		if (externalStackPaths !== undefined && Array.isArray(externalStackPaths)) {
 			// Filter to valid non-empty strings
 			const validPaths = externalStackPaths.filter((p: unknown) => typeof p === 'string' && p.trim());
@@ -355,6 +364,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			gridFontSizeVal,
 			terminalFontVal,
 			editorFontVal,
+			compactPortsVal,
 			externalStackPathsVal,
 			primaryStackLocationVal
 		] = await Promise.all([
@@ -384,6 +394,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			getSetting('theme_grid_font_size'),
 			getSetting('theme_terminal_font'),
 			getSetting('theme_editor_font'),
+			getSetting('compact_ports'),
 			getExternalStackPaths(),
 			getPrimaryStackLocation()
 		]);
@@ -415,6 +426,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			gridFontSize: gridFontSizeVal ?? DEFAULT_SETTINGS.gridFontSize,
 			terminalFont: terminalFontVal ?? DEFAULT_SETTINGS.terminalFont,
 			editorFont: editorFontVal ?? DEFAULT_SETTINGS.editorFont,
+			compactPorts: compactPortsVal ?? DEFAULT_SETTINGS.compactPorts,
 			externalStackPaths: externalStackPathsVal,
 			primaryStackLocation: primaryStackLocationVal
 		};

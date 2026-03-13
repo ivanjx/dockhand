@@ -24,6 +24,7 @@ import { authorize } from '$lib/server/authorize';
 import { prefersJSON, sseToJSON } from '$lib/server/sse';
 import type { EnvironmentStats } from '../+server';
 import { parseLabels } from '$lib/utils/label-colors';
+import { isEdgeConnected } from '$lib/server/hawser';
 
 
 // Skip disk usage collection (Synology NAS performance fix)
@@ -248,6 +249,22 @@ async function getEnvironmentStatsProgressive(
 			containers: { ...envStats.containers },
 			loading: { ...envStats.loading }
 		});
+
+		// For edge envs with no connected agent, skip the 5s ping and fail immediately.
+		// On restart, agents take 30-70s to reconnect — without this check, every open
+		// dashboard tab fires a 5s ping per edge env simultaneously, creating a flood.
+		if (env.connectionType === 'hawser-edge' && !isEdgeConnected(env.id)) {
+			envStats.online = false;
+			envStats.error = 'Agent not connected';
+			envStats.loading = undefined;
+			onPartialUpdate({
+				id: env.id,
+				online: false,
+				error: 'Agent not connected',
+				loading: undefined
+			});
+			return envStats;
+		}
 
 		// Quick reachability check — if ping fails, skip all expensive Docker API calls
 		if (!await dockerPing(env.id)) {

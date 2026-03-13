@@ -47,8 +47,11 @@ export const POST: RequestHandler = async (event) => {
 		await auditContainer(event, 'update', container.id, options.name, envIdNum, { ...options, startAfterUpdate });
 
 		return json({ success: true, id: container.id });
-	} catch (error) {
-		console.error('Error updating container:', error);
-		return json({ error: 'Failed to update container', details: String(error) }, { status: 500 });
+	} catch (error: any) {
+		if (error?.statusCode === 404) {
+			return json({ error: error.json?.message || 'Container not found' }, { status: 404 });
+		}
+		console.error('Error updating container:', error?.message || error);
+		return json({ error: 'Failed to update container', details: error?.message || String(error) }, { status: 500 });
 	}
 };

@@ -1,15 +1,23 @@
 import { json } from '@sveltejs/kit';
 import { authorize } from '$lib/server/authorize';
-import { getOwnContainerId } from '$lib/server/host-path';
+import { getOwnContainerId, getOwnDockerHost } from '$lib/server/host-path';
 import { getRegistryManifestDigest, unixSocketRequest } from '$lib/server/docker';
 import { compareVersions } from '$lib/utils/version';
 import type { RequestHandler } from './$types';
 
-const DOCKER_SOCKET = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
-
-/** Fetch from the local Docker socket directly (not through environment routing) */
+/** Fetch from the local Docker directly (not through environment routing) */
 function localDockerFetch(path: string, options: RequestInit = {}): Promise<Response> {
-	return unixSocketRequest(DOCKER_SOCKET, path, options);
+	const dockerHost = process.env.DOCKER_HOST || getOwnDockerHost();
+
+	if (dockerHost?.startsWith('tcp://')) {
+		// TCP connection (socat proxy, socket-proxy, remote Docker)
+		const url = dockerHost.replace('tcp://', 'http://') + path;
+		return fetch(url, options);
+	}
+
+	// Unix socket (default)
+	const socketPath = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
+	return unixSocketRequest(socketPath, path, options);
 }
 
 /**

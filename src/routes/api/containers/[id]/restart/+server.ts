@@ -38,8 +38,11 @@ export const POST: RequestHandler = async (event) => {
 		await auditContainer(event, 'restart', params.id, containerName, envIdNum);
 
 		return json({ success: true });
-	} catch (error) {
-		console.error('Error restarting container:', error);
+	} catch (error: any) {
+		if (error?.statusCode === 404) {
+			return json({ error: error.json?.message || 'Container not found' }, { status: 404 });
+		}
+		console.error('Error restarting container:', error?.message || error);
 		return json({ error: 'Failed to restart container' }, { status: 500 });
 	}
 };

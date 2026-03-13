@@ -1,26 +1,41 @@
 import { json } from '@sveltejs/kit';
 import { authorize } from '$lib/server/authorize';
-import { getOwnContainerId, getHostDockerSocket } from '$lib/server/host-path';
+import { getOwnContainerId, getHostDockerSocket, getOwnDockerHost, getOwnNetworkMode } from '$lib/server/host-path';
 import { buildRegistryAuthHeader, unixSocketRequest, unixSocketStreamRequest } from '$lib/server/docker';
 import type { RequestHandler } from './$types';
 import { prefersJSON, sseToJSON } from '$lib/server/sse';
 
 const UPDATER_IMAGE = 'fnsys/dockhand-updater:latest';
 const UPDATER_LABEL = 'dockhand.updater';
-const DOCKER_SOCKET = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
 
-/** Fetch from the local Docker socket (buffered). */
-function localDockerFetch(path: string, options: RequestInit = {}): Promise<Response> {
-	return unixSocketRequest(DOCKER_SOCKET, path, options);
+/** Get TCP Docker host if configured, null otherwise. */
+function getDockerTcpHost(): string | null {
+	const dockerHost = process.env.DOCKER_HOST || getOwnDockerHost();
+	return dockerHost?.startsWith('tcp://') ? dockerHost : null;
 }
 
-/** Fetch from the local Docker socket (streaming body for pull progress). */
+/** Fetch from the local Docker (buffered). Supports TCP and Unix socket. */
+function localDockerFetch(path: string, options: RequestInit = {}): Promise<Response> {
+	const tcpHost = getDockerTcpHost();
+	if (tcpHost) {
+		return fetch(tcpHost.replace('tcp://', 'http://') + path, options);
+	}
+	const socketPath = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
+	return unixSocketRequest(socketPath, path, options);
+}
+
+/** Fetch from the local Docker (streaming body for pull progress). */
 function localDockerStreamFetch(path: string, options: RequestInit = {}): Promise<Response> {
-	return unixSocketStreamRequest(DOCKER_SOCKET, path, options);
+	const tcpHost = getDockerTcpHost();
+	if (tcpHost) {
+		return fetch(tcpHost.replace('tcp://', 'http://') + path, options);
+	}
+	const socketPath = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
+	return unixSocketStreamRequest(socketPath, path, options);
 }
 
 /**
- * Pull an image via local Docker socket, streaming progress via callback.
+ * Pull an image via local Docker, streaming progress via callback.
  */
 async function pullImageLocal(imageName: string, onProgress?: (line: string) => void): Promise<void> {
 	let fromImage = imageName;
@@ -79,9 +94,14 @@ async function pullImageLocal(imageName: string, onProgress?: (line: string) => 
 }
 
 /**
- * Check if Docker socket is mounted read-write
+ * Check if Docker access allows write operations.
+ * TCP connections always allow writes (no RO mount concept).
+ * Socket connections check if the mount is read-write.
  */
-async function isDockerSocketWritable(containerId: string): Promise<boolean> {
+async function isDockerWritable(containerId: string): Promise<boolean> {
+	// TCP connections don't have mount-level RO/RW — access implies full control
+	if (getDockerTcpHost()) return true;
+
 	const response = await localDockerFetch(`/containers/${containerId}/json`);
 	if (!response.ok) return false;
 
@@ -235,7 +255,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 		return json({ error: 'Not running in Docker' }, { status: 400 });
 	}
 
-	const writable = await isDockerSocketWritable(containerId);
+	const writable = await isDockerWritable(containerId);
 	if (!writable) {
 		return json({
 			error: 'Docker socket is mounted read-only. Self-update requires read-write Docker socket access.'
@@ -251,8 +271,6 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 	if (!containerName) {
 		return json({ error: 'Failed to determine container name' }, { status: 500 });
 	}
-
-	const socketHostPath = getHostDockerSocket();
 
 	// Start SSE stream for preparation progress
 	const encoder = new TextEncoder();
@@ -353,6 +371,25 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 					...networkEnvVars
 				];
 
+				// Configure updater's Docker access based on connection type
+				const tcpHost = getDockerTcpHost();
+				const updaterHostConfig: Record<string, unknown> = { AutoRemove: true };
+
+				if (tcpHost) {
+					// TCP: pass DOCKER_HOST so docker CLI in sidecar uses TCP
+					updaterEnv.push(`DOCKER_HOST=${tcpHost}`);
+					// Put sidecar on same network so it can reach the Docker TCP endpoint
+					const network = getOwnNetworkMode();
+					if (network) {
+						updaterHostConfig.NetworkMode = network;
+					}
+					send('log', { message: `Updater using TCP: ${tcpHost}` });
+				} else {
+					// Socket: bind-mount the host Docker socket
+					const socketHostPath = getHostDockerSocket();
+					updaterHostConfig.Binds = [`${socketHostPath}:/var/run/docker.sock`];
+				}
+
 				console.log('[SelfUpdate] Creating updater container...');
 				const updaterResponse = await localDockerFetch('/containers/create?name=dockhand-updater', {
 					method: 'POST',
@@ -363,12 +400,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 						Labels: {
 							[UPDATER_LABEL]: 'true'
 						},
-						HostConfig: {
-							AutoRemove: true,
-							Binds: [
-								`${socketHostPath}:/var/run/docker.sock`
-							]
-						}
+						HostConfig: updaterHostConfig
 					})
 				});
 
