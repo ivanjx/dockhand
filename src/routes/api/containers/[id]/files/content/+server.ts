@@ -36,7 +36,10 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
 
 		return json({ content, path });
 	} catch (error: any) {
-		console.error('Error reading container file:', error);
+		if (error?.statusCode === 404 && !error.message?.includes('No such file')) {
+			return json({ error: error.json?.message || 'Container not found' }, { status: 404 });
+		}
+		console.error('Error reading container file:', error?.message || error);
 		const msg = error.message || String(error);
 
 		if (msg.includes('No such file or directory')) {
@@ -92,7 +95,7 @@ export const PUT: RequestHandler = async ({ params, url, cookies, request }) => 
 
 		return json({ success: true, path });
 	} catch (error: any) {
-		console.error('Error writing container file:', error);
+		console.error('Error writing container file:', error?.message || error);
 		const msg = error.message || String(error);
 
 		if (msg.includes('Permission denied')) {

@@ -76,7 +76,7 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
 
 		return new Response(body, { headers });
 	} catch (error: any) {
-		console.error('Error downloading container file:', error);
+		console.error('Error downloading container file:', error?.message || error);
 
 		if (error.message?.includes('No such file or directory')) {
 			return new Response(JSON.stringify({ error: 'File not found' }), {

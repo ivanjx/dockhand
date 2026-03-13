@@ -26,7 +26,10 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
 
 		return json(result);
 	} catch (error: any) {
-		console.error('Error listing container directory:', error);
+		if (error?.statusCode === 404) {
+			return json({ error: error.json?.message || 'Container not found' }, { status: 404 });
+		}
+		console.error('Error listing container directory:', error?.message || error);
 		return json({ error: error.message || 'Failed to list directory' }, { status: 500 });
 	}
 };

@@ -219,6 +219,10 @@
 						// Store scan result, individual scanner results, and vulnerabilities
 						const containerProgress = progress.find(p => p.containerId === data.containerId);
 						if (containerProgress) {
+							// Add combined summary log when multiple scanners were used
+							if (data.message && data.scannerResults && data.scannerResults.length > 1) {
+								containerProgress.scanLogs.push({ message: data.message });
+							}
 							containerProgress.scanResult = data.scanResult;
 							containerProgress.scannerResults = data.scannerResults;
 							containerProgress.vulnerabilities = data.vulnerabilities;
@@ -583,6 +587,9 @@ const severityOrder: Record<string, number> = { critical: 0, high: 1, medium: 2,
 													{#each sortedVulns(item.vulnerabilities).slice(0, 50) as vuln}
 														<tr class="border-b border-muted/50">
 															<td class="py-1 pr-2 font-mono">
+																{#if item.scannerResults && item.scannerResults.length > 1 && vuln.scanner}
+																	<Badge variant="outline" class="px-1 py-0 text-[9px] mr-1 {vuln.scanner === 'grype' ? 'border-blue-400 text-blue-500' : 'border-emerald-400 text-emerald-500'}">{vuln.scanner === 'grype' ? 'G' : 'T'}</Badge>
+																{/if}
 																{#if vuln.link}
 																	<a href={vuln.link} target="_blank" rel="noopener noreferrer" class="text-blue-600 dark:text-blue-400 hover:underline inline-flex items-center gap-0.5">
 																		{vuln.id}

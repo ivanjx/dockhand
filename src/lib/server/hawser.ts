@@ -44,6 +44,7 @@ export interface EdgeConnection {
 	lastHeartbeat: number;
 	pendingRequests: Map<string, PendingRequest>;
 	pendingStreamRequests: Map<string, PendingStreamRequest>;
+	pingInterval?: ReturnType<typeof setInterval>;
 	lastMetrics?: {
 		uptime?: number;
 		cpuUsage?: number;
@@ -77,7 +78,7 @@ declare global {
 	var __hawserSendMessage: ((envId: number, message: string) => boolean) | undefined;
 	var __hawserHandleContainerEvent: ((envId: number, event: ContainerEventMessage['event']) => Promise<void>) | undefined;
 	var __hawserHandleMetrics: ((envId: number, metrics: MetricsMessage['metrics']) => Promise<void>) | undefined;
-	var __hawserHandleMessage: ((ws: any, msg: any, connId: string) => Promise<void>) | undefined;
+	var __hawserHandleMessage: ((ws: any, msg: any, connId: string, remoteIp?: string) => Promise<void>) | undefined;
 	var __hawserHandleDisconnect: ((ws: any, connId: string) => void) | undefined;
 	var __terminalHandleExecMessage: ((msg: any) => void) | undefined;
 }
@@ -118,6 +119,11 @@ export function initializeEdgeManager(): void {
 				}
 				conn.pendingRequests.clear();
 				conn.pendingStreamRequests.clear();
+
+				if (conn.pingInterval) {
+					clearInterval(conn.pingInterval);
+					conn.pingInterval = undefined;
+				}
 
 				conn.ws.close(1001, 'Connection timeout');
 				edgeConnections.delete(envId);
@@ -255,11 +261,15 @@ globalThis.__hawserHandleMetrics = handleEdgeMetrics;
 export async function validateHawserToken(
 	token: string
 ): Promise<{ valid: boolean; environmentId?: number; tokenId?: number }> {
-	// Get all active tokens
-	const tokens = await db.select().from(hawserTokens).where(eq(hawserTokens.isActive, true));
+	// Fast path: lookup by token prefix (first 8 chars) instead of iterating all tokens.
+	// This reduces O(N) Argon2id verifications to O(1) DB lookup + 1 verify.
+	const prefix = token.substring(0, 8);
+	const candidates = await db
+		.select()
+		.from(hawserTokens)
+		.where(and(eq(hawserTokens.tokenPrefix, prefix), eq(hawserTokens.isActive, true)));
 
-	// Check each token (tokens are hashed)
-	for (const t of tokens) {
+	for (const t of candidates) {
 		try {
 			const isValid = await verifyPassword(token, t.token);
 			if (isValid) {
@@ -276,7 +286,7 @@ export async function validateHawserToken(
 				};
 			}
 		} catch {
-			// Invalid hash, continue checking
+			// Invalid hash format, skip
 		}
 	}
 
@@ -371,6 +381,12 @@ export function closeEdgeConnection(environmentId: number): void {
 		`Rejecting ${pendingCount} pending requests and ${streamCount} stream requests.`
 	);
 
+	// Clear ping interval
+	if (connection.pingInterval) {
+		clearInterval(connection.pingInterval);
+		connection.pingInterval = undefined;
+	}
+
 	// Reject all pending requests
 	for (const [requestId, pending] of connection.pendingRequests) {
 		console.log(`[Hawser] Rejecting pending request ${requestId} due to environment deletion`);
@@ -427,6 +443,12 @@ export function handleEdgeConnection(
 		existing.pendingRequests.clear();
 		existing.pendingStreamRequests.clear();
 
+		// Clear ping interval before closing
+		if (existing.pingInterval) {
+			clearInterval(existing.pingInterval);
+			existing.pingInterval = undefined;
+		}
+
 		// Immediately destroy TCP socket — no graceful close needed for replaced connections
 		if (typeof existing.ws.terminate === 'function') {
 			existing.ws.terminate();
@@ -451,6 +473,17 @@ export function handleEdgeConnection(
 	};
 
 	edgeConnections.set(environmentId, connection);
+
+	// Start server-side ping interval to keep connection alive.
+	// 5s is conservative against reverse proxies with aggressive idle timeouts.
+	connection.pingInterval = setInterval(() => {
+		try {
+			connection.ws.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
+		} catch {
+			clearInterval(connection.pingInterval!);
+			connection.pingInterval = undefined;
+		}
+	}, 5000);
 
 	// Update environment record
 	updateEnvironmentStatus(environmentId, connection);
@@ -499,7 +532,8 @@ export async function sendEdgeRequest(
 	headers?: Record<string, string>,
 	streaming = false,
 	timeout = 30000,
-	isBinary = false
+	isBinary = false,
+	signal?: AbortSignal
 ): Promise<EdgeResponse> {
 	const connection = edgeConnections.get(environmentId);
 	if (!connection) {
@@ -516,6 +550,27 @@ export async function sendEdgeRequest(
 			}
 			reject(new Error('Request timeout'));
 		}, timeout);
+
+		// Honor AbortSignal from caller (e.g., AbortSignal.timeout(5000) for dockerPing)
+		if (signal) {
+			if (signal.aborted) {
+				clearTimeout(timeoutHandle);
+				reject(new Error('Request aborted'));
+				return;
+			}
+			signal.addEventListener(
+				'abort',
+				() => {
+					connection.pendingRequests.delete(requestId);
+					if (streaming) {
+						connection.pendingStreamRequests.delete(requestId);
+					}
+					clearTimeout(timeoutHandle);
+					reject(new Error('Request aborted'));
+				},
+				{ once: true }
+			);
+		}
 
 		// For streaming requests, the Go agent sends 'stream' messages instead of a single 'response'.
 		// We need to register a stream handler that collects all data and resolves when complete.
@@ -792,6 +847,12 @@ export function handleHeartbeat(environmentId: number): void {
 export function handleDisconnect(environmentId: number): void {
 	const connection = edgeConnections.get(environmentId);
 	if (connection) {
+		// Clear ping interval
+		if (connection.pingInterval) {
+			clearInterval(connection.pingInterval);
+			connection.pingInterval = undefined;
+		}
+
 		// Reject all pending requests
 		for (const [, pending] of connection.pendingRequests) {
 			clearTimeout(pending.timeout);
@@ -983,11 +1044,12 @@ export type HawserMessage =
 const wsToEnvId = new Map<any, number>();
 
 // Auth fail cache to prevent brute-force token validation.
-// Entries are periodically cleaned up to prevent unbounded growth.
+// 5 min cooldown — hawser agents use exponential backoff (30-60s),
+// so a short cooldown lets every retry through.
 const hawserAuthFailCache = new Map<string, number>();
-const HAWSER_AUTH_FAIL_COOLDOWN_MS = 30_000;
+const HAWSER_AUTH_FAIL_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 
-// Periodic cleanup of expired auth fail entries (every 60s)
+// Periodic cleanup of expired auth fail entries
 setInterval(() => {
 	const now = Date.now();
 	for (const [key, timestamp] of hawserAuthFailCache) {
@@ -995,7 +1057,7 @@ setInterval(() => {
 			hawserAuthFailCache.delete(key);
 		}
 	}
-}, 60_000);
+}, HAWSER_AUTH_FAIL_COOLDOWN_MS);
 
 // ─── Reconnection storm throttle ───
 // Tracks per-environment reconnection frequency to detect storms
@@ -1007,7 +1069,7 @@ interface ReconnectTrackerEntry {
 }
 const reconnectTracker = new Map<number, ReconnectTrackerEntry>();
 const RECONNECT_WINDOW_MS = 2 * 60 * 1000;         // 2-minute sliding window
-const RECONNECT_BURST = 3;                           // allow 3 reconnections per window
+const RECONNECT_BURST = 10;                          // allow 10 reconnections per window
 const COOLDOWN_LEVELS_SECS = [30, 60, 120, 300];    // escalating cooldown in seconds
 const STABLE_THRESHOLD_MS = 5 * 60 * 1000;          // stable connection resets tracker
 const STALE_TRACKER_MS = 10 * 60 * 1000;            // clean up stale tracker entries
@@ -1062,13 +1124,14 @@ function recordReconnection(envId: number): { allowed: true } | { allowed: false
  *
  * Registered as globalThis.__hawserHandleMessage for server.js to call.
  */
-async function handleHawserWsMessage(ws: any, msg: any, connId: string): Promise<void> {
+async function handleHawserWsMessage(ws: any, msg: any, connId: string, remoteIp?: string): Promise<void> {
 	if (msg.type === 'hello') {
-		const remoteAddr = connId;
+		const rateLimitKey = remoteIp || connId;
 
-		// Rate limit auth failures
-		const lastFail = hawserAuthFailCache.get(remoteAddr);
+		// Rate limit auth failures by remote IP (not connId which is unique per connection)
+		const lastFail = hawserAuthFailCache.get(rateLimitKey);
 		if (lastFail && Date.now() - lastFail < HAWSER_AUTH_FAIL_COOLDOWN_MS) {
+			console.log(`[Hawser WS] Rate limited ${connId} (IP: ${rateLimitKey}) — ${Math.round((Date.now() - lastFail) / 1000)}s since last fail`);
 			ws.send(JSON.stringify({ type: 'error', message: 'Too many failed attempts' }));
 			ws.close(1008, 'Rate limited');
 			return;
@@ -1083,8 +1146,8 @@ async function handleHawserWsMessage(ws: any, msg: any, connId: string): Promise
 		try {
 			const result = await validateHawserToken(msg.token);
 			if (!result.valid || !result.environmentId) {
-				console.log(`[Hawser WS] Authentication failed for connection ${connId}`);
-				hawserAuthFailCache.set(remoteAddr, Date.now());
+				console.log(`[Hawser WS] Authentication failed for connection ${connId} (IP: ${rateLimitKey})`);
+				hawserAuthFailCache.set(rateLimitKey, Date.now());
 				ws.send(JSON.stringify({ type: 'error', message: 'Invalid token' }));
 				ws.close(1008, 'Invalid token');
 				return;

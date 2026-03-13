@@ -8,7 +8,7 @@
 	import { getIconComponent } from '$lib/utils/icons';
 	import { toast } from 'svelte-sonner';
 	import { themeStore, type FontSize } from '$lib/stores/theme';
-	import { formatTime } from '$lib/stores/settings';
+	import { getTimeFormat } from '$lib/stores/settings';
 
 	// Font size scaling for header
 	let fontSize = $state<FontSize>('normal');
@@ -305,6 +305,20 @@
 		hostInfo ? ((hostInfo.totalMemory - hostInfo.freeMemory) / hostInfo.totalMemory) * 100 : 0
 	);
 
+	let currentTimezone = $derived(
+		$environments.find((e: Environment) => Number(e.id) === Number(currentEnvId))?.timezone ?? 'UTC'
+	);
+
+	function formatLastUpdated(date: Date, timezone: string): string {
+		return new Intl.DateTimeFormat('en-GB', {
+			timeZone: timezone,
+			hour: '2-digit',
+			minute: '2-digit',
+			second: '2-digit',
+			hour12: getTimeFormat() === '12h'
+		}).format(date);
+	}
+
 	function handleClickOutside(event: MouseEvent) {
 		const target = event.target as HTMLElement;
 		if (!target.closest('.env-dropdown')) {
@@ -452,7 +466,7 @@
 			class="flex items-center gap-2 {isConnected ? 'text-emerald-500' : 'text-muted-foreground'}"
 			title={isConnected ? 'Live updates connected' : 'Live updates disconnected'}
 		>
-			<span class="text-muted-foreground">{formatTime(lastUpdated, { includeSeconds: true })}</span>
+			<span class="text-muted-foreground" title={currentTimezone}>{formatLastUpdated(lastUpdated, currentTimezone)}</span>
 			{#if isConnected}
 				<Wifi class="{iconSizeLargeClass()}" />
 				<span class="font-medium">Live</span>

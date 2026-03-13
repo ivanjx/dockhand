@@ -18,6 +18,9 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 	import { currentEnvironment, environments, appendEnvParam } from '$lib/stores/environment';
 	import { appSettings } from '$lib/stores/settings';
 	import { NoEnvironment } from '$lib/components/ui/empty-state';
+	import { AnsiUp } from 'ansi_up';
+	const ansiUp = new AnsiUp();
+	ansiUp.use_classes = true;
 
 	// Track if we've handled the initial container from URL
 	let initialContainerHandled = $state(false);
@@ -1347,94 +1350,11 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 		return text
 			.replace(/&/g, '&amp;')
 			.replace(/</g, '&lt;')
-			.replace(/>/g, '&gt;')
-			.replace(/"/g, '&quot;')
-			.replace(/'/g, '&#039;');
+			.replace(/>/g, '&gt;');
 	}
 
-	// ANSI color code to CSS class mapping
-	const ansiColorMap: Record<string, string> = {
-		'30': 'ansi-black',
-		'31': 'ansi-red',
-		'32': 'ansi-green',
-		'33': 'ansi-yellow',
-		'34': 'ansi-blue',
-		'35': 'ansi-magenta',
-		'36': 'ansi-cyan',
-		'37': 'ansi-white',
-		'90': 'ansi-bright-black',
-		'91': 'ansi-bright-red',
-		'92': 'ansi-bright-green',
-		'93': 'ansi-bright-yellow',
-		'94': 'ansi-bright-blue',
-		'95': 'ansi-bright-magenta',
-		'96': 'ansi-bright-cyan',
-		'97': 'ansi-bright-white',
-		// Background colors
-		'40': 'ansi-bg-black',
-		'41': 'ansi-bg-red',
-		'42': 'ansi-bg-green',
-		'43': 'ansi-bg-yellow',
-		'44': 'ansi-bg-blue',
-		'45': 'ansi-bg-magenta',
-		'46': 'ansi-bg-cyan',
-		'47': 'ansi-bg-white',
-		// Text styles
-		'1': 'ansi-bold',
-		'2': 'ansi-dim',
-		'3': 'ansi-italic',
-		'4': 'ansi-underline',
-	};
-
-	// Convert ANSI escape codes to HTML spans with CSS classes
 	function ansiToHtml(text: string): string {
-		// Strip Docker log stream header bytes (control characters at start of lines)
-		// These appear as bytes 0x00-0x02 followed by stream data
-		let cleaned = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1A]/g, '');
-
-		// First escape HTML
-		let escaped = escapeHtml(cleaned);
-
-		// Match ANSI escape sequences: ESC[ followed by codes and ending with m
-		// ESC can be \x1b, \033, or \e
-		const ansiRegex = /\x1b\[([0-9;]*)m/g;
-
-		let result = '';
-		let lastIndex = 0;
-		let openSpans = 0;
-		let match;
-
-		while ((match = ansiRegex.exec(escaped)) !== null) {
-			// Add text before this match
-			result += escaped.slice(lastIndex, match.index);
-			lastIndex = ansiRegex.lastIndex;
-
-			const codes = match[1].split(';').filter(c => c !== '');
-
-			for (const code of codes) {
-				if (code === '0' || code === '39' || code === '49' || code === '') {
-					// Reset code - close all open spans
-					while (openSpans > 0) {
-						result += '</span>';
-						openSpans--;
-					}
-				} else if (ansiColorMap[code]) {
-					result += `<span class="${ansiColorMap[code]}">`;
-					openSpans++;
-				}
-			}
-		}
-
-		// Add remaining text
-		result += escaped.slice(lastIndex);
-
-		// Close any remaining open spans
-		while (openSpans > 0) {
-			result += '</span>';
-			openSpans--;
-		}
-
-		return result;
+		return ansiUp.ansi_to_html(text);
 	}
 
 	// Highlighted logs with search matches and ANSI color support (single container mode)
@@ -2258,39 +2178,4 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 		outline: 2px solid rgb(250, 204, 21);
 	}
 
-	/* ANSI color classes - foreground colors */
-	:global(.ansi-black) { color: #3f3f46; }
-	:global(.ansi-red) { color: #ef4444; }
-	:global(.ansi-green) { color: #22c55e; }
-	:global(.ansi-yellow) { color: #eab308; }
-	:global(.ansi-blue) { color: #3b82f6; }
-	:global(.ansi-magenta) { color: #d946ef; }
-	:global(.ansi-cyan) { color: #06b6d4; }
-	:global(.ansi-white) { color: #e4e4e7; }
-
-	/* Bright foreground colors */
-	:global(.ansi-bright-black) { color: #71717a; }
-	:global(.ansi-bright-red) { color: #f87171; }
-	:global(.ansi-bright-green) { color: #4ade80; }
-	:global(.ansi-bright-yellow) { color: #facc15; }
-	:global(.ansi-bright-blue) { color: #60a5fa; }
-	:global(.ansi-bright-magenta) { color: #e879f9; }
-	:global(.ansi-bright-cyan) { color: #22d3ee; }
-	:global(.ansi-bright-white) { color: #fafafa; }
-
-	/* Background colors */
-	:global(.ansi-bg-black) { background-color: #18181b; }
-	:global(.ansi-bg-red) { background-color: #dc2626; }
-	:global(.ansi-bg-green) { background-color: #16a34a; }
-	:global(.ansi-bg-yellow) { background-color: #ca8a04; }
-	:global(.ansi-bg-blue) { background-color: #2563eb; }
-	:global(.ansi-bg-magenta) { background-color: #c026d3; }
-	:global(.ansi-bg-cyan) { background-color: #0891b2; }
-	:global(.ansi-bg-white) { background-color: #d4d4d8; }
-
-	/* Text styles */
-	:global(.ansi-bold) { font-weight: bold; }
-	:global(.ansi-dim) { opacity: 0.7; }
-	:global(.ansi-italic) { font-style: italic; }
-	:global(.ansi-underline) { text-decoration: underline; }
 </style>

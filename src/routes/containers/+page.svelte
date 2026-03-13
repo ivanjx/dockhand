@@ -81,6 +81,7 @@
 	import { appSettings } from '$lib/stores/settings';
 	import { canAccess } from '$lib/stores/auth';
 	import { vulnerabilityCriteriaIcons } from '$lib/utils/update-steps';
+	import { watchJob } from '$lib/utils/sse-fetch';
 	import { ipToNumber } from '$lib/utils/ip';
 	import { formatHostPortUrl } from '$lib/utils/url';
 	import { detectShells, getBestShell, hasAvailableShell, USER_OPTIONS, type ShellDetectionResult } from '$lib/utils/shell-detection';
@@ -262,6 +263,8 @@
 
 	// Update check state
 	let updateCheckStatus = $state<'idle' | 'checking' | 'found' | 'none' | 'error'>('idle');
+	let updateCheckProgress = $state({ checked: 0, total: 0 });
+	let updateCheckBtnEl = $state<HTMLButtonElement | null>(null);
 	let showBatchUpdateModal = $state(false);
 	const batchUpdateContainerIds = $derived($containerStore.pendingUpdateIds);
 	const batchUpdateContainerNames = $derived($containerStore.pendingUpdateNames);
@@ -423,6 +426,13 @@
 
 	async function checkForUpdates() {
 		updateCheckStatus = 'checking';
+		updateCheckProgress = { checked: 0, total: 0 };
+
+		// Lock button width to prevent layout shift
+		if (updateCheckBtnEl) {
+			updateCheckBtnEl.style.minWidth = `${updateCheckBtnEl.offsetWidth}px`;
+		}
+
 		try {
 			const response = await fetch(appendEnvParam('/api/containers/check-updates', envId), {
 				method: 'POST'
@@ -430,9 +440,20 @@
 			if (!response.ok) {
 				updateCheckStatus = 'error';
 				pendingTimeouts.push(setTimeout(() => { updateCheckStatus = 'idle'; }, 3000));
+				if (updateCheckBtnEl) updateCheckBtnEl.style.minWidth = '';
 				return;
 			}
-			const data = await response.json();
+			const { jobId } = await response.json();
+
+			const data: any = await watchJob(jobId, (line) => {
+				if (line.event === 'progress') {
+					updateCheckProgress = line.data as { checked: number; total: number };
+				}
+			});
+
+			// Unlock button width
+			if (updateCheckBtnEl) updateCheckBtnEl.style.minWidth = '';
+
 			const containersWithUpdates = data.results.filter((r: any) => r.hasUpdate);
 			const failedChecks = data.results.filter((r: any) => r.error && !r.hasUpdate).length;
 			const failedSuffix = failedChecks > 0 ? ` (${failedChecks} failed to check)` : '';
@@ -459,6 +480,7 @@
 		} catch (error) {
 			updateCheckStatus = 'error';
 			pendingTimeouts.push(setTimeout(() => { updateCheckStatus = 'idle'; }, 3000));
+			if (updateCheckBtnEl) updateCheckBtnEl.style.minWidth = '';
 		}
 	}
 
@@ -1369,22 +1391,35 @@
 				</Button>
 				{/if}
 				<Button
+					bind:ref={updateCheckBtnEl}
 					size="sm"
 					variant="outline"
 					onclick={checkForUpdates}
 					disabled={updateCheckStatus === 'checking'}
 					title="Check for available updates"
+					class="relative overflow-hidden"
 				>
 					{#if updateCheckStatus === 'checking'}
-						<CircleArrowUp class="w-3.5 h-3.5 mr-1 animate-spin" />
+						<CircleArrowUp class="w-3.5 h-3.5 animate-spin" />
+						{#if updateCheckProgress.total > 0}
+							<span class="tabular-nums">Checking {String(updateCheckProgress.checked).padStart(String(updateCheckProgress.total).length, '\u2007')}/{updateCheckProgress.total}</span>
+							<div
+								class="absolute bottom-0 left-0 h-px bg-foreground transition-[width] duration-150 ease-out"
+								style="width: {(updateCheckProgress.checked / updateCheckProgress.total) * 100}%"
+							></div>
+						{:else}
+							Check for updates
+						{/if}
 					{:else if updateCheckStatus === 'none' || updateCheckStatus === 'found'}
 						<Check class="w-3.5 h-3.5 mr-1 text-green-600" />
+						Check for updates
 					{:else if updateCheckStatus === 'error'}
 						<XCircle class="w-3.5 h-3.5 mr-1 text-destructive" />
+						Check for updates
 					{:else}
 						<CircleArrowUp class="w-3.5 h-3.5" />
+						Check for updates
 					{/if}
-					Check for updates
 				</Button>
 				{#if updatableContainersCount > 0}
 				<Button
@@ -1791,8 +1826,11 @@
 						<code class="text-xs">{getContainerIp(container.networks)}</code>
 					{:else if column.id === 'ports'}
 						{#if ports.length > 0}
-							<div class="flex flex-wrap gap-1">
-								{#each ports as port}
+							{@const compactPorts = $appSettings.compactPorts}
+							{@const displayPorts = compactPorts && ports.length > 1 ? [ports[0]] : ports}
+							{@const remainingCount = ports.length - 1}
+							<div class="flex {compactPorts ? 'flex-nowrap' : 'flex-wrap'} gap-1">
+								{#each displayPorts as port}
 									{@const url = currentEnvDetails ? getPortUrl(port.publicPort) : null}
 									{#if url}
 										<a
@@ -1800,16 +1838,22 @@
 											target="_blank"
 											rel="noopener noreferrer"
 											onclick={(e) => e.stopPropagation()}
-											class="inline-flex items-center gap-0.5 text-xs bg-muted hover:bg-blue-500/20 hover:text-blue-500 px-1 py-0.5 rounded transition-colors"
+											class="inline-flex items-center gap-0.5 text-xs bg-muted hover:bg-blue-500/20 hover:text-blue-500 px-1 py-0.5 rounded transition-colors shrink-0"
 											title="Open {url} in new tab"
 										>
 											<code>{port.display}</code>
 											<ExternalLink class="w-2.5 h-2.5 text-muted-foreground" />
 										</a>
 									{:else}
-										<code class="text-xs bg-muted px-1 py-0.5 rounded">{port.display}</code>
+										<code class="text-xs bg-muted px-1 py-0.5 rounded shrink-0">{port.display}</code>
 									{/if}
 								{/each}
+								{#if compactPorts && remainingCount > 0}
+									<span
+										class="text-xs bg-muted text-muted-foreground px-1 py-0.5 rounded cursor-default shrink-0"
+										title={ports.map(p => p.display).join(', ')}
+									>+{remainingCount}</span>
+								{/if}
 							</div>
 						{:else}
 							<span class="text-gray-400 dark:text-gray-600 text-xs">-</span>

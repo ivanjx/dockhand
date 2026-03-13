@@ -4,6 +4,9 @@
 	import * as Select from '$lib/components/ui/select';
 	import { themeStore } from '$lib/stores/theme';
 	import { getMonospaceFont } from '$lib/themes';
+	import { AnsiUp } from 'ansi_up';
+	const ansiUp = new AnsiUp();
+	ansiUp.use_classes = true;
 
 	interface Props {
 		logs: string;
@@ -139,25 +142,20 @@
 		}
 	}
 
-	// Escape HTML to prevent XSS
-	function escapeHtml(text: string): string {
-		return text
-			.replace(/&/g, '&amp;')
-			.replace(/</g, '&lt;')
-			.replace(/>/g, '&gt;')
-			.replace(/"/g, '&quot;')
-			.replace(/'/g, '&#039;');
-	}
-
-	// Highlighted logs with search matches
+	// Highlighted logs with search matches and ANSI color support
 	let highlightedLogs = $derived(() => {
-		const escaped = escapeHtml(logs || '');
-		if (!logSearchQuery.trim()) return escaped;
+		const withAnsi = ansiUp.ansi_to_html(logs || '');
+		if (!logSearchQuery.trim()) return withAnsi;
 
 		const query = logSearchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-		const escapedQuery = escapeHtml(query);
-		const regex = new RegExp(`(${escapedQuery})`, 'gi');
-		return escaped.replace(regex, '<mark class="search-match">$1</mark>');
+		const escapedQuery = query.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+		// Split by HTML tags and only process text parts
+		const parts = withAnsi.split(/(<[^>]*>)/);
+		return parts.map(part => {
+			if (part.startsWith('<')) return part;
+			return part.replace(new RegExp(`(${escapedQuery})`, 'gi'), '<mark class="search-match">$1</mark>');
+		}).join('');
 	});
 
 	// Update match count after render
@@ -322,4 +320,5 @@
 		box-shadow: 0 0 8px rgba(234, 179, 8, 0.9), 0 0 16px rgba(234, 179, 8, 0.5);
 		outline: 2px solid rgb(250, 204, 21);
 	}
+
 </style>

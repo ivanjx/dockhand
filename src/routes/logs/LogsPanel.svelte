@@ -6,6 +6,9 @@
 	import { appSettings } from '$lib/stores/settings';
 	import { themeStore } from '$lib/stores/theme';
 	import { getMonospaceFont } from '$lib/themes';
+	import { AnsiUp } from 'ansi_up';
+	const ansiUp = new AnsiUp();
+	ansiUp.use_classes = true;
 
 	interface Props {
 		containerId: string;
@@ -519,100 +522,13 @@
 		}
 	}
 
-	// Escape HTML to prevent XSS
-	function escapeHtml(text: string): string {
-		return text
-			.replace(/&/g, '&amp;')
-			.replace(/</g, '&lt;')
-			.replace(/>/g, '&gt;')
-			.replace(/"/g, '&quot;')
-			.replace(/'/g, '&#039;');
-	}
-
-	// ANSI color code to CSS class mapping
-	const ansiColorMap: Record<string, string> = {
-		'30': 'ansi-black',
-		'31': 'ansi-red',
-		'32': 'ansi-green',
-		'33': 'ansi-yellow',
-		'34': 'ansi-blue',
-		'35': 'ansi-magenta',
-		'36': 'ansi-cyan',
-		'37': 'ansi-white',
-		'90': 'ansi-bright-black',
-		'91': 'ansi-bright-red',
-		'92': 'ansi-bright-green',
-		'93': 'ansi-bright-yellow',
-		'94': 'ansi-bright-blue',
-		'95': 'ansi-bright-magenta',
-		'96': 'ansi-bright-cyan',
-		'97': 'ansi-bright-white',
-		'40': 'ansi-bg-black',
-		'41': 'ansi-bg-red',
-		'42': 'ansi-bg-green',
-		'43': 'ansi-bg-yellow',
-		'44': 'ansi-bg-blue',
-		'45': 'ansi-bg-magenta',
-		'46': 'ansi-bg-cyan',
-		'47': 'ansi-bg-white',
-		'1': 'ansi-bold',
-		'2': 'ansi-dim',
-		'3': 'ansi-italic',
-		'4': 'ansi-underline',
-	};
-
-	// Convert ANSI escape codes to HTML spans with CSS classes
-	function ansiToHtml(text: string): string {
-		// Strip control characters
-		let cleaned = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1A]/g, '');
-
-		// Escape HTML
-		let escaped = escapeHtml(cleaned);
-
-		// Match ANSI escape sequences
-		const ansiRegex = /\x1b\[([0-9;]*)m/g;
-
-		let result = '';
-		let lastIndex = 0;
-		let openSpans = 0;
-		let match;
-
-		while ((match = ansiRegex.exec(escaped)) !== null) {
-			result += escaped.slice(lastIndex, match.index);
-			lastIndex = ansiRegex.lastIndex;
-
-			const codes = match[1].split(';').filter(c => c !== '');
-
-			for (const code of codes) {
-				if (code === '0' || code === '39' || code === '49' || code === '') {
-					while (openSpans > 0) {
-						result += '</span>';
-						openSpans--;
-					}
-				} else if (ansiColorMap[code]) {
-					result += `<span class="${ansiColorMap[code]}">`;
-					openSpans++;
-				}
-			}
-		}
-
-		result += escaped.slice(lastIndex);
-
-		while (openSpans > 0) {
-			result += '</span>';
-			openSpans--;
-		}
-
-		return result;
-	}
-
 	// Highlighted logs with search matches and ANSI color support
 	let highlightedLogs = $derived(() => {
-		const withAnsi = ansiToHtml(logs || '');
+		const withAnsi = ansiUp.ansi_to_html(logs || '');
 		if (!logSearchQuery.trim()) return withAnsi;
 
 		const query = logSearchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-		const escapedQuery = escapeHtml(query);
+		const escapedQuery = query.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 		// Split by HTML tags and only process text parts
 		const parts = withAnsi.split(/(<[^>]*>)/);
@@ -896,42 +812,6 @@
 		box-shadow: 0 0 8px rgba(234, 179, 8, 0.9), 0 0 16px rgba(234, 179, 8, 0.5);
 		outline: 2px solid rgb(250, 204, 21);
 	}
-
-	/* ANSI color classes - foreground colors */
-	:global(.ansi-black) { color: #3f3f46; }
-	:global(.ansi-red) { color: #ef4444; }
-	:global(.ansi-green) { color: #22c55e; }
-	:global(.ansi-yellow) { color: #eab308; }
-	:global(.ansi-blue) { color: #3b82f6; }
-	:global(.ansi-magenta) { color: #d946ef; }
-	:global(.ansi-cyan) { color: #06b6d4; }
-	:global(.ansi-white) { color: #e4e4e7; }
-
-	/* Bright foreground colors */
-	:global(.ansi-bright-black) { color: #71717a; }
-	:global(.ansi-bright-red) { color: #f87171; }
-	:global(.ansi-bright-green) { color: #4ade80; }
-	:global(.ansi-bright-yellow) { color: #facc15; }
-	:global(.ansi-bright-blue) { color: #60a5fa; }
-	:global(.ansi-bright-magenta) { color: #e879f9; }
-	:global(.ansi-bright-cyan) { color: #22d3ee; }
-	:global(.ansi-bright-white) { color: #fafafa; }
-
-	/* Background colors */
-	:global(.ansi-bg-black) { background-color: #18181b; }
-	:global(.ansi-bg-red) { background-color: #dc2626; }
-	:global(.ansi-bg-green) { background-color: #16a34a; }
-	:global(.ansi-bg-yellow) { background-color: #ca8a04; }
-	:global(.ansi-bg-blue) { background-color: #2563eb; }
-	:global(.ansi-bg-magenta) { background-color: #c026d3; }
-	:global(.ansi-bg-cyan) { background-color: #0891b2; }
-	:global(.ansi-bg-white) { background-color: #d4d4d8; }
-
-	/* Text styles */
-	:global(.ansi-bold) { font-weight: bold; }
-	:global(.ansi-dim) { opacity: 0.7; }
-	:global(.ansi-italic) { font-style: italic; }
-	:global(.ansi-underline) { text-decoration: underline; }
 
 	/* Fade-in animation for logs */
 	@keyframes fadeIn {

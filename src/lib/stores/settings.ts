@@ -26,6 +26,7 @@ export interface AppSettings {
 	eventCollectionMode: EventCollectionMode;
 	eventPollInterval: number;
 	metricsCollectionInterval: number;
+	compactPorts: boolean;
 	externalStackPaths: string[];
 	primaryStackLocation: string | null;
 }
@@ -50,6 +51,7 @@ const DEFAULT_SETTINGS: AppSettings = {
 	eventCollectionMode: 'stream',
 	eventPollInterval: 60000,
 	metricsCollectionInterval: 30000,
+	compactPorts: false,
 	externalStackPaths: [],
 	primaryStackLocation: null
 };
@@ -88,6 +90,7 @@ function createSettingsStore() {
 					eventCollectionMode: settings.eventCollectionMode ?? DEFAULT_SETTINGS.eventCollectionMode,
 					eventPollInterval: settings.eventPollInterval ?? DEFAULT_SETTINGS.eventPollInterval,
 					metricsCollectionInterval: settings.metricsCollectionInterval ?? DEFAULT_SETTINGS.metricsCollectionInterval,
+					compactPorts: settings.compactPorts ?? DEFAULT_SETTINGS.compactPorts,
 					externalStackPaths: settings.externalStackPaths ?? DEFAULT_SETTINGS.externalStackPaths,
 					primaryStackLocation: settings.primaryStackLocation ?? DEFAULT_SETTINGS.primaryStackLocation
 				});
@@ -129,6 +132,7 @@ function createSettingsStore() {
 					eventCollectionMode: updatedSettings.eventCollectionMode ?? DEFAULT_SETTINGS.eventCollectionMode,
 					eventPollInterval: updatedSettings.eventPollInterval ?? DEFAULT_SETTINGS.eventPollInterval,
 					metricsCollectionInterval: updatedSettings.metricsCollectionInterval ?? DEFAULT_SETTINGS.metricsCollectionInterval,
+					compactPorts: updatedSettings.compactPorts ?? DEFAULT_SETTINGS.compactPorts,
 					externalStackPaths: updatedSettings.externalStackPaths ?? DEFAULT_SETTINGS.externalStackPaths,
 					primaryStackLocation: updatedSettings.primaryStackLocation ?? DEFAULT_SETTINGS.primaryStackLocation
 				});
@@ -287,6 +291,13 @@ function createSettingsStore() {
 			update((current) => {
 				const newSettings = { ...current, metricsCollectionInterval: value };
 				saveSettings({ metricsCollectionInterval: value });
+				return newSettings;
+			});
+		},
+		setCompactPorts: (value: boolean) => {
+			update((current) => {
+				const newSettings = { ...current, compactPorts: value };
+				saveSettings({ compactPorts: value });
 				return newSettings;
 			});
 		},

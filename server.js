@@ -16,6 +16,15 @@ import { randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import { handler } from './build/handler.js';
 
+// Patch console to prepend ISO timestamps
+const _log = console.log;
+const _error = console.error;
+const _warn = console.warn;
+const ts = () => new Date().toISOString();
+console.log = (...args) => _log(ts(), ...args);
+console.error = (...args) => _error(ts(), ...args);
+console.warn = (...args) => _warn(ts(), ...args);
+
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 
