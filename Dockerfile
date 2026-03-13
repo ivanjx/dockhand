@@ -89,7 +89,7 @@ RUN rm -rf node_modules \
     && rm -rf node_modules/@types
 
 # Build Go collector
-FROM --platform=$BUILDPLATFORM golang:1.24 AS go-builder
+FROM --platform=$BUILDPLATFORM golang:1.25 AS go-builder
 ARG TARGETARCH
 WORKDIR /app
 COPY collector/ ./collector/
