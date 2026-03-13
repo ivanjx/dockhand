@@ -73,7 +73,7 @@
 	let hasAutoPulled = $state(false);
 
 	// Tab state - start on settings if skipping pull tab
-	let activeTab = $state<'pull' | 'scan' | 'container'>(skipPullTab ? 'container' : 'pull');
+	let activeTab = $state<'pull' | 'scan' | 'container'>('pull');
 
 	// Config sets
 	let configSets = $state<ConfigSet[]>([]);
@@ -117,6 +117,8 @@
 	let autoUpdateEnabled = $state(false);
 	let autoUpdateCronExpression = $state('0 3 * * *');
 	let vulnerabilityCriteria = $state<VulnerabilityCriteria>('never');
+	let scheduledStartEnabled = $state(false);
+	let scheduledStartCronExpression = $state('0 2 * * *');
 
 
 	// User/Group
@@ -172,8 +174,8 @@
 	let errors = $state<{ name?: string; image?: string }>({});
 
 	// Component refs
-	let pullTabRef: PullTab | undefined;
-	let scanTabRef: ScanTab | undefined;
+	let pullTabRef = $state<PullTab | undefined>(undefined);
+	let scanTabRef = $state<ScanTab | undefined>(undefined);
 
 	// Pull & Scan status (tracked via component callbacks)
 	let pullStatus = $state<'idle' | 'pulling' | 'complete' | 'error'>('idle');
@@ -500,6 +502,22 @@
 				}
 			}
 
+			if (scheduledStartEnabled) {
+				try {
+					const envParam = $currentEnvironment ? `?env=${$currentEnvironment.id}` : '';
+					await fetch(`/api/container-start/${encodeURIComponent(name.trim())}${envParam}`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({
+							enabled: scheduledStartEnabled,
+							cronExpression: scheduledStartCronExpression
+						})
+					});
+				} catch (err) {
+					console.error('Failed to save container start schedule:', err);
+				}
+			}
+
 			if (result.imagePulled) {
 				toast.success(`Container created (image ${image.trim()} was pulled automatically)`);
 			} else {
@@ -533,6 +551,8 @@
 		autoUpdateEnabled = false;
 		autoUpdateCronExpression = '0 3 * * *';
 		vulnerabilityCriteria = 'never';
+		scheduledStartEnabled = false;
+		scheduledStartCronExpression = '0 2 * * *';
 		errors = {};
 		selectedConfigSetId = '';
 		containerUser = '';
@@ -755,6 +775,8 @@
 				bind:autoUpdateEnabled
 				bind:autoUpdateCronExpression
 				bind:vulnerabilityCriteria
+				bind:scheduledStartEnabled
+				bind:scheduledStartCronExpression
 				{configSets}
 				bind:selectedConfigSetId
 				bind:errors
