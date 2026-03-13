@@ -43,6 +43,13 @@
       "when": 1775312212996,
       "tag": "0005_add_api_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1776611799848,
+      "tag": "0006_workable_supernaut",
+      "breakpoints": true
     }
   ]
 }
