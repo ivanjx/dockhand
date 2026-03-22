@@ -947,6 +947,13 @@ export const ENVIRONMENT_NOTIFICATION_EVENTS = NOTIFICATION_EVENT_TYPES.filter(e
 
 export type NotificationEventType = typeof NOTIFICATION_EVENT_TYPES[number]['id'];
 
+const environmentEventIds = new Set(ENVIRONMENT_NOTIFICATION_EVENTS.map(e => e.id));
+
+/** Strip system-scoped events (e.g. license_expiring) from environment notification records */
+function filterEnvironmentEventTypes(eventTypes: string[]): string[] {
+	return eventTypes.filter(id => environmentEventIds.has(id));
+}
+
 export interface NotificationSettingData {
 	id: number;
 	type: 'smtp' | 'apprise';
@@ -1110,7 +1117,7 @@ export async function getEnvironmentNotifications(environmentId: number): Promis
 
 	return rows.map((row: any) => ({
 		...row,
-		eventTypes: row.eventTypes ? JSON.parse(row.eventTypes) : NOTIFICATION_EVENT_TYPES.map(e => e.id)
+		eventTypes: filterEnvironmentEventTypes(row.eventTypes ? JSON.parse(row.eventTypes) : ENVIRONMENT_NOTIFICATION_EVENTS.map(e => e.id))
 	})) as EnvironmentNotificationData[];
 }
 
@@ -1137,7 +1144,7 @@ export async function getEnvironmentNotification(environmentId: number, notifica
 	if (!rows[0]) return null;
 	return {
 		...rows[0],
-		eventTypes: rows[0].eventTypes ? JSON.parse(rows[0].eventTypes) : NOTIFICATION_EVENT_TYPES.map(e => e.id)
+		eventTypes: filterEnvironmentEventTypes(rows[0].eventTypes ? JSON.parse(rows[0].eventTypes) : ENVIRONMENT_NOTIFICATION_EVENTS.map(e => e.id))
 	} as EnvironmentNotificationData;
 }
 
@@ -1147,7 +1154,7 @@ export async function createEnvironmentNotification(data: {
 	enabled?: boolean;
 	eventTypes?: NotificationEventType[];
 }): Promise<EnvironmentNotificationData> {
-	const eventTypes = data.eventTypes || NOTIFICATION_EVENT_TYPES.map(e => e.id);
+	const eventTypes = data.eventTypes || ENVIRONMENT_NOTIFICATION_EVENTS.map(e => e.id);
 	await db.insert(environmentNotifications).values({
 		environmentId: data.environmentId,
 		notificationId: data.notificationId,
@@ -1215,7 +1222,7 @@ export async function getEnabledEnvironmentNotifications(
 	return rows
 		.map(row => ({
 			...row,
-			eventTypes: row.eventTypes ? JSON.parse(row.eventTypes) : NOTIFICATION_EVENT_TYPES.map(e => e.id),
+			eventTypes: filterEnvironmentEventTypes(row.eventTypes ? JSON.parse(row.eventTypes) : ENVIRONMENT_NOTIFICATION_EVENTS.map(e => e.id)),
 			config: decryptNotificationConfig(row.channelType ?? 'apprise', row.config)
 		}))
 		.filter(row => !eventType || row.eventTypes.includes(eventType)) as (EnvironmentNotificationData & { config: any })[];
@@ -2145,6 +2152,14 @@ export async function updateGitRepository(id: number, data: Partial<GitRepositor
 
 	await db.update(gitRepositories).set(updateData).where(eq(gitRepositories.id, id));
 	return getGitRepository(id);
+}
+
+export async function getGitStacksByRepositoryId(repositoryId: number): Promise<Array<{ id: number; stackName: string; environmentId: number | null }>> {
+	return db.select({
+		id: gitStacks.id,
+		stackName: gitStacks.stackName,
+		environmentId: gitStacks.environmentId
+	}).from(gitStacks).where(eq(gitStacks.repositoryId, repositoryId));
 }
 
 export async function deleteGitRepository(id: number): Promise<boolean> {

@@ -1,7 +1,7 @@
 {
 	"name": "dockhand",
 	"private": true,
-	"version": "1.0.21",
+	"version": "1.0.22",
 	"type": "module",
 	"scripts": {
 		"dev": "npx vite dev",
@@ -86,7 +86,7 @@
 		"qrcode": "^1.5.4",
 		"svelte-dnd-action": "0.9.69",
 		"svelte-sonner": "1.0.7",
-		"undici": "7.22.0",
+		"undici": "7.24.5",
 		"ws": "^8.18.0"
 	},
 	"devDependencies": {
