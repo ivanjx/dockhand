@@ -1,5 +1,14 @@
 [
   {
+    "version": "1.0.24",
+    "date": "2026-04-03",
+    "changes": [
+      { "type": "fix", "text": "browsing HTTP registries fails with SSL error (#868)" },
+      { "type": "fix", "text": "git stack deploy options (build, re-pull, force redeploy) not persisted in edit dialog" }
+    ],
+    "imageTag": "fnsys/dockhand:v1.0.24"
+  },
+  {
     "version": "1.0.23",
     "date": "2026-04-03",
     "changes": [
