@@ -102,7 +102,7 @@ export const POST: RequestHandler = async ({ url, cookies, request }) => {
 		}
 		await Promise.all(Array.from({ length: Math.min(CONCURRENCY, containers.length) }, () => runNext()));
 
-		const updatesFound = results.filter(r => r.hasUpdate).length;
+		const updatesFound = results.filter(r => r.hasUpdate && !r.systemContainer).length;
 
 		// Save containers with updates to the database for persistence
 		if (envIdNum) {

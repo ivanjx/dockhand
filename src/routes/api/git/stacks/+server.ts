@@ -119,7 +119,10 @@ export const POST: RequestHandler = async (event) => {
 			autoUpdateSchedule: data.autoUpdateSchedule || 'daily',
 			autoUpdateCron: data.autoUpdateCron || '0 3 * * *',
 			webhookEnabled: data.webhookEnabled || false,
-			webhookSecret: webhookSecret
+			webhookSecret: webhookSecret,
+			buildOnDeploy: data.buildOnDeploy ?? false,
+			repullImages: data.repullImages ?? false,
+			forceRedeploy: data.forceRedeploy ?? false
 		});
 
 		// Create stack_sources entry so the stack appears in the list immediately

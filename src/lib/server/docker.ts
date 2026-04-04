@@ -2625,7 +2625,9 @@ function parseImageReference(imageName: string): { registry: string; repo: strin
  *   'ghcr.io' -> { host: 'ghcr.io', path: '', fullRegistry: 'ghcr.io' }
  *   'registry.example.com:5000/myorg' -> { host: 'registry.example.com:5000', path: '/myorg', fullRegistry: 'registry.example.com:5000/myorg' }
  */
-export function parseRegistryUrl(url: string): { host: string; path: string; fullRegistry: string } {
+export function parseRegistryUrl(url: string): { host: string; path: string; fullRegistry: string; protocol: string } {
+	// Detect protocol (default to https)
+	const protocol = url.startsWith('http://') ? 'http' : 'https';
 	// Remove protocol
 	const withoutProtocol = url.replace(/^https?:\/\//, '');
 	// Remove trailing slash
@@ -2633,11 +2635,11 @@ export function parseRegistryUrl(url: string): { host: string; path: string; ful
 	// Split on first slash (after port if present)
 	const slashIndex = trimmed.indexOf('/');
 	if (slashIndex === -1) {
-		return { host: trimmed, path: '', fullRegistry: trimmed };
+		return { host: trimmed, path: '', fullRegistry: trimmed, protocol };
 	}
 	const host = trimmed.substring(0, slashIndex);
 	const path = trimmed.substring(slashIndex); // includes leading /
-	return { host, path, fullRegistry: trimmed };
+	return { host, path, fullRegistry: trimmed, protocol };
 }
 
 /**
@@ -2822,7 +2824,7 @@ export async function getRegistryAuthHeader(
 	try {
 		// Parse URL to extract host (V2 API is always at the host root)
 		const parsed = parseRegistryUrl(registryUrl);
-		const apiBaseUrl = `https://${parsed.host}`;
+		const apiBaseUrl = `${parsed.protocol}://${parsed.host}`;
 
 		// Step 1: Challenge request to /v2/ (always at registry root, not under org path)
 		const challengeResponse = await fetch(`${apiBaseUrl}/v2/`, {
@@ -2931,7 +2933,7 @@ export async function getRegistryAuth(
 	const parsed = parseRegistryUrl(registry.url);
 
 	// V2 API endpoints are always at the registry host root
-	const baseUrl = `https://${parsed.host}`;
+	const baseUrl = `${parsed.protocol}://${parsed.host}`;
 
 	// Get auth header using proper token flow
 	const credentials = registry.username && registry.password

@@ -499,7 +499,7 @@
 
 		// Hostname pattern (allows letters, numbers, hyphens, dots)
 		// Must start with letter/number, can contain dots for subdomains
-		const hostnamePattern = /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$/;
+		const hostnamePattern = /^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?)*$/;
 		return hostnamePattern.test(host);
 	}
 

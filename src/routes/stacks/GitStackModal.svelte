@@ -6,7 +6,7 @@
 	import { Label } from '$lib/components/ui/label';
 	import { Input } from '$lib/components/ui/input';
 	import { TogglePill } from '$lib/components/ui/toggle-pill';
-	import { Loader2, GitBranch, RefreshCw, Webhook, Rocket, RefreshCcw, Copy, Check, XCircle, FolderGit2, Github, Key, KeyRound, Lock, FileText, HelpCircle, GripVertical, X, Download } from 'lucide-svelte';
+	import { Loader2, GitBranch, RefreshCw, Webhook, Rocket, RefreshCcw, Copy, Check, XCircle, FolderGit2, Github, Key, KeyRound, Lock, FileText, HelpCircle, GripVertical, X, Download, Hammer, ArrowDownToLine, Zap } from 'lucide-svelte';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import { copyToClipboard } from '$lib/utils/clipboard';
 	import CronEditor from '$lib/components/cron-editor.svelte';
@@ -57,6 +57,9 @@
 		autoUpdateCron: string;
 		webhookEnabled: boolean;
 		webhookSecret: string | null;
+		buildOnDeploy: boolean;
+		repullImages: boolean;
+		forceRedeploy: boolean;
 	}
 
 	interface Props {
@@ -87,6 +90,9 @@
 	let formAutoUpdateCron = $state('0 3 * * *');
 	let formWebhookEnabled = $state(false);
 	let formWebhookSecret = $state('');
+	let formBuildOnDeploy = $state(false);
+	let formRepullImages = $state(false);
+	let formForceRedeploy = $state(false);
 	let formDeployNow = $state(false);
 	let formError = $state('');
 	let formSaving = $state(false);
@@ -357,6 +363,9 @@
 			formAutoUpdateCron = gitStack.autoUpdateCron || '0 3 * * *';
 			formWebhookEnabled = gitStack.webhookEnabled;
 			formWebhookSecret = gitStack.webhookSecret || '';
+			formBuildOnDeploy = gitStack.buildOnDeploy ?? false;
+			formRepullImages = gitStack.repullImages ?? false;
+			formForceRedeploy = gitStack.forceRedeploy ?? false;
 			formDeployNow = false;
 
 			// Load env files and overrides SYNCHRONOUSLY to avoid race conditions
@@ -381,6 +390,9 @@
 			formAutoUpdateCron = '0 3 * * *';
 			formWebhookEnabled = false;
 			formWebhookSecret = '';
+			formBuildOnDeploy = false;
+			formRepullImages = false;
+			formForceRedeploy = false;
 			formDeployNow = false;
 		}
 	}
@@ -437,6 +449,9 @@
 				autoUpdateCron: formAutoUpdateCron,
 				webhookEnabled: formWebhookEnabled,
 				webhookSecret: formWebhookEnabled ? formWebhookSecret : null,
+				buildOnDeploy: formBuildOnDeploy,
+				repullImages: formRepullImages,
+				forceRedeploy: formForceRedeploy,
 				deployNow: deployAfterSave,
 				envVars: overrideVars.map(v => ({
 					key: v.key.trim(),
@@ -878,6 +893,41 @@
 						</p>
 					{/if}
 				{/if}
+			</div>
+
+			<!-- Deploy options section -->
+			<div class="space-y-3 p-3 bg-muted/50 rounded-md">
+				<p class="text-xs font-medium text-muted-foreground uppercase tracking-wider">Deploy options</p>
+				<div class="flex items-center gap-3">
+					<div class="flex items-center gap-2 flex-1">
+						<Hammer class="w-4 h-4 text-muted-foreground" />
+						<Label class="text-sm font-normal">Build images on deploy</Label>
+					</div>
+					<TogglePill bind:checked={formBuildOnDeploy} />
+				</div>
+				<p class="text-xs text-muted-foreground">
+					Run <code class="text-xs bg-muted px-1 rounded">--build</code> to build images from Dockerfiles before starting containers.
+				</p>
+				<div class="flex items-center gap-3">
+					<div class="flex items-center gap-2 flex-1">
+						<ArrowDownToLine class="w-4 h-4 text-muted-foreground" />
+						<Label class="text-sm font-normal">Re-pull images</Label>
+					</div>
+					<TogglePill bind:checked={formRepullImages} />
+				</div>
+				<p class="text-xs text-muted-foreground">
+					Always pull latest images before deploying, even if the compose file hasn't changed. Useful for CI/CD workflows with static tags like <code class="text-xs bg-muted px-1 rounded">:latest</code>.
+				</p>
+				<div class="flex items-center gap-3">
+					<div class="flex items-center gap-2 flex-1">
+						<Zap class="w-4 h-4 text-muted-foreground" />
+						<Label class="text-sm font-normal">Force redeployment</Label>
+					</div>
+					<TogglePill bind:checked={formForceRedeploy} />
+				</div>
+				<p class="text-xs text-muted-foreground">
+					Always redeploy the stack on webhook or scheduled sync, even if no git changes are detected.
+				</p>
 			</div>
 
 			<!-- Deploy now option (only for new stacks) -->

@@ -60,6 +60,8 @@ export interface StackOperationResult {
 	success: boolean;
 	output?: string;
 	error?: string;
+	/** The docker compose command that was executed (for debugging/testing) */
+	command?: string;
 }
 
 /**
@@ -101,6 +103,8 @@ export interface DeployStackOptions {
 	envId?: number | null;
 	sourceDir?: string; // Directory to copy all files from (for git stacks)
 	forceRecreate?: boolean;
+	build?: boolean; // Build images before starting (--build)
+	pullPolicy?: string; // Pull policy: 'always' | 'missing' | 'never'
 	composePath?: string; // Custom compose file path (for adopted/imported stacks)
 	envPath?: string; // Custom env file path (for adopted/imported stacks)
 	composeFileName?: string; // Compose filename to use (e.g., "docker-compose.yaml") for git stacks
@@ -790,6 +794,8 @@ interface ComposeCommandOptions {
 	stackName: string;
 	envId?: number | null;
 	forceRecreate?: boolean;
+	build?: boolean; // Build images before starting (--build)
+	pullPolicy?: string; // Pull policy: 'always' | 'missing' | 'never'
 	removeVolumes?: boolean;
 	stackFiles?: Record<string, string>; // All files to send to Hawser
 	/** Working directory for compose execution (for imported stacks) */
@@ -850,7 +856,9 @@ async function executeLocalCompose(
 	customComposePath?: string,
 	customEnvPath?: string,
 	useOverrideFile?: boolean,
-	serviceName?: string
+	serviceName?: string,
+	build?: boolean,
+	pullPolicy?: string
 ): Promise<StackOperationResult> {
 	const logPrefix = `[Stack:${stackName}]`;
 
@@ -1042,6 +1050,8 @@ async function executeLocalCompose(
 		case 'up':
 			args.push('up', '-d', '--remove-orphans');
 			// if (forceRecreate) args.push('--force-recreate');
+			if (build) args.push('--build');
+			if (pullPolicy) args.push('--pull', pullPolicy);
 			// If targeting a specific service, only update that service
 			if (serviceName) {
 				args.push(serviceName);
@@ -1069,11 +1079,13 @@ async function executeLocalCompose(
 			break;
 	}
 
+	const commandStr = args.join(' ');
+
 	console.log(`${logPrefix} ----------------------------------------`);
 	console.log(`${logPrefix} EXECUTE LOCAL COMPOSE`);
 	console.log(`${logPrefix} ----------------------------------------`);
 	console.log(`${logPrefix} Operation:`, operation);
-	console.log(`${logPrefix} Command:`, args.join(' '));
+	console.log(`${logPrefix} Command:`, commandStr);
 	console.log(`${logPrefix} Working directory:`, stackDir);
 	console.log(`${logPrefix} Compose file:`, composeFile);
 	console.log(`${logPrefix} DOCKER_HOST:`, dockerHost || '(local socket)');
@@ -1143,20 +1155,23 @@ async function executeLocalCompose(
 				return {
 					success: false,
 					output: stdout,
-					error: `docker compose ${operation} timed out after ${COMPOSE_TIMEOUT_MS / 1000} seconds`
+					error: `docker compose ${operation} timed out after ${COMPOSE_TIMEOUT_MS / 1000} seconds`,
+					command: commandStr
 				};
 			}
 
 			if (code === 0) {
 				return {
 					success: true,
-					output: stdout || stderr || `Stack "${stackName}" ${operation} completed successfully`
+					output: stdout || stderr || `Stack "${stackName}" ${operation} completed successfully`,
+					command: commandStr
 				};
 			} else {
 				return {
 					success: false,
 					output: stdout,
-					error: stderr || `docker compose ${operation} exited with code ${code}`
+					error: stderr || `docker compose ${operation} exited with code ${code}`,
+					command: commandStr
 				};
 			}
 		} finally {
@@ -1167,7 +1182,8 @@ async function executeLocalCompose(
 		return {
 			success: false,
 			output: '',
-			error: `Failed to run docker compose ${operation}: ${err.message}`
+			error: `Failed to run docker compose ${operation}: ${err.message}`,
+			command: commandStr
 		};
 	} finally {
 		// Cleanup temp override file from host path translation
@@ -1209,7 +1225,9 @@ async function executeComposeViaHawser(
 	removeVolumes?: boolean,
 	stackFiles?: Record<string, string>,
 	serviceName?: string,
-	composeFileName?: string
+	composeFileName?: string,
+	build?: boolean,
+	pullPolicy?: string
 ): Promise<StackOperationResult> {
 	const logPrefix = `[Stack:${stackName}]`;
 	// Import dockerFetch dynamically to avoid circular dependency
@@ -1282,6 +1300,8 @@ async function executeComposeViaHawser(
 			files, // Files including .env (secrets NOT in .env file)
 			forceRecreate: forceRecreate || false,
 			removeVolumes: removeVolumes || false,
+			build: build || false,
+			pullPolicy: pullPolicy || '',
 			registries, // Registry credentials for docker login
 			serviceName // Target specific service only (with --no-deps)
 		});
@@ -1349,7 +1369,7 @@ async function executeComposeCommand(
 	envVars?: Record<string, string>,
 	secretVars?: Record<string, string>
 ): Promise<StackOperationResult> {
-	const { stackName, envId, forceRecreate, removeVolumes, stackFiles, workingDir, composePath, envPath, useOverrideFile, serviceName, composeFileName } = options;
+	const { stackName, envId, forceRecreate, build, pullPolicy, removeVolumes, stackFiles, workingDir, composePath, envPath, useOverrideFile, serviceName, composeFileName } = options;
 
 	// Get environment configuration
 	const env = envId ? await getEnvironment(envId) : null;
@@ -1371,7 +1391,9 @@ async function executeComposeCommand(
 			composePath,
 			envPath,
 			useOverrideFile,
-			serviceName
+			serviceName,
+			build,
+			pullPolicy
 		);
 	}
 
@@ -1433,7 +1455,9 @@ async function executeComposeCommand(
 				removeVolumes,
 				hawserStackFiles,
 				serviceName,
-				composeFileName
+				composeFileName,
+				build,
+				pullPolicy
 			);
 		}
 
@@ -1464,7 +1488,9 @@ async function executeComposeCommand(
 				composePath,
 				envPath,
 				useOverrideFile,
-				serviceName
+				serviceName,
+				build,
+				pullPolicy
 			);
 		}
 
@@ -1485,7 +1511,9 @@ async function executeComposeCommand(
 				composePath,
 				envPath,
 				useOverrideFile,
-				serviceName
+				serviceName,
+				build,
+				pullPolicy
 			);
 	}
 }
@@ -1749,7 +1777,7 @@ export interface RequireComposeResult {
  * - envPath: Path to the .env file (Docker Compose reads non-secrets from it)
  * - needsFileLocation: true if stack needs user to specify file paths
  */
-async function requireComposeFile(
+export async function requireComposeFile(
 	stackName: string,
 	envId?: number | null,
 	composeConfigPath?: string
@@ -1879,12 +1907,19 @@ export async function stopStack(
 }
 
 /**
- * Restart a stack using docker compose restart
- * Falls back to individual container restart for stacks without compose files
+ * Restart a stack using docker compose restart or stop+up (recreate mode).
+ *
+ * mode='restart' (default): Uses 'docker compose restart' — fast, in-place restart
+ *   that preserves container IDs but won't fix stale network_mode references.
+ * mode='recreate': Uses 'docker compose stop' then 'docker compose up -d' —
+ *   recreates containers, fixing network_mode: service:<container> dependencies.
+ *
+ * Falls back to individual container restart for stacks without compose files.
  */
 export async function restartStack(
 	stackName: string,
-	envId?: number | null
+	envId?: number | null,
+	mode: 'restart' | 'recreate' = 'restart'
 ): Promise<StackOperationResult> {
 	const result = await requireComposeFile(stackName, envId);
 
@@ -1893,13 +1928,17 @@ export async function restartStack(
 		return withContainerFallback(stackName, envId, 'restart');
 	}
 
-	const composeResult = await executeComposeCommand(
-		'restart',
-		{ stackName, envId, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath },
-		result.content!,
-		result.nonSecretVars,
-		result.secretVars
-	);
+	const opts: ComposeCommandOptions = { stackName, envId, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath };
+
+	let composeResult: StackOperationResult;
+
+	if (mode === 'recreate') {
+		// Stop first, then bring up with --force-recreate to ensure new container IDs
+		await executeComposeCommand('stop', opts, result.content!, result.nonSecretVars, result.secretVars);
+		composeResult = await executeComposeCommand('up', { ...opts, forceRecreate: true }, result.content!, result.nonSecretVars, result.secretVars);
+	} else {
+		composeResult = await executeComposeCommand('restart', opts, result.content!, result.nonSecretVars, result.secretVars);
+	}
 
 	// Restart any dynamically-spawned child containers not in the compose file
 	await cleanupOrphanStackContainers(stackName, envId, 'restart');
@@ -2179,7 +2218,7 @@ export async function removeStack(
  * Uses stack locking to prevent concurrent deployments.
  */
 export async function deployStack(options: DeployStackOptions): Promise<StackOperationResult> {
-	const { name, compose, envId, sourceDir, forceRecreate, composePath, envPath, composeFileName, envFileName } = options;
+	const { name, compose, envId, sourceDir, forceRecreate, build, pullPolicy, composePath, envPath, composeFileName, envFileName } = options;
 	const logPrefix = `[Stack:${name}]`;
 
 	console.log(`${logPrefix} ========================================`);
@@ -2252,12 +2291,12 @@ export async function deployStack(options: DeployStackOptions): Promise<StackOpe
 			console.log(`${logPrefix} Read ${Object.keys(stackFiles).length} files from source directory`);
 			console.log(`${logPrefix} Files:`, Object.keys(stackFiles).join(', '));
 
-			// Copy source to stack directory
+			// Copy git source files to stack directory (overlay, not replace).
+			// Do NOT rmSync first — relative volume mounts (e.g., ./data) live here
+			// and would be destroyed, causing data loss (#831).
 			console.log(`${logPrefix} Copying source directory to stack directory...`);
-			if (existsSync(workingDir)) {
-				rmSync(workingDir, { recursive: true, force: true });
-			}
-			cpSync(sourceDir, workingDir, { recursive: true });
+			mkdirSync(workingDir, { recursive: true });
+			cpSync(sourceDir, workingDir, { recursive: true, force: true });
 			console.log(`${logPrefix} Copied ${sourceDir} -> ${workingDir}`);
 		} else {
 			// Internal stack: check if a custom path exists in DB (adopted/imported stacks)
@@ -2321,6 +2360,8 @@ export async function deployStack(options: DeployStackOptions): Promise<StackOpe
 				stackName: name,
 				envId,
 				forceRecreate,
+				build,
+				pullPolicy,
 				stackFiles,
 				workingDir,
 				composePath: actualComposePath,

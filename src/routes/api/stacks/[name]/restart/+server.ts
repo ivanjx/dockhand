@@ -22,10 +22,12 @@ export const POST: RequestHandler = async (event) => {
 		return json({ error: 'Access denied to this environment' }, { status: 403 });
 	}
 
+	const mode = url.searchParams.get('mode') === 'recreate' ? 'recreate' : 'restart';
+
 	return createJobResponse(async (send) => {
 		try {
 			const stackName = decodeURIComponent(params.name);
-			const result = await restartStack(stackName, envIdNum);
+			const result = await restartStack(stackName, envIdNum, mode);
 
 			// Audit log
 			await auditStack(event, 'restart', stackName, envIdNum);

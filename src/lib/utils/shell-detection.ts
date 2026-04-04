@@ -19,6 +19,83 @@ export const USER_OPTIONS = [
 	{ value: '', label: 'Container default' }
 ];
 
+const TERMINAL_USER_STORAGE_KEY = 'dockhand-terminal-users';
+const CUSTOM_USERS_STORAGE_KEY = 'dockhand-custom-users';
+
+/** Get saved user for a container from localStorage */
+export function getSavedUser(containerId: string): string | null {
+	if (typeof window === 'undefined') return null;
+	try {
+		const stored = localStorage.getItem(TERMINAL_USER_STORAGE_KEY);
+		if (stored) {
+			const map = JSON.parse(stored) as Record<string, string>;
+			return map[containerId] ?? null;
+		}
+	} catch { /* ignore */ }
+	return null;
+}
+
+/** Save user choice for a container to localStorage */
+export function saveUserForContainer(containerId: string, user: string) {
+	if (typeof window === 'undefined') return;
+	try {
+		const stored = localStorage.getItem(TERMINAL_USER_STORAGE_KEY);
+		const map = stored ? JSON.parse(stored) as Record<string, string> : {};
+		if (user === 'root') {
+			delete map[containerId];
+		} else {
+			map[containerId] = user;
+		}
+		localStorage.setItem(TERMINAL_USER_STORAGE_KEY, JSON.stringify(map));
+	} catch { /* ignore */ }
+
+	// Also track custom users globally
+	const isPreset = USER_OPTIONS.some(o => o.value === user);
+	if (!isPreset && user) {
+		addCustomUser(user);
+	}
+}
+
+/** Get all custom users ever used */
+export function getCustomUsers(): string[] {
+	if (typeof window === 'undefined') return [];
+	try {
+		const stored = localStorage.getItem(CUSTOM_USERS_STORAGE_KEY);
+		return stored ? JSON.parse(stored) : [];
+	} catch { return []; }
+}
+
+/** Add a custom user to the global list */
+function addCustomUser(user: string) {
+	if (typeof window === 'undefined') return;
+	try {
+		const users = getCustomUsers();
+		if (!users.includes(user)) {
+			users.push(user);
+			localStorage.setItem(CUSTOM_USERS_STORAGE_KEY, JSON.stringify(users));
+		}
+	} catch { /* ignore */ }
+}
+
+/** Remove a custom user from the global list and clear per-container references */
+export function removeCustomUser(user: string) {
+	if (typeof window === 'undefined') return;
+	try {
+		const users = getCustomUsers().filter(u => u !== user);
+		localStorage.setItem(CUSTOM_USERS_STORAGE_KEY, JSON.stringify(users));
+
+		// Clear per-container entries that reference this user
+		const stored = localStorage.getItem(TERMINAL_USER_STORAGE_KEY);
+		if (stored) {
+			const map = JSON.parse(stored) as Record<string, string>;
+			for (const [id, u] of Object.entries(map)) {
+				if (u === user) delete map[id];
+			}
+			localStorage.setItem(TERMINAL_USER_STORAGE_KEY, JSON.stringify(map));
+		}
+	} catch { /* ignore */ }
+}
+
 export interface ShellDetectionResult {
 	shells: string[];
 	defaultShell: string | null;

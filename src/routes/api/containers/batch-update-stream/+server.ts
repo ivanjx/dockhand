@@ -14,7 +14,7 @@ import {
 import { auditContainer } from '$lib/server/audit';
 import { getScannerSettings, scanImage } from '$lib/server/scanner';
 import { saveVulnerabilityScan, removePendingContainerUpdate, type VulnerabilityCriteria } from '$lib/server/db';
-import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isDockhandContainer } from '$lib/server/scheduler/tasks/update-utils';
+import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer } from '$lib/server/scheduler/tasks/update-utils';
 import { recreateContainer } from '$lib/server/scheduler/tasks/container-update';
 import { createJob, appendLine, completeJob, failJob } from '$lib/server/jobs';
 
@@ -156,8 +156,9 @@ export const POST: RequestHandler = async (event) => {
 				const imageName = config.Image;
 				const currentImageId = inspectData.Image;
 
-				// Skip Dockhand container - cannot update itself
-				if (isDockhandContainer(imageName)) {
+				// Skip system containers (Dockhand, Hawser)
+				const systemType = isSystemContainer(imageName);
+				if (systemType) {
 					sendData({
 						type: 'progress',
 						containerId,
@@ -166,7 +167,7 @@ export const POST: RequestHandler = async (event) => {
 						current: i + 1,
 						total: containerIds.length,
 						success: true,
-						message: `Skipping ${containerName} - cannot update Dockhand itself`
+						message: `Skipping ${containerName} - cannot update ${systemType} container`
 					});
 					skippedCount++;
 					continue;
@@ -331,9 +332,11 @@ export const POST: RequestHandler = async (event) => {
 							}
 						}
 
-						// Collect vulnerabilities from all scanners (cap at 100)
+						// Collect vulnerabilities from all scanners (sort by severity, cap at 100)
+						const severityOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, negligible: 4, unknown: 5 };
 						const vulnerabilities = scanResults
 							.flatMap(r => r.vulnerabilities || [])
+							.sort((a, b) => (severityOrder[a.severity] ?? 9) - (severityOrder[b.severity] ?? 9))
 							.slice(0, 100)
 							.map(v => ({
 								id: v.id,
@@ -345,11 +348,11 @@ export const POST: RequestHandler = async (event) => {
 								scanner: v.scanner
 							}));
 
-						// Build scan message from individual results
-						const totalCritical = individualScannerResults.reduce((s, r) => s + r.critical, 0);
-						const totalHigh = individualScannerResults.reduce((s, r) => s + r.high, 0);
-						const totalMedium = individualScannerResults.reduce((s, r) => s + r.medium, 0);
-						const totalLow = individualScannerResults.reduce((s, r) => s + r.low, 0);
+						// Derive combined totals from the displayed (sliced) array so summary matches the table
+						const totalCritical = vulnerabilities.filter(v => v.severity === 'critical').length;
+						const totalHigh = vulnerabilities.filter(v => v.severity === 'high').length;
+						const totalMedium = vulnerabilities.filter(v => v.severity === 'medium').length;
+						const totalLow = vulnerabilities.filter(v => v.severity === 'low').length;
 						const hasVulns = totalCritical + totalHigh + totalMedium + totalLow > 0;
 
 						sendData({

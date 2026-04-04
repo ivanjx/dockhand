@@ -20,6 +20,7 @@ import {
 export const SYSTEM_SCHEDULE_CLEANUP_ID = 1;
 export const SYSTEM_EVENT_CLEANUP_ID = 2;
 export const SYSTEM_VOLUME_HELPER_CLEANUP_ID = 3;
+export const SYSTEM_SCANNER_CLEANUP_ID = 4;
 
 /**
  * Execute schedule execution cleanup job.
@@ -189,6 +190,69 @@ export async function runVolumeHelperCleanupJob(
 			status: 'success',
 			completedAt: new Date().toISOString(),
 			duration: Date.now() - startTime
+		});
+	} catch (error: any) {
+		await log(`Error: ${error.message}`);
+		await updateScheduleExecution(execution.id, {
+			status: 'failed',
+			completedAt: new Date().toISOString(),
+			duration: Date.now() - startTime,
+			errorMessage: error.message
+		});
+	}
+}
+
+/**
+ * Execute scanner cache cleanup job.
+ * Removes scanner database volumes and bind mount directories to reclaim disk space.
+ */
+export async function runScannerCacheCleanupJob(
+	triggeredBy: ScheduleTrigger = 'cron',
+	cleanupFn?: () => Promise<{ volumes: string[]; dirs: string[] }>
+): Promise<void> {
+	const startTime = Date.now();
+
+	const execution = await createScheduleExecution({
+		scheduleType: 'system_cleanup',
+		scheduleId: SYSTEM_SCANNER_CLEANUP_ID,
+		environmentId: null,
+		entityName: 'Scanner cache cleanup',
+		triggeredBy,
+		status: 'running'
+	});
+
+	await updateScheduleExecution(execution.id, {
+		startedAt: new Date().toISOString()
+	});
+
+	const log = async (message: string) => {
+		console.log(`[Scanner Cache Cleanup] ${message}`);
+		await appendScheduleExecutionLog(execution.id, `[${new Date().toISOString()}] ${message}`);
+	};
+
+	try {
+		await log('Starting scanner cache cleanup');
+
+		let result: { volumes: string[]; dirs: string[] };
+		if (cleanupFn) {
+			result = await cleanupFn();
+		} else {
+			const { cleanupScannerCache } = await import('../../scanner');
+			result = await cleanupScannerCache();
+		}
+
+		if (result.volumes.length > 0) {
+			await log(`Removed volumes: ${result.volumes.join(', ')}`);
+		}
+		if (result.dirs.length > 0) {
+			await log(`Removed directories: ${result.dirs.join(', ')}`);
+		}
+		await log(`Cleanup complete: ${result.volumes.length} volumes, ${result.dirs.length} directories removed`);
+		await updateScheduleExecution(execution.id, {
+			status: 'success',
+			completedAt: new Date().toISOString(),
+			duration: Date.now() - startTime,
+			details: { removedVolumes: result.volumes, removedDirs: result.dirs }
 		});
 	} catch (error: any) {
 		await log(`Error: ${error.message}`);

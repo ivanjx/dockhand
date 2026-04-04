@@ -4,7 +4,7 @@ import {
 	checkScannerAvailability,
 	getScannerVersions,
 	checkScannerUpdates,
-	cleanupScannerVolumes,
+	cleanupScannerCache,
 	getGlobalScannerDefaults,
 	type ScannerType
 } from '$lib/server/scanner';
@@ -195,8 +195,8 @@ export const DELETE: RequestHandler = async ({ url, cookies }) => {
 			}
 		}
 
-		// Also cleanup scanner database volumes
-		await cleanupScannerVolumes(parsedEnvId);
+		// Also cleanup scanner database cache (volumes + bind mount dirs)
+		await cleanupScannerCache(parsedEnvId);
 
 		return json({
 			success: true,

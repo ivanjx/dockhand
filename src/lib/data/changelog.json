@@ -1,7 +1,36 @@
 [
   {
+    "version": "1.0.24",
+    "date": "2026-04-03",
+    "changes": [
+      { "type": "fix", "text": "browsing HTTP registries fails with SSL error (#868)" },
+      { "type": "fix", "text": "git stack deploy options (build, re-pull, force redeploy) not persisted in edit dialog" }
+    ],
+    "imageTag": "fnsys/dockhand:v1.0.24"
+  },
+  {
+    "version": "1.0.23",
+    "date": "2026-04-03",
+    "changes": [
+      { "type": "feature", "text": "theme toggle with system option — auto-follows OS light/dark preference (#803)" },
+      { "type": "feature", "text": "custom user option for terminal shell sessions, persisted per container (#830)" },
+      { "type": "feature", "text": "redeploy button for internal stacks with pull/build/force-recreate options (#152)" },
+      { "type": "feature", "text": "build, re-pull images and force redeployment options for git stacks (#792, #472)" },
+      { "type": "fix", "text": "allow underscores in hostname validation (#790)" },
+      { "type": "fix", "text": "HTTPS git repos with self-signed CA certificates fail to clone/pull (#842)" },
+      { "type": "fix", "text": "stack restart fails for containers using network_mode: service:<container> — added recreate option (#844)" },
+      { "type": "fix", "text": "git stack sync deletes data in relative volume paths (#831)" },
+      { "type": "fix", "text": "batch update skips Hawser containers (#485)" },
+      { "type": "fix", "text": "registry delete fails for multi-arch/OCI manifest images" },
+      { "type": "fix", "text": "scanner cache cleanup to prevent volume bloat (#808)" },
+      { "type": "fix", "text": "negotiate Docker API version for scanner/updater sidecar containers (#759)" },
+      { "type": "fix", "text": "scan vulnerability counts mismatch with displayed list (#705)" }
+    ],
+    "imageTag": "fnsys/dockhand:v1.0.23"
+  },
+  {
     "version": "1.0.22",
-    "comingSoon": true,
+    "date": "2026-03-21",
     "changes": [
       { "type": "feature", "text": "dashboard list view with inline search and connection filters (#740)" },
       { "type": "feature", "text": "custom environment icon (#754)" },

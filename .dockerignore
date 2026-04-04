@@ -4,8 +4,10 @@ dist
 build
 .vscode
 .idea
-.git
-.gitignore
+.git*
 npm-debug.log
 bun-debug.log
 coverage
+Dockerfile*
+docker-compose*.yaml
+*.md

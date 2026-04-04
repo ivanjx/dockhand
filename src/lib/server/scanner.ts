@@ -18,7 +18,7 @@ import { getEnvironment, getEnvSetting, getSetting } from './db';
 import { sendEventNotification } from './notifications';
 import { getHostDockerSocket, getHostDataDir, extractUidFromSocketPath, getOwnDockerHost, getOwnNetworkMode } from './host-path';
 import { resolve } from 'node:path';
-import { mkdir, chown } from 'node:fs/promises';
+import { mkdir, chown, rm } from 'node:fs/promises';
 
 export type ScannerType = 'none' | 'grype' | 'trivy' | 'both';
 
@@ -1146,4 +1146,46 @@ export async function cleanupScannerVolumes(envId?: number): Promise<void> {
 		const errorMsg = error instanceof Error ? error.message : String(error);
 		console.error('[Scanner] Failed to cleanup scanner volumes:', errorMsg);
 	}
+}
+
+/**
+ * Clean up all scanner cache storage (volumes + bind mount directories).
+ * Handles both standard Docker (named volumes) and rootless Docker (bind mounts).
+ * Next scan after cleanup will re-download a fresh vulnerability database (~200MB).
+ */
+export async function cleanupScannerCache(envId?: number): Promise<{ volumes: string[]; dirs: string[] }> {
+	const removedVolumes: string[] = [];
+	const removedDirs: string[] = [];
+
+	// 1. Remove named volumes (standard Docker mode)
+	for (const volumeName of [GRYPE_VOLUME_NAME, TRIVY_VOLUME_NAME]) {
+		try {
+			await removeVolume(volumeName, true, envId);
+			removedVolumes.push(volumeName);
+			const envSuffix = envId ? ` (env ${envId})` : '';
+			console.log(`[Scanner] Removed volume: ${volumeName}${envSuffix}`);
+		} catch {
+			// Volume might not exist, ignore
+		}
+	}
+
+	// 2. Remove bind mount cache directories (rootless Docker mode, local only)
+	if (!envId) {
+		for (const scannerType of ['grype', 'trivy'] as const) {
+			const cachePath = resolve(DATA_DIR, SCANNER_CACHE_DIR, scannerType);
+			try {
+				await rm(cachePath, { recursive: true, force: true });
+				removedDirs.push(cachePath);
+				console.log(`[Scanner] Removed cache directory: ${cachePath}`);
+			} catch {
+				// Directory might not exist, ignore
+			}
+		}
+	}
+
+	if (removedVolumes.length > 0 || removedDirs.length > 0) {
+		console.log(`[Scanner] Cache cleanup complete: ${removedVolumes.length} volumes, ${removedDirs.length} directories removed`);
+	}
+
+	return { volumes: removedVolumes, dirs: removedDirs };
 }

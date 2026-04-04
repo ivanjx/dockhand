@@ -84,7 +84,7 @@
 	import { watchJob } from '$lib/utils/sse-fetch';
 	import { ipToNumber } from '$lib/utils/ip';
 	import { formatHostPortUrl } from '$lib/utils/url';
-	import { detectShells, getBestShell, hasAvailableShell, USER_OPTIONS, type ShellDetectionResult } from '$lib/utils/shell-detection';
+	import { detectShells, getBestShell, hasAvailableShell, USER_OPTIONS, getSavedUser, saveUserForContainer, getCustomUsers, removeCustomUser, type ShellDetectionResult } from '$lib/utils/shell-detection';
 	import { DataGrid } from '$lib/components/data-grid';
 	import type { ColumnConfig } from '$lib/types';
 	import type { DataGridRowState } from '$lib/components/data-grid/types';
@@ -243,6 +243,8 @@
 	let terminalPopoverStates = $state<Record<string, boolean>>({});
 	let terminalShell = $state('/bin/bash');
 	let terminalUser = $state('root');
+	let terminalCustomUser = $state('');
+	let terminalCustomUsers = $state<string[]>([]);
 
 	// Confirmation popover state
 	let confirmStopId = $state<string | null>(null);
@@ -470,7 +472,7 @@
 			// Unlock button width
 			if (updateCheckBtnEl) updateCheckBtnEl.style.minWidth = '';
 
-			const containersWithUpdates = data.results.filter((r: any) => r.hasUpdate);
+			const containersWithUpdates = data.results.filter((r: any) => r.hasUpdate && !r.systemContainer);
 			const failed = data.results.filter((r: any) => r.error && !r.hasUpdate);
 			failedUpdateChecks = failed.map((r: any) => ({
 				containerName: r.containerName,
@@ -1041,13 +1043,18 @@
 			currentTerminalContainerId = container.id;
 			terminalPopoverStates[container.id] = false;
 		} else {
+			// Restore saved user for this container
+			const savedUser = getSavedUser(container.id);
+			terminalUser = savedUser ?? 'root';
+			terminalCustomUsers = getCustomUsers();
 			// Show popover to configure new terminal
 			terminalPopoverStates[container.id] = true;
 		}
 	}
 
 	function startTerminal(container: ContainerInfo) {
-		// Create new terminal session
+		saveUserForContainer(container.id, terminalUser);
+		terminalCustomUsers = getCustomUsers();
 		const terminal: ActiveTerminal = {
 			containerId: container.id,
 			containerName: container.name,
@@ -1336,6 +1343,7 @@
 	onMount(async () => {
 		loadLayoutMode();
 		loadStatusFilter();
+		terminalCustomUsers = getCustomUsers();
 
 		// Load persisted pending updates from database
 		loadPendingUpdates();
@@ -2138,7 +2146,7 @@
 													<Select.Root type="single" bind:value={terminalUser}>
 														<Select.Trigger class="w-full h-8 text-xs">
 															<User class="w-3 h-3 mr-1.5 text-muted-foreground" />
-															<span>{userOptions.find(o => o.value === terminalUser)?.label || 'Select'}</span>
+															<span>{userOptions.find(o => o.value === terminalUser)?.label || terminalUser || 'Select'}</span>
 														</Select.Trigger>
 														<Select.Content>
 															{#each userOptions as option}
@@ -2147,6 +2155,35 @@
 																	{option.label}
 																</Select.Item>
 															{/each}
+															{#if terminalCustomUsers.length > 0}
+																<div class="h-px bg-border my-1"></div>
+																{#each terminalCustomUsers as cu}
+																	<div class="flex items-center group">
+																		<Select.Item value={cu} label={cu} class="flex-1">
+																			<User class="w-3 h-3 mr-1.5 text-muted-foreground" />
+																			{cu}
+																		</Select.Item>
+																		<button
+																			type="button"
+																			class="p-1 mr-1 opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
+																			onclick={(e) => { e.stopPropagation(); e.preventDefault(); removeCustomUser(cu); terminalCustomUsers = getCustomUsers(); if (terminalUser === cu) { terminalUser = 'root'; } }}
+																			title="Remove user"
+																		>
+																			<Trash2 class="w-3 h-3" />
+																		</button>
+																	</div>
+																{/each}
+															{/if}
+															<div class="h-px bg-border my-1"></div>
+															<div class="px-2 py-1">
+																<Input
+																	class="h-7 text-xs"
+																	placeholder="Add user... (Enter)"
+																	bind:value={terminalCustomUser}
+																	onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Enter' && terminalCustomUser.trim()) { const u = terminalCustomUser.trim(); terminalUser = u; saveUserForContainer(container.id, u); terminalCustomUsers = getCustomUsers(); terminalCustomUser = ''; } }}
+																	onclick={(e) => e.stopPropagation()}
+																/>
+															</div>
 														</Select.Content>
 													</Select.Root>
 												</div>

@@ -11,6 +11,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import * as Tooltip from '$lib/components/ui/tooltip';
+	import * as Popover from '$lib/components/ui/popover';
 	import MultiSelectFilter from '$lib/components/MultiSelectFilter.svelte';
 	import { Play, Square, Trash2, Plus, ArrowBigDown, Search, Pencil, ExternalLink, GitBranch, RefreshCw, Loader2, FileCode, FileText, FileOutput, Box, RotateCcw, ScrollText, Terminal, Eye, Network, HardDrive, Heart, HeartPulse, HeartOff, ChevronsUpDown, ChevronsDownUp, Rocket, AlertTriangle, X, Layers, Pause, CircleDashed, Skull, FolderOpen, Variable, Clock, RotateCw, Import, Ship, Cable, LayoutPanelLeft, Rows3, GripVertical } from 'lucide-svelte';
 	import ConfirmPopover from '$lib/components/ConfirmPopover.svelte';
@@ -20,6 +21,7 @@
 	import GitStackModal from './GitStackModal.svelte';
 	import ImportStackModal from './ImportStackModal.svelte';
 	import GitDeployProgressPopover from './GitDeployProgressPopover.svelte';
+	import RedeployPopover from './RedeployPopover.svelte';
 	import ContainerInspectModal from '../containers/ContainerInspectModal.svelte';
 	import FileBrowserModal from '../containers/FileBrowserModal.svelte';
 	import LogsPanel from '../logs/LogsPanel.svelte';
@@ -419,6 +421,7 @@
 
 	// Stack operation loading state
 	let stackActionLoading = $state<string | null>(null);
+	let restartPopoverOpen = $state<Record<string, boolean>>({});
 	let stackDownLoading = $state<string | null>(null);
 
 	// Container-level confirmation popover state
@@ -877,22 +880,51 @@
 		}
 	}
 
-	async function restartStack(name: string) {
+	async function restartStack(name: string, mode: 'restart' | 'recreate' = 'restart') {
 		operationError = null;
 		stackActionLoading = name;
 		try {
-			const response = await fetch(appendEnvParam(`/api/stacks/${encodeURIComponent(name)}/restart`, envId), { method: 'POST' });
+			let url = appendEnvParam(`/api/stacks/${encodeURIComponent(name)}/restart`, envId);
+			if (mode === 'recreate') {
+				url += (url.includes('?') ? '&' : '?') + 'mode=recreate';
+			}
+			const response = await fetch(url, { method: 'POST' });
 			const data = await readJobResponse(response);
 			if (!data.success) {
 				showErrorDialog(`Failed to restart ${name}`, data.error || 'Failed to restart stack');
 				return;
 			}
-			toast.success(`Restarted ${name}`);
+			toast.success(mode === 'recreate' ? `Recreated ${name}` : `Restarted ${name}`);
 			await fetchStacks();
 		} catch (error) {
 			console.error('Failed to restart stack:', error);
 			const errorMsg = error instanceof Error ? error.message : 'Failed to restart stack';
 			showErrorDialog(`Failed to restart ${name}`, errorMsg);
+		} finally {
+			stackActionLoading = null;
+		}
+	}
+
+	async function redeployStack(name: string, options: { pull: boolean; build: boolean; forceRecreate: boolean }) {
+		operationError = null;
+		stackActionLoading = name;
+		try {
+			const response = await fetch(appendEnvParam(`/api/stacks/${encodeURIComponent(name)}/deploy`, envId), {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(options)
+			});
+			const data = await readJobResponse(response);
+			if (!data.success) {
+				showErrorDialog(`Failed to redeploy ${name}`, data.error || 'Failed to redeploy stack');
+				return;
+			}
+			toast.success(`Redeployed ${name}`);
+			await fetchStacks();
+		} catch (error) {
+			console.error('Failed to redeploy stack:', error);
+			const errorMsg = error instanceof Error ? error.message : 'Failed to redeploy stack';
+			showErrorDialog(`Failed to redeploy ${name}`, errorMsg);
 		} finally {
 			stackActionLoading = null;
 		}
@@ -1749,25 +1781,57 @@
 									<ScrollText class="w-3 h-3 text-muted-foreground hover:text-blue-500" />
 								</button>
 							{/if}
+							{#if source.sourceType !== 'git' && source.sourceType !== 'external' && $canAccess('stacks', 'start')}
+								<RedeployPopover
+									stackName={stack.name}
+									{envId}
+									disabled={stackActionLoading === stack.name}
+									onDeploy={(options) => redeployStack(stack.name, options)}
+								>
+									{#snippet children()}
+										<Rocket class="w-3 h-3 text-muted-foreground hover:text-violet-500" />
+									{/snippet}
+								</RedeployPopover>
+							{/if}
 							{#if stackActionLoading === stack.name}
 								<div class="p-1">
 									<Loader2 class="w-3 h-3 animate-spin text-muted-foreground" />
 								</div>
 							{:else if stack.status === 'running' || stack.status === 'partial' || stack.status === 'restarting'}
 								{#if $canAccess('stacks', 'restart')}
-									<ConfirmPopover
-										open={false}
-										action="Restart"
-										itemType="stack"
-										itemName={stack.name}
-										title="Restart"
-										onConfirm={() => restartStack(stack.name)}
-										onOpenChange={() => {}}
-									>
-										{#snippet children({ open })}
-											<RotateCcw class="w-3 h-3 {open ? 'text-amber-500' : 'text-muted-foreground hover:text-amber-500'}" />
-										{/snippet}
-									</ConfirmPopover>
+									<Popover.Root open={restartPopoverOpen[stack.name] ?? false} onOpenChange={(v) => restartPopoverOpen[stack.name] = v}>
+										<Popover.Trigger asChild>
+											{#snippet child({ props })}
+												<button
+													type="button"
+													title="Restart"
+													{...props}
+													onclick={(e) => { e.stopPropagation(); restartPopoverOpen[stack.name] = !restartPopoverOpen[stack.name]; }}
+													class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer inline-flex items-center"
+												>
+													<RotateCcw class="w-3 h-3 {restartPopoverOpen[stack.name] ? 'text-amber-500' : 'text-muted-foreground hover:text-amber-500'}" />
+												</button>
+											{/snippet}
+										</Popover.Trigger>
+										<Popover.Content
+											class="w-auto p-2 z-[200]"
+											side="top"
+											align="end"
+											sideOffset={8}
+										>
+											<div class="flex flex-col gap-1.5">
+												<span class="text-xs text-muted-foreground">Restart stack <strong>{stack.name.length > 20 ? stack.name.slice(0, 20) + '...' : stack.name}</strong></span>
+												<div class="flex items-center gap-1.5">
+													<Button size="sm" variant="secondary" class="h-6 px-2 text-xs" onclick={() => { restartPopoverOpen[stack.name] = false; restartStack(stack.name, 'restart'); }}>
+														Restart
+													</Button>
+													<Button size="sm" variant="default" class="h-6 px-2 text-xs" onclick={() => { restartPopoverOpen[stack.name] = false; restartStack(stack.name, 'recreate'); }}>
+														Recreate (stop & up)
+													</Button>
+												</div>
+											</div>
+										</Popover.Content>
+									</Popover.Root>
 								{/if}
 								{#if $canAccess('stacks', 'stop')}
 									<ConfirmPopover

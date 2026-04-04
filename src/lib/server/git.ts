@@ -153,6 +153,11 @@ async function buildGitEnv(credential: GitCredential | null): Promise<GitEnv> {
 		SSH_AUTH_SOCK: ''
 	};
 
+	// Pass custom CA certificate to git CLI (NODE_EXTRA_CA_CERTS only affects Node.js)
+	if (process.env.NODE_EXTRA_CA_CERTS) {
+		env.GIT_SSL_CAINFO = process.env.NODE_EXTRA_CA_CERTS;
+	}
+
 	// Ensure current UID is resolvable for SSH/git operations
 	await ensurePasswdEntry(env);
 
@@ -932,8 +937,10 @@ export async function deployGitStack(stackId: number, options?: { force?: boolea
 
 	// Check if there are changes - skip redeploy if no changes and not forced
 	// Note: For new stacks (first deploy), syncResult.updated will be true
-	if (!force && !syncResult.updated) {
-		console.log(`${logPrefix} No changes detected and force=false, skipping redeploy`);
+	// forceRedeploy setting overrides the skip logic for webhooks/scheduled syncs
+	const shouldDeploy = force || gitStack.forceRedeploy || syncResult.updated;
+	if (!shouldDeploy) {
+		console.log(`${logPrefix} No changes detected and force=false, forceRedeploy=false, skipping redeploy`);
 		return {
 			success: true,
 			output: 'No changes detected, skipping redeploy',
@@ -943,6 +950,9 @@ export async function deployGitStack(stackId: number, options?: { force?: boolea
 
 	const forceRecreate = syncResult.updated;
 	console.log(`${logPrefix} Will force recreate:`, forceRecreate, `(updated=${syncResult.updated})`);
+	console.log(`${logPrefix} Build on deploy:`, gitStack.buildOnDeploy);
+	console.log(`${logPrefix} Re-pull images:`, gitStack.repullImages);
+	console.log(`${logPrefix} Force redeploy setting:`, gitStack.forceRedeploy);
 
 	// Deploy using unified function - handles both new and existing stacks
 	// Uses `docker compose up -d --remove-orphans` which only recreates changed services
@@ -960,7 +970,9 @@ export async function deployGitStack(stackId: number, options?: { force?: boolea
 		sourceDir: syncResult.composeDir, // Copy entire directory from git repo
 		composeFileName: syncResult.composeFileName, // Use original compose filename from repo
 		envFileName: syncResult.envFileName, // Env file relative to compose dir (for --env-file flag, optional)
-		forceRecreate
+		forceRecreate,
+		build: gitStack.buildOnDeploy,
+		pullPolicy: gitStack.repullImages ? 'always' : undefined
 	});
 
 	console.log(`${logPrefix} ----------------------------------------`);
@@ -1214,7 +1226,9 @@ export async function deployGitStackWithProgress(
 			envId: gitStack.environmentId,
 			sourceDir: composeDir, // Copy entire directory from git repo
 			composeFileName: basename(gitStack.composePath), // Use original compose filename from repo
-			envFileName // Env file relative to compose dir (for --env-file flag, optional)
+			envFileName, // Env file relative to compose dir (for --env-file flag, optional)
+			build: gitStack.buildOnDeploy,
+			pullPolicy: gitStack.repullImages ? 'always' : undefined
 		});
 
 		if (result.success) {

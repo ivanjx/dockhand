@@ -189,7 +189,7 @@
 					{#each oidcProviders as provider}
 						<Button
 							variant="outline"
-							class="w-full justify-start gap-3"
+							class="w-full justify-center gap-3"
 							onclick={() => handleSsoLogin(provider)}
 							disabled={ssoLoading !== null}
 						>

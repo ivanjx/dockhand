@@ -15,7 +15,7 @@
 	import { currentEnvironment, environments, appendEnvParam } from '$lib/stores/environment';
 	import Terminal from './Terminal.svelte';
 	import { NoEnvironment } from '$lib/components/ui/empty-state';
-	import { detectShells, getBestShell, hasAvailableShell, USER_OPTIONS, type ShellInfo, type ShellDetectionResult } from '$lib/utils/shell-detection';
+	import { detectShells, getBestShell, hasAvailableShell, USER_OPTIONS, getSavedUser, saveUserForContainer, getCustomUsers, removeCustomUser, type ShellInfo, type ShellDetectionResult } from '$lib/utils/shell-detection';
 
 	// Track if we've handled the initial container from URL
 	let initialContainerHandled = $state(false);
@@ -35,6 +35,8 @@
 	// Shell/user options
 	let selectedShell = $state('/bin/bash');
 	let selectedUser = $state('root');
+	let customUserInput = $state('');
+	let customUsers = $state<string[]>([]);
 	let terminalFontSize = $state(14);
 
 	// Track previous shell/user for reconnection
@@ -115,6 +117,16 @@
 			if (bestShell && bestShell !== selectedShell) {
 				selectedShell = bestShell;
 			}
+
+			// Restore saved user for this container
+			const savedUser = getSavedUser(container.id);
+			if (savedUser !== null) {
+				selectedUser = savedUser;
+				committedUser = savedUser;
+			} else {
+				selectedUser = 'root';
+				committedUser = 'root';
+			}
 		} catch (error) {
 			console.error('Failed to detect shells:', error);
 		} finally {
@@ -151,16 +163,42 @@
 		}
 	}
 
+	// Committed user: only updates when a preset is selected or custom input is confirmed
+	let committedUser = $state('root');
+
+	function commitUser(user: string) {
+		committedUser = user;
+		if (selectedContainer) {
+			saveUserForContainer(selectedContainer.id, user);
+			customUsers = getCustomUsers();
+		}
+	}
+
+	// When a user is selected from dropdown, commit immediately
+	function onUserSelectChange(value: string) {
+		commitUser(value);
+	}
+
+	// Confirm custom user on Enter
+	function onCustomUserKeydown(e: KeyboardEvent) {
+		e.stopPropagation();
+		if (e.key === 'Enter' && customUserInput.trim()) {
+			const newUser = customUserInput.trim();
+			selectedUser = newUser;
+			commitUser(newUser);
+			customUserInput = '';
+		}
+	}
+
 	// Watch for shell/user changes while connected and trigger reconnect
 	$effect(() => {
 		if (selectedContainer && connected && terminalComponent) {
-			if (selectedShell !== prevShell || selectedUser !== prevUser) {
-				// Reconnect with new shell/user
+			if (selectedShell !== prevShell || committedUser !== prevUser) {
 				terminalComponent.reconnect();
 			}
 		}
 		prevShell = selectedShell;
-		prevUser = selectedUser;
+		prevUser = committedUser;
 	});
 
 	// Change font size
@@ -175,6 +213,7 @@
 	}
 
 	onMount(async () => {
+		customUsers = getCustomUsers();
 		await fetchContainers();
 
 		// Check for container ID in URL query parameter
@@ -336,10 +375,10 @@
 		<!-- User selector - always visible -->
 		<div class="flex items-center gap-2">
 			<Label class="text-sm text-muted-foreground">User:</Label>
-			<Select.Root type="single" bind:value={selectedUser}>
+			<Select.Root type="single" bind:value={selectedUser} onValueChange={onUserSelectChange}>
 				<Select.Trigger class="h-9 w-48">
 					<User class="w-4 h-4 mr-2 text-muted-foreground" />
-					<span>{USER_OPTIONS.find(o => o.value === selectedUser)?.label || 'Select'}</span>
+					<span>{USER_OPTIONS.find(o => o.value === selectedUser)?.label || selectedUser || 'Select'}</span>
 				</Select.Trigger>
 				<Select.Content>
 					{#each USER_OPTIONS as option}
@@ -348,6 +387,36 @@
 							{option.label}
 						</Select.Item>
 					{/each}
+					{#if customUsers.length > 0}
+						<div class="h-px bg-border my-1"></div>
+						{#each customUsers as cu}
+							<div class="flex items-center group">
+								<Select.Item value={cu} label={cu} class="flex-1">
+									<User class="w-4 h-4 mr-2 text-muted-foreground" />
+									{cu}
+								</Select.Item>
+								<button
+									type="button"
+									class="p-1 mr-1 opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
+									onclick={(e) => { e.stopPropagation(); e.preventDefault(); removeCustomUser(cu); customUsers = getCustomUsers(); if (selectedUser === cu) { selectedUser = 'root'; commitUser('root'); } }}
+									title="Remove user"
+								>
+									<Trash2 class="w-3 h-3" />
+								</button>
+							</div>
+						{/each}
+					{/if}
+					<div class="h-px bg-border my-1"></div>
+					<!-- svelte-ignore a11y_autofocus -->
+					<div class="px-2 py-1">
+						<Input
+							class="h-7 text-xs"
+							placeholder="Add user... (Enter)"
+							bind:value={customUserInput}
+							onkeydown={onCustomUserKeydown}
+							onclick={(e) => e.stopPropagation()}
+						/>
+					</div>
 				</Select.Content>
 			</Select.Root>
 		</div>
@@ -428,13 +497,13 @@
 				</div>
 			</div>
 			<div class="flex-1 min-h-0 w-full">
-				{#key `${selectedContainer.id}-${selectedShell}-${selectedUser}`}
+				{#key `${selectedContainer.id}-${selectedShell}-${committedUser}`}
 					<Terminal
 						bind:this={terminalComponent}
 						containerId={selectedContainer.id}
 						containerName={selectedContainer.name}
 						shell={selectedShell}
-						user={selectedUser}
+						user={committedUser}
 						{envId}
 						fontSize={terminalFontSize}
 					/>

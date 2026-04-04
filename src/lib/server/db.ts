@@ -2183,6 +2183,9 @@ export interface GitStackData {
 	autoUpdateCron: string;
 	webhookEnabled: boolean;
 	webhookSecret: string | null;
+	buildOnDeploy: boolean;
+	repullImages: boolean;
+	forceRedeploy: boolean;
 	lastSync: string | null;
 	lastCommit: string | null;
 	syncStatus: GitSyncStatus;
@@ -2216,6 +2219,9 @@ export async function getGitStacks(environmentId?: number): Promise<GitStackWith
 			autoUpdateCron: gitStacks.autoUpdateCron,
 			webhookEnabled: gitStacks.webhookEnabled,
 			webhookSecret: gitStacks.webhookSecret,
+			buildOnDeploy: gitStacks.buildOnDeploy,
+			repullImages: gitStacks.repullImages,
+			forceRedeploy: gitStacks.forceRedeploy,
 			lastSync: gitStacks.lastSync,
 			lastCommit: gitStacks.lastCommit,
 			syncStatus: gitStacks.syncStatus,
@@ -2244,6 +2250,9 @@ export async function getGitStacks(environmentId?: number): Promise<GitStackWith
 			autoUpdateCron: gitStacks.autoUpdateCron,
 			webhookEnabled: gitStacks.webhookEnabled,
 			webhookSecret: gitStacks.webhookSecret,
+			buildOnDeploy: gitStacks.buildOnDeploy,
+			repullImages: gitStacks.repullImages,
+			forceRedeploy: gitStacks.forceRedeploy,
 			lastSync: gitStacks.lastSync,
 			lastCommit: gitStacks.lastCommit,
 			syncStatus: gitStacks.syncStatus,
@@ -2272,6 +2281,9 @@ export async function getGitStacks(environmentId?: number): Promise<GitStackWith
 		autoUpdateCron: row.autoUpdateCron,
 		webhookEnabled: row.webhookEnabled,
 		webhookSecret: row.webhookSecret,
+		buildOnDeploy: row.buildOnDeploy ?? false,
+		repullImages: row.repullImages ?? false,
+		forceRedeploy: row.forceRedeploy ?? false,
 		lastSync: row.lastSync,
 		lastCommit: row.lastCommit,
 		syncStatus: row.syncStatus,
@@ -2302,6 +2314,9 @@ export async function getGitStacksForEnvironmentOnly(environmentId: number): Pro
 		autoUpdateCron: gitStacks.autoUpdateCron,
 		webhookEnabled: gitStacks.webhookEnabled,
 		webhookSecret: gitStacks.webhookSecret,
+		buildOnDeploy: gitStacks.buildOnDeploy,
+		repullImages: gitStacks.repullImages,
+		forceRedeploy: gitStacks.forceRedeploy,
 		lastSync: gitStacks.lastSync,
 		lastCommit: gitStacks.lastCommit,
 		syncStatus: gitStacks.syncStatus,
@@ -2330,6 +2345,9 @@ export async function getGitStacksForEnvironmentOnly(environmentId: number): Pro
 		autoUpdateCron: row.autoUpdateCron,
 		webhookEnabled: row.webhookEnabled,
 		webhookSecret: row.webhookSecret,
+		buildOnDeploy: row.buildOnDeploy ?? false,
+		repullImages: row.repullImages ?? false,
+		forceRedeploy: row.forceRedeploy ?? false,
 		lastSync: row.lastSync,
 		lastCommit: row.lastCommit,
 		syncStatus: row.syncStatus,
@@ -2359,6 +2377,9 @@ export async function getGitStack(id: number): Promise<GitStackWithRepo | null> 
 		autoUpdateCron: gitStacks.autoUpdateCron,
 		webhookEnabled: gitStacks.webhookEnabled,
 		webhookSecret: gitStacks.webhookSecret,
+		buildOnDeploy: gitStacks.buildOnDeploy,
+		repullImages: gitStacks.repullImages,
+		forceRedeploy: gitStacks.forceRedeploy,
 		lastSync: gitStacks.lastSync,
 		lastCommit: gitStacks.lastCommit,
 		syncStatus: gitStacks.syncStatus,
@@ -2388,6 +2409,9 @@ export async function getGitStack(id: number): Promise<GitStackWithRepo | null> 
 		autoUpdateCron: row.autoUpdateCron,
 		webhookEnabled: row.webhookEnabled,
 		webhookSecret: row.webhookSecret,
+		buildOnDeploy: row.buildOnDeploy ?? false,
+		repullImages: row.repullImages ?? false,
+		forceRedeploy: row.forceRedeploy ?? false,
 		lastSync: row.lastSync,
 		lastCommit: row.lastCommit,
 		syncStatus: row.syncStatus,
@@ -2417,6 +2441,9 @@ export async function getGitStackByName(stackName: string, environmentId?: numbe
 		autoUpdateCron: gitStacks.autoUpdateCron,
 		webhookEnabled: gitStacks.webhookEnabled,
 		webhookSecret: gitStacks.webhookSecret,
+		buildOnDeploy: gitStacks.buildOnDeploy,
+		repullImages: gitStacks.repullImages,
+		forceRedeploy: gitStacks.forceRedeploy,
 		lastSync: gitStacks.lastSync,
 		lastCommit: gitStacks.lastCommit,
 		syncStatus: gitStacks.syncStatus,
@@ -2451,6 +2478,9 @@ export async function getGitStackByName(stackName: string, environmentId?: numbe
 		autoUpdateCron: row.autoUpdateCron,
 		webhookEnabled: row.webhookEnabled,
 		webhookSecret: row.webhookSecret,
+		buildOnDeploy: row.buildOnDeploy ?? false,
+		repullImages: row.repullImages ?? false,
+		forceRedeploy: row.forceRedeploy ?? false,
 		lastSync: row.lastSync,
 		lastCommit: row.lastCommit,
 		syncStatus: row.syncStatus,
@@ -2480,6 +2510,9 @@ export async function getGitStackByWebhookSecret(secret: string): Promise<GitSta
 		autoUpdateCron: gitStacks.autoUpdateCron,
 		webhookEnabled: gitStacks.webhookEnabled,
 		webhookSecret: gitStacks.webhookSecret,
+		buildOnDeploy: gitStacks.buildOnDeploy,
+		repullImages: gitStacks.repullImages,
+		forceRedeploy: gitStacks.forceRedeploy,
 		lastSync: gitStacks.lastSync,
 		lastCommit: gitStacks.lastCommit,
 		syncStatus: gitStacks.syncStatus,
@@ -2509,6 +2542,9 @@ export async function getGitStackByWebhookSecret(secret: string): Promise<GitSta
 		autoUpdateCron: row.autoUpdateCron,
 		webhookEnabled: row.webhookEnabled,
 		webhookSecret: row.webhookSecret,
+		buildOnDeploy: row.buildOnDeploy ?? false,
+		repullImages: row.repullImages ?? false,
+		forceRedeploy: row.forceRedeploy ?? false,
 		lastSync: row.lastSync,
 		lastCommit: row.lastCommit,
 		syncStatus: row.syncStatus,
@@ -2536,6 +2572,9 @@ export async function createGitStack(data: {
 	autoUpdateCron?: string;
 	webhookEnabled?: boolean;
 	webhookSecret?: string | null;
+	buildOnDeploy?: boolean;
+	repullImages?: boolean;
+	forceRedeploy?: boolean;
 }): Promise<GitStackWithRepo> {
 	const result = await db.insert(gitStacks).values({
 		stackName: data.stackName,
@@ -2547,7 +2586,10 @@ export async function createGitStack(data: {
 		autoUpdateSchedule: data.autoUpdateSchedule || 'daily',
 		autoUpdateCron: data.autoUpdateCron || '0 3 * * *',
 		webhookEnabled: data.webhookEnabled || false,
-		webhookSecret: data.webhookSecret || null
+		webhookSecret: data.webhookSecret || null,
+		buildOnDeploy: data.buildOnDeploy ?? false,
+		repullImages: data.repullImages ?? false,
+		forceRedeploy: data.forceRedeploy ?? false
 	}).returning();
 	return getGitStack(result[0].id) as Promise<GitStackWithRepo>;
 }
@@ -2564,6 +2606,9 @@ export async function updateGitStack(id: number, data: Partial<GitStackData>): P
 	if (data.autoUpdateCron !== undefined) updateData.autoUpdateCron = data.autoUpdateCron;
 	if (data.webhookEnabled !== undefined) updateData.webhookEnabled = data.webhookEnabled;
 	if (data.webhookSecret !== undefined) updateData.webhookSecret = data.webhookSecret;
+	if (data.buildOnDeploy !== undefined) updateData.buildOnDeploy = data.buildOnDeploy;
+	if (data.repullImages !== undefined) updateData.repullImages = data.repullImages;
+	if (data.forceRedeploy !== undefined) updateData.forceRedeploy = data.forceRedeploy;
 	if (data.lastSync !== undefined) updateData.lastSync = data.lastSync;
 	if (data.lastCommit !== undefined) updateData.lastCommit = data.lastCommit;
 	if (data.syncStatus !== undefined) updateData.syncStatus = data.syncStatus;
@@ -2598,6 +2643,9 @@ export async function getEnabledAutoUpdateGitStacks(): Promise<GitStackWithRepo[
 		autoUpdateCron: gitStacks.autoUpdateCron,
 		webhookEnabled: gitStacks.webhookEnabled,
 		webhookSecret: gitStacks.webhookSecret,
+		buildOnDeploy: gitStacks.buildOnDeploy,
+		repullImages: gitStacks.repullImages,
+		forceRedeploy: gitStacks.forceRedeploy,
 		lastSync: gitStacks.lastSync,
 		lastCommit: gitStacks.lastCommit,
 		syncStatus: gitStacks.syncStatus,
@@ -2625,6 +2673,9 @@ export async function getEnabledAutoUpdateGitStacks(): Promise<GitStackWithRepo[
 		autoUpdateCron: row.autoUpdateCron,
 		webhookEnabled: row.webhookEnabled,
 		webhookSecret: row.webhookSecret,
+		buildOnDeploy: row.buildOnDeploy ?? false,
+		repullImages: row.repullImages ?? false,
+		forceRedeploy: row.forceRedeploy ?? false,
 		lastSync: row.lastSync,
 		lastCommit: row.lastCommit,
 		syncStatus: row.syncStatus,
@@ -2653,6 +2704,9 @@ export async function getAllAutoUpdateGitStacks(): Promise<GitStackWithRepo[]> {
 		autoUpdateCron: gitStacks.autoUpdateCron,
 		webhookEnabled: gitStacks.webhookEnabled,
 		webhookSecret: gitStacks.webhookSecret,
+		buildOnDeploy: gitStacks.buildOnDeploy,
+		repullImages: gitStacks.repullImages,
+		forceRedeploy: gitStacks.forceRedeploy,
 		lastSync: gitStacks.lastSync,
 		lastCommit: gitStacks.lastCommit,
 		syncStatus: gitStacks.syncStatus,
@@ -2679,6 +2733,9 @@ export async function getAllAutoUpdateGitStacks(): Promise<GitStackWithRepo[]> {
 		autoUpdateCron: row.autoUpdateCron,
 		webhookEnabled: row.webhookEnabled,
 		webhookSecret: row.webhookSecret,
+		buildOnDeploy: row.buildOnDeploy ?? false,
+		repullImages: row.repullImages ?? false,
+		forceRedeploy: row.forceRedeploy ?? false,
 		lastSync: row.lastSync,
 		lastCommit: row.lastCommit,
 		syncStatus: row.syncStatus,

@@ -40,6 +40,30 @@
 	let eventPollInterval = $derived($appSettings.eventPollInterval);
 	let metricsCollectionInterval = $derived($appSettings.metricsCollectionInterval);
 
+	let clearingCache = $state(false);
+
+	async function clearScannerCache() {
+		clearingCache = true;
+		try {
+			const res = await fetch('/api/settings/scanner/cache', { method: 'DELETE' });
+			const data = await res.json();
+			if (res.ok && data.success) {
+				const total = (data.removedVolumes?.length || 0) + (data.removedDirs?.length || 0);
+				if (total > 0) {
+					toast.success(`Scanner cache cleared (${total} items removed)`);
+				} else {
+					toast.info('Scanner cache was already empty');
+				}
+			} else {
+				toast.error(data.error || 'Failed to clear scanner cache');
+			}
+		} catch {
+			toast.error('Failed to clear scanner cache');
+		} finally {
+			clearingCache = false;
+		}
+	}
+
 	const dateFormatOptions: { value: DateFormat; label: string; example: string }[] = [
 		{ value: 'DD.MM.YYYY', label: 'DD.MM.YYYY', example: '31.12.2024' },
 		{ value: 'DD/MM/YYYY', label: 'DD/MM/YYYY', example: '31/12/2024' },
@@ -454,6 +478,26 @@
 							placeholder={"image --format json {image}"}
 						/>
 						<p class="text-xs text-muted-foreground">Use <code class="bg-muted px-1 rounded">{'{image}'}</code> as placeholder for the image name</p>
+					</div>
+					<div class="pt-2 border-t">
+						<div class="flex items-center justify-between">
+							<div>
+								<p class="text-sm font-medium">Scanner cache</p>
+								<p class="text-xs text-muted-foreground">Remove cached vulnerability databases to free disk space. Next scan will re-download fresh data (~200MB).</p>
+							</div>
+							<Button
+								variant="outline"
+								size="sm"
+								disabled={clearingCache || !$canAccess('settings', 'edit')}
+								onclick={clearScannerCache}
+							>
+								{#if clearingCache}
+									Clearing...
+								{:else}
+									Clear cache
+								{/if}
+							</Button>
+						</div>
 					</div>
 				</Card.Content>
 			</Card.Root>
