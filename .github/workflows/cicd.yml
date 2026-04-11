@@ -18,16 +18,12 @@ on:
 
 jobs:
   build:
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-latest-arm
+        platform: [linux/amd64, linux/arm64]
 
     steps:
       - name: Check Out Repo
