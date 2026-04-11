@@ -14,7 +14,7 @@ import {
 import { auditContainer } from '$lib/server/audit';
 import { getScannerSettings, scanImage } from '$lib/server/scanner';
 import { saveVulnerabilityScan, removePendingContainerUpdate, type VulnerabilityCriteria } from '$lib/server/db';
-import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer } from '$lib/server/scheduler/tasks/update-utils';
+import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer, shouldProceedOnScanError } from '$lib/server/scheduler/tasks/update-utils';
 import { recreateContainer } from '$lib/server/scheduler/tasks/container-update';
 import { createJob, appendLine, completeJob, failJob } from '$lib/server/jobs';
 
@@ -367,24 +367,33 @@ export const POST: RequestHandler = async (event) => {
 						});
 
 					} catch (scanErr: any) {
+						if (!shouldProceedOnScanError(vulnerabilityCriteria)) {
+							sendData({
+								type: 'progress',
+								containerId,
+								containerName,
+								step: 'failed',
+								current: i + 1,
+								total: containerIds.length,
+								success: false,
+								error: `Scan failed: ${scanErr.message}`
+							});
+
+							// Clean up temp image on scan failure
+							try {
+								await removeTempImage(newImageId, envIdNum);
+							} catch { /* ignore cleanup errors */ }
+
+							failCount++;
+							continue;
+						}
+
 						sendData({
-							type: 'progress',
+							type: 'scan_complete',
 							containerId,
 							containerName,
-							step: 'failed',
-							current: i + 1,
-							total: containerIds.length,
-							success: false,
-							error: `Scan failed: ${scanErr.message}`
+							message: `Scan failed: ${scanErr.message}. Continuing because policy is Never block.`
 						});
-
-						// Clean up temp image on scan failure
-						try {
-							await removeTempImage(newImageId, envIdNum);
-						} catch { /* ignore cleanup errors */ }
-
-						failCount++;
-						continue;
 					}
 
 					if (scanBlocked) {

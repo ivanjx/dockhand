@@ -38,7 +38,7 @@ import {
 import { updateStackService } from '../../stacks';
 import { getScannerSettings, scanImage, type ScanResult, type VulnerabilitySeverity } from '../../scanner';
 import { sendEventNotification } from '../../notifications';
-import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer } from './update-utils';
+import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer, shouldProceedOnScanError } from './update-utils';
 
 // =============================================================================
 // TYPES
@@ -516,16 +516,20 @@ export async function runContainerUpdate(
 					}
 				} catch (scanError: any) {
 					log(`Scan failed: ${scanError.message}`);
-					log(`Removing temp image...`);
-					await removeTempImage(newImageId, envId);
+					if (!shouldProceedOnScanError(vulnerabilityCriteria)) {
+						log(`Removing temp image...`);
+						await removeTempImage(newImageId, envId);
 
-					await updateScheduleExecution(execution.id, {
-						status: 'failed',
-						completedAt: new Date().toISOString(),
-						duration: Date.now() - startTime,
-						errorMessage: `Vulnerability scan failed: ${scanError.message}`
-					});
-					return;
+						await updateScheduleExecution(execution.id, {
+							status: 'failed',
+							completedAt: new Date().toISOString(),
+							duration: Date.now() - startTime,
+							errorMessage: `Vulnerability scan failed: ${scanError.message}`
+						});
+						return;
+					}
+
+					log(`Continuing update because vulnerability criteria is set to never block`);
 				}
 
 				// Re-tag approved image to original

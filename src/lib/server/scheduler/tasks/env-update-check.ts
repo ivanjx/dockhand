@@ -30,7 +30,7 @@ import {
 } from '../../docker';
 import { sendEventNotification } from '../../notifications';
 import { getScannerSettings, scanImage, type VulnerabilitySeverity } from '../../scanner';
-import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer } from './update-utils';
+import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer, shouldProceedOnScanError } from './update-utils';
 import { recreateContainer } from './container-update';
 
 interface UpdateInfo {
@@ -320,8 +320,12 @@ export async function runEnvUpdateCheckJob(
 							}
 						} catch (scanErr: any) {
 							await log(`  Scan failed: ${scanErr.message}`);
-							scanBlocked = true;
-							blockReason = `Scan failed: ${scanErr.message}`;
+							if (shouldProceedOnScanError(vulnerabilityCriteria)) {
+								await log(`  Continuing update because vulnerability criteria is set to never block`);
+							} else {
+								scanBlocked = true;
+								blockReason = `Scan failed: ${scanErr.message}`;
+							}
 						}
 
 						if (scanBlocked) {
