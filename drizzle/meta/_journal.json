@@ -43,6 +43,13 @@
       "when": 1775344378607,
       "tag": "0005_talented_night_nurse",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1776512918491,
+      "tag": "0006_luxuriant_doctor_doom",
+      "breakpoints": true
     }
   ]
 }
