@@ -40,6 +40,7 @@ import type { Permissions } from './db';
 import { getUserAccessibleEnvironments, userCanAccessEnvironment, userHasAdminRole } from './db';
 import { validateSession, isAuthEnabled, checkPermission, type AuthenticatedUser } from './auth';
 import { isEnterprise } from './license';
+import { getRequestContext } from './request-context';
 
 export interface AuthorizationContext {
 	/** Whether authentication is enabled globally */
@@ -113,7 +114,10 @@ export interface AuthorizationContext {
 export async function authorize(cookies: Cookies): Promise<AuthorizationContext> {
 	const authEnabled = await isAuthEnabled();
 	const enterprise = await isEnterprise();
-	const user = authEnabled ? await validateSession(cookies) : null;
+
+	// Try request context first (set by hook — handles both cookie and Bearer)
+	const reqCtx = getRequestContext();
+	const user = reqCtx?.user ?? (authEnabled ? await validateSession(cookies) : null);
 
 	// Determine admin status:
 	// - Free edition: all authenticated users are effectively admins (full access)

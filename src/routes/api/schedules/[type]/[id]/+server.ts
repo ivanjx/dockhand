@@ -15,8 +15,14 @@ import {
 	deleteImagePruneSettings
 } from '$lib/server/db';
 import { unregisterSchedule } from '$lib/server/scheduler';
+import { authorize } from '$lib/server/authorize';
 
-export const DELETE: RequestHandler = async ({ params }) => {
+export const DELETE: RequestHandler = async ({ params, cookies }) => {
+	const auth = await authorize(cookies);
+	if (auth.authEnabled && !await auth.can('schedules', 'edit')) {
+		return json({ error: 'Permission denied' }, { status: 403 });
+	}
+
 	try {
 		const { type, id } = params;
 		const scheduleId = parseInt(id, 10);

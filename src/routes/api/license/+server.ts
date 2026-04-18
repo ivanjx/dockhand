@@ -7,6 +7,7 @@ import {
 	getHostname
 } from '$lib/server/license';
 import { authorize } from '$lib/server/authorize';
+import { clearTokenCache } from '$lib/server/api-tokens';
 
 // GET /api/license - Get current license status
 // Any authenticated user can view license status (needed to determine if RBAC applies)
@@ -59,6 +60,9 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			);
 		}
 
+		// Permission model changes between free/enterprise — clear cached tokens
+		clearTokenCache();
+
 		return json({
 			success: true,
 			license: result.license
@@ -81,6 +85,8 @@ export const DELETE: RequestHandler = async ({ cookies }) => {
 
 	try {
 		await deactivateLicense();
+		// Permission model changes between free/enterprise — clear cached tokens
+		clearTokenCache();
 		return json({ success: true });
 	} catch (error) {
 		console.error('Error deactivating license:', error);

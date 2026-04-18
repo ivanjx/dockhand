@@ -94,13 +94,15 @@
 	}
 
 	function handleScheduleCleanupEnabledChange() {
-		appSettings.setScheduleCleanupEnabled(!scheduleCleanupEnabled);
-		toast.success(scheduleCleanupEnabled ? 'Schedule cleanup disabled' : 'Schedule cleanup enabled');
+		const newState = !scheduleCleanupEnabled;
+		appSettings.setScheduleCleanupEnabled(newState);
+		toast.success(newState ? 'Schedule cleanup enabled' : 'Schedule cleanup disabled');
 	}
 
 	function handleEventCleanupEnabledChange() {
-		appSettings.setEventCleanupEnabled(!eventCleanupEnabled);
-		toast.success(eventCleanupEnabled ? 'Event cleanup disabled' : 'Event cleanup enabled');
+		const newState = !eventCleanupEnabled;
+		appSettings.setEventCleanupEnabled(newState);
+		toast.success(newState ? 'Event cleanup enabled' : 'Event cleanup disabled');
 	}
 
 	function handleGrypeImageBlur(e: Event) {
@@ -199,9 +201,9 @@
 									<Label>Show stopped containers</Label>
 									<TogglePill
 										checked={showStoppedContainers}
-										onchange={() => {
-											appSettings.setShowStoppedContainers(!showStoppedContainers);
-											toast.success(showStoppedContainers ? 'Stopped containers hidden' : 'Stopped containers shown');
+										onchange={(checked) => {
+											appSettings.setShowStoppedContainers(checked);
+											toast.success(checked ? 'Stopped containers shown' : 'Stopped containers hidden');
 										}}
 										disabled={!$canAccess('settings', 'edit')}
 									/>
@@ -213,9 +215,9 @@
 									<Label>Highlight available updates</Label>
 									<TogglePill
 										checked={highlightUpdates}
-										onchange={() => {
-											appSettings.setHighlightUpdates(!highlightUpdates);
-											toast.success(highlightUpdates ? 'Update highlighting disabled' : 'Update highlighting enabled');
+										onchange={(checked) => {
+											appSettings.setHighlightUpdates(checked);
+											toast.success(checked ? 'Update highlighting enabled' : 'Update highlighting disabled');
 										}}
 										disabled={!$canAccess('settings', 'edit')}
 									/>
@@ -227,9 +229,9 @@
 									<Label>Compact port display</Label>
 									<TogglePill
 										checked={compactPorts}
-										onchange={() => {
-											appSettings.setCompactPorts(!compactPorts);
-											toast.success(compactPorts ? 'Showing all ports' : 'Compact port display enabled');
+										onchange={(checked) => {
+											appSettings.setCompactPorts(checked);
+											toast.success(checked ? 'Compact port display enabled' : 'Showing all ports');
 										}}
 										disabled={!$canAccess('settings', 'edit')}
 									/>
@@ -337,9 +339,9 @@
 							<Label>Confirm destructive actions</Label>
 							<TogglePill
 								checked={confirmDestructive}
-								onchange={() => {
-									appSettings.setConfirmDestructive(!confirmDestructive);
-									toast.success(confirmDestructive ? 'Confirmations disabled' : 'Confirmations enabled');
+								onchange={(checked) => {
+									appSettings.setConfirmDestructive(checked);
+									toast.success(checked ? 'Confirmations enabled' : 'Confirmations disabled');
 								}}
 								disabled={!$canAccess('settings', 'edit')}
 							/>
@@ -405,9 +407,9 @@
 									<Label>Format log timestamps</Label>
 									<TogglePill
 										checked={formatLogTimestamps}
-										onchange={() => {
-											appSettings.setFormatLogTimestamps(!formatLogTimestamps);
-											toast.success(formatLogTimestamps ? 'Log timestamp formatting disabled' : 'Log timestamp formatting enabled');
+										onchange={(checked) => {
+											appSettings.setFormatLogTimestamps(checked);
+											toast.success(checked ? 'Log timestamp formatting enabled' : 'Log timestamp formatting disabled');
 										}}
 										disabled={!$canAccess('settings', 'edit')}
 									/>

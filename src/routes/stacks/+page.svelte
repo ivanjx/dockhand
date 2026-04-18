@@ -260,7 +260,7 @@
 			if (stats) {
 				cpuPercent += stats.cpuPercent;
 				memoryUsage += stats.memoryUsage;
-				memoryLimit += stats.memoryLimit;
+				memoryLimit = Math.max(memoryLimit, stats.memoryLimit);
 				networkRx += stats.networkRx;
 				networkTx += stats.networkTx;
 				blockRead += stats.blockRead;

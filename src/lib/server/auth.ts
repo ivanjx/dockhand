@@ -44,6 +44,7 @@ import {
 import { Client as LdapClient } from 'ldapts';
 import { isEnterprise } from './license';
 import { secureRandomBytes } from './crypto-fallback';
+import { invalidateTokenCacheForUser } from './token-cache';
 
 // Session cookie name
 const SESSION_COOKIE_NAME = 'dockhand_session';
@@ -734,6 +735,9 @@ async function tryLdapAuth(
 				}
 			}
 		}
+
+		// Clear cached token permissions after role sync
+		invalidateTokenCacheForUser(user.id);
 
 		if (!user.isActive) {
 			return { success: false, error: 'Account is disabled' };
@@ -1448,6 +1452,9 @@ export async function handleOidcCallback(
 				console.warn('Failed to process OIDC role mappings:', e);
 			}
 		}
+
+		// Clear cached token permissions after role sync
+		invalidateTokenCacheForUser(user.id);
 
 		if (!user.isActive) {
 			return { success: false, error: 'Account is disabled' };

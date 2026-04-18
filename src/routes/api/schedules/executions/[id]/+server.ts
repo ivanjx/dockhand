@@ -8,6 +8,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getScheduleExecution, deleteScheduleExecution } from '$lib/server/db';
+import { authorize } from '$lib/server/authorize';
 
 export const GET: RequestHandler = async ({ params }) => {
 	try {
@@ -28,7 +29,12 @@ export const GET: RequestHandler = async ({ params }) => {
 	}
 };
 
-export const DELETE: RequestHandler = async ({ params }) => {
+export const DELETE: RequestHandler = async ({ params, cookies }) => {
+	const auth = await authorize(cookies);
+	if (auth.authEnabled && !await auth.can('schedules', 'edit')) {
+		return json({ error: 'Permission denied' }, { status: 403 });
+	}
+
 	try {
 		const id = parseInt(params.id, 10);
 		if (isNaN(id)) {

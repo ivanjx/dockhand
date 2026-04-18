@@ -73,7 +73,7 @@
 	let hasAutoPulled = $state(false);
 
 	// Tab state - start on settings if skipping pull tab
-	let activeTab = $state<'pull' | 'scan' | 'container'>('pull');
+	let activeTab = $state<'pull' | 'scan' | 'container'>(skipPullTab ? 'container' : 'pull');
 
 	// Config sets
 	let configSets = $state<ConfigSet[]>([]);
@@ -174,8 +174,8 @@
 	let errors = $state<{ name?: string; image?: string }>({});
 
 	// Component refs
-	let pullTabRef = $state<PullTab | undefined>(undefined);
-	let scanTabRef = $state<ScanTab | undefined>(undefined);
+	let pullTabRef: PullTab | undefined;
+	let scanTabRef: ScanTab | undefined;
 
 	// Pull & Scan status (tracked via component callbacks)
 	let pullStatus = $state<'idle' | 'pulling' | 'complete' | 'error'>('idle');

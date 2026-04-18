@@ -3,6 +3,7 @@ import type { RequestHandler } from './$types';
 import { getEnvironments, getEnvironmentByName, createEnvironment, assignUserRole, getRoleByName, getEnvironmentPublicIps, setEnvironmentPublicIp, getEnvUpdateCheckSettings, getEnvironmentTimezone, getImagePruneSettings, type Environment } from '$lib/server/db';
 import { authorize } from '$lib/server/authorize';
 import { auditEnvironment } from '$lib/server/audit';
+import { invalidateTokenCacheForUser } from '$lib/server/api-tokens';
 import { refreshSubprocessEnvironments } from '$lib/server/subprocess-manager';
 import { serializeLabels, parseLabels, MAX_LABELS } from '$lib/utils/label-colors';
 import { cleanPem } from '$lib/utils/pem';
@@ -130,6 +131,7 @@ export const POST: RequestHandler = async (event) => {
 					const adminRole = await getRoleByName('Admin');
 					if (adminRole) {
 						await assignUserRole(user.id, adminRole.id, env.id);
+						invalidateTokenCacheForUser(user.id);
 					}
 				} catch (roleError) {
 					// Log but don't fail - environment was created successfully

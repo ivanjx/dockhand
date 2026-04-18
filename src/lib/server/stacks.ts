@@ -754,9 +754,10 @@ async function loginToRegistries(dockerHost?: string, logPrefix = '[Stack]', api
 		}
 
 		try {
-			// Extract registry host from URL
-			const url = new URL(reg.url);
-			const registryHost = url.host;
+			// Extract registry host from URL (parseRegistryUrl handles bare hostnames like 'ghcr.io')
+			const { parseRegistryUrl } = await import('./docker.js');
+			const { host } = parseRegistryUrl(reg.url);
+			const registryHost = host;
 
 			console.log(`${logPrefix} Logging into registry: ${registryHost}`);
 

@@ -485,6 +485,25 @@ export const pendingContainerUpdates = pgTable('pending_container_updates', {
 }));
 
 // =============================================================================
+// API TOKENS TABLE
+// =============================================================================
+
+export const apiTokens = pgTable('api_tokens', {
+	id: serial('id').primaryKey(),
+	userId: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+	name: text('name').notNull(),
+	tokenHash: text('token_hash').notNull().unique(),
+	tokenPrefix: text('token_prefix').notNull(),
+	lastUsed: timestamp('last_used', { mode: 'string' }),
+	expiresAt: timestamp('expires_at', { mode: 'string' }),
+	createdAt: timestamp('created_at', { mode: 'string' }).defaultNow(),
+	updatedAt: timestamp('updated_at', { mode: 'string' }).defaultNow()
+}, (table) => ({
+	userIdIdx: index('api_tokens_user_id_idx').on(table.userId),
+	tokenPrefixIdx: index('api_tokens_token_prefix_idx').on(table.tokenPrefix)
+}));
+
+// =============================================================================
 // USER PREFERENCES TABLE (unified key-value store)
 // =============================================================================
 

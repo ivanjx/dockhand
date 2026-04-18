@@ -4,6 +4,8 @@ import { initDatabase, hasAdminUser } from '$lib/server/db';
 import { startSubprocesses, stopSubprocesses } from '$lib/server/subprocess-manager';
 import { startScheduler } from '$lib/server/scheduler';
 import { isAuthEnabled, validateSession } from '$lib/server/auth';
+import { validateApiToken } from '$lib/server/api-tokens';
+import { requestContext } from '$lib/server/request-context';
 import { setServerStartTime } from '$lib/server/uptime';
 import { checkLicenseExpiry, getHostname } from '$lib/server/license';
 import { initCryptoFallback } from '$lib/server/crypto-fallback';
@@ -198,6 +200,58 @@ if (!initialized) {
 	}
 }
 
+// Bearer token auth failure rate limiting (per IP, 5-minute cooldown after 10 failures)
+const bearerFailCounts = new Map<string, { count: number; firstFail: number }>();
+const BEARER_FAIL_WINDOW_MS = 60_000; // 1-minute sliding window
+const BEARER_FAIL_MAX = 15; // max failures per window
+const BEARER_COOLDOWN_MS = 5 * 60 * 1000; // 5-minute cooldown after exceeding limit
+const bearerCooldowns = new Map<string, number>(); // IP → cooldown-until timestamp
+
+// Periodic cleanup
+setInterval(() => {
+	const now = Date.now();
+	for (const [ip, until] of bearerCooldowns) {
+		if (now > until) bearerCooldowns.delete(ip);
+	}
+	for (const [ip, entry] of bearerFailCounts) {
+		if (now - entry.firstFail > BEARER_FAIL_WINDOW_MS) bearerFailCounts.delete(ip);
+	}
+}, BEARER_COOLDOWN_MS).unref?.();
+
+function getClientIp(event: { request: Request; getClientAddress?: () => string }): string {
+	// Prefer socket-level IP (SvelteKit resolves proxy headers via adapter config)
+	// This prevents X-Forwarded-For spoofing to bypass rate limiting
+	try {
+		const addr = event.getClientAddress?.();
+		if (addr) return addr;
+	} catch { /* getClientAddress may throw if unavailable */ }
+	return 'unknown';
+}
+
+function recordBearerFailure(ip: string): void {
+	const now = Date.now();
+	const entry = bearerFailCounts.get(ip);
+	if (!entry || now - entry.firstFail > BEARER_FAIL_WINDOW_MS) {
+		bearerFailCounts.set(ip, { count: 1, firstFail: now });
+		return;
+	}
+	entry.count++;
+	if (entry.count >= BEARER_FAIL_MAX) {
+		bearerCooldowns.set(ip, now + BEARER_COOLDOWN_MS);
+		bearerFailCounts.delete(ip);
+	}
+}
+
+function isBearerRateLimited(ip: string): boolean {
+	const until = bearerCooldowns.get(ip);
+	if (!until) return false;
+	if (Date.now() > until) {
+		bearerCooldowns.delete(ip);
+		return false;
+	}
+	return true;
+}
+
 // Routes that don't require authentication
 const PUBLIC_PATHS = [
 	'/login',
@@ -247,21 +301,51 @@ export const handle: Handle = async ({ event, resolve }) => {
 		// Check if auth is enabled
 		const authEnabled = await isAuthEnabled();
 
-		// If auth is disabled, allow everything (app works as before)
+		// If auth is disabled, allow everything
 		if (!authEnabled) {
 			event.locals.user = null;
 			event.locals.authEnabled = false;
-			return compressResponse(event.request, await resolve(event));
+			const ctx = { user: null, authEnabled: false, authMethod: 'none' as const };
+			return requestContext.run(ctx, async () => compressResponse(event.request, await resolve(event)));
 		}
 
-		// Auth is enabled - check session
-		const user = await validateSession(event.cookies);
+		// Auth is enabled - check session first
+		let user = await validateSession(event.cookies);
+		let authMethod: 'cookie' | 'bearer' | 'none' = user ? 'cookie' : 'none';
+
+		// If no session, try Bearer token on API routes
+		if (!user && event.url.pathname.startsWith('/api/')) {
+			const authHeader = event.request.headers.get('authorization');
+			if (authHeader && authHeader.startsWith('Bearer dh_') && authHeader.length <= 207) {
+				const clientIp = getClientIp(event);
+
+				// Rate limit failed Bearer attempts
+				if (isBearerRateLimited(clientIp)) {
+					return new Response(
+						JSON.stringify({ error: 'Too many failed authentication attempts' }),
+						{ status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': '300' } }
+					);
+				}
+
+				const token = authHeader.substring(7); // strip "Bearer "
+				user = await validateApiToken(token);
+
+				if (user) {
+					authMethod = 'bearer';
+				} else {
+					recordBearerFailure(clientIp);
+				}
+			}
+		}
+
 		event.locals.user = user;
 		event.locals.authEnabled = true;
 
+		const ctx = { user, authEnabled: true, authMethod };
+
 		// Public paths don't require authentication
 		if (isPublicPath(event.url.pathname)) {
-			return compressResponse(event.request, await resolve(event));
+			return requestContext.run(ctx, async () => compressResponse(event.request, await resolve(event)));
 		}
 
 		// If not authenticated
@@ -270,7 +354,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 			// This enables the first admin user to be created during initial setup
 			const noAdminSetupMode = !(await hasAdminUser());
 			if (noAdminSetupMode && event.url.pathname === '/api/users' && event.request.method === 'POST') {
-				return compressResponse(event.request, await resolve(event));
+				return requestContext.run(ctx, async () => compressResponse(event.request, await resolve(event)));
 			}
 
 			// API routes return 401
@@ -289,7 +373,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 			redirect(307, `/login?redirect=${redirectUrl}`);
 		}
 
-		return compressResponse(event.request, await resolve(event));
+		return requestContext.run(ctx, async () => compressResponse(event.request, await resolve(event)));
 	} finally {
 		rssAfterOp('http', httpBefore);
 	}

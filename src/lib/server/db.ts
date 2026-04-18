@@ -1313,6 +1313,37 @@ export async function getUser(id: number): Promise<UserData | null> {
 	return results[0] as UserData || null;
 }
 
+export interface SafeUserData {
+	id: number;
+	username: string;
+	email: string | null;
+	displayName: string | null;
+	avatar: string | null;
+	authProvider: string | null;
+	mfaEnabled: boolean;
+	isActive: boolean;
+	lastLogin: string | null;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export async function getUserWithoutPassword(id: number): Promise<SafeUserData | null> {
+	const results = await db.select({
+		id: users.id,
+		username: users.username,
+		email: users.email,
+		displayName: users.displayName,
+		avatar: users.avatar,
+		authProvider: users.authProvider,
+		mfaEnabled: users.mfaEnabled,
+		isActive: users.isActive,
+		lastLogin: users.lastLogin,
+		createdAt: users.createdAt,
+		updatedAt: users.updatedAt
+	}).from(users).where(eq(users.id, id));
+	return results[0] as SafeUserData || null;
+}
+
 export async function hasAdminUser(): Promise<boolean> {
 	// Check if any user has the Admin role assigned
 	const adminRole = await db.select().from(roles).where(eq(roles.name, 'Admin')).limit(1);
@@ -3174,7 +3205,7 @@ export type AuditAction =
 export type AuditEntityType =
 	| 'container' | 'image' | 'stack' | 'volume' | 'network'
 	| 'user' | 'role' | 'settings' | 'environment' | 'registry' | 'git_repository' | 'git_credential'
-	| 'config_set' | 'notification' | 'oidc_provider' | 'ldap_config' | 'git_stack';
+	| 'config_set' | 'notification' | 'oidc_provider' | 'ldap_config' | 'git_stack' | 'api_token';
 
 export interface AuditLogData {
 	id: number;
@@ -4712,6 +4743,18 @@ export async function setStackEnvVars(
 			}))
 		);
 	}
+}
+
+/**
+ * Get the set of secret key names for a stack.
+ * Used to mask secret values in container inspect responses.
+ */
+export async function getSecretKeyNames(
+	stackName: string,
+	environmentId?: number | null
+): Promise<Set<string>> {
+	const vars = await getStackEnvVars(stackName, environmentId, true);
+	return new Set(vars.filter(v => v.isSecret).map(v => v.key));
 }
 
 /**

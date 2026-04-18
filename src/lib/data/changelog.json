@@ -1,5 +1,26 @@
 [
   {
+    "version": "1.0.25",
+    "date": "2026-04-18",
+    "comingSoon": false,
+    "changes": [
+      { "type": "feature", "text": "API token authentication — Bearer tokens for CI/CD pipelines and scripts" },
+      { "type": "feature", "text": "Telegram topic support — send notifications to supergroup topics (#855)" },
+      { "type": "fix", "text": "allow removing healthcheck, ports, and honor startAfterUpdate=false during container edit (#892)" },
+      { "type": "fix", "text": "validate stack names and prevent broken DB entries on invalid input (#876)" },
+      { "type": "fix", "text": "use per-environment timezone for schedule execution log timestamps (#882)" },
+      { "type": "fix", "text": "\"Pull image before update\" and \"Start after update\" settings ignored (#909)" },
+      { "type": "fix", "text": "image prune timeout on hawser-standard when pruning many images (#905)" },
+      { "type": "fix", "text": "bump Docker Compose to 5.1.3" },
+      { "type": "fix", "text": "mask secret environment variables in container inspect modal (#924)" },
+      { "type": "fix", "text": "viewer role can toggle, delete, and run schedules (#923)" },
+      { "type": "fix", "text": "settings show defaults instead of saved values after login until page refresh (#921)" },
+      { "type": "fix", "text": "settings toggle notifications show wrong state (#931)" },
+      { "type": "fix", "text": "stack memory tooltip shows inflated total on multi-container stacks (#936)" }
+    ],
+    "imageTag": "fnsys/dockhand:v1.0.25"
+  },
+  {
     "version": "1.0.24",
     "date": "2026-04-03",
     "changes": [

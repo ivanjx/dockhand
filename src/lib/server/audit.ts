@@ -9,6 +9,7 @@ import type { RequestEvent } from '@sveltejs/kit';
 import { isEnterprise } from './license';
 import { logAuditEvent, type AuditAction, type AuditEntityType, type AuditLogCreateData } from './db';
 import { authorize } from './authorize';
+import { getRequestContext } from './request-context';
 
 export interface AuditContext {
 	userId?: number | null;
@@ -21,7 +22,8 @@ export interface AuditContext {
  * Extract audit context from a request event
  */
 export async function getAuditContext(event: RequestEvent): Promise<AuditContext> {
-	const auth = await authorize(event.cookies);
+	const ctx = getRequestContext();
+	const user = ctx?.user ?? (await authorize(event.cookies)).user;
 
 	// Get IP address from various headers (proxied requests)
 	const forwardedFor = event.request.headers.get('x-forwarded-for');
@@ -40,8 +42,8 @@ export async function getAuditContext(event: RequestEvent): Promise<AuditContext
 	const userAgent = event.request.headers.get('user-agent') || null;
 
 	return {
-		userId: auth.user?.id ?? null,
-		username: auth.user?.username ?? 'anonymous',
+		userId: user?.id ?? null,
+		username: user?.username ?? 'anonymous',
 		ipAddress,
 		userAgent
 	};

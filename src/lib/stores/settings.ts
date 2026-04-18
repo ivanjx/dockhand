@@ -349,7 +349,10 @@ function createSettingsStore() {
 			});
 		},
 		// Manual refresh from database
-		refresh: loadSettings
+		refresh: () => {
+			initialized = false;
+			return loadSettings();
+		}
 	};
 }
 

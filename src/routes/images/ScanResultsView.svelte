@@ -241,8 +241,8 @@
 											{vuln.severity}
 										</Badge>
 									</td>
-									<td class="py-1 px-2">
-										<code class="text-xs">{vuln.package}</code>
+									<td class="py-1 px-2 max-w-[300px]">
+										<code class="text-xs block truncate" title={vuln.package}>{vuln.package}</code>
 									</td>
 									<td class="py-1 px-2">
 										<code class="text-xs text-muted-foreground">{vuln.version}</code>

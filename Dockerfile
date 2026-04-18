@@ -37,7 +37,7 @@ RUN APKO_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") 
     "    - busybox" \
     "    - tzdata" \
     "    - docker-cli" \
-    "    - docker-compose=5.0.2-r1" \
+    "    - docker-compose=5.1.3-r0" \
     "    - docker-cli-buildx" \
     "    - sqlite" \
     "    - postgresql-client" \
@@ -77,8 +77,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy package files and install dependencies (--ignore-scripts blocks malicious postinstall hooks)
 COPY package.json package-lock.json ./
-RUN npm ci --ignore-scripts \
-    && npm rebuild better-sqlite3 argon2
+RUN MAKEFLAGS="-j$(nproc)" npm ci --ignore-scripts \
+    && MAKEFLAGS="-j$(nproc)" npm rebuild better-sqlite3 argon2
 
 # Copy source code and build
 COPY . .
@@ -93,7 +93,7 @@ RUN cp -r node_modules/better-sqlite3/build /tmp/better-sqlite3-build \
     && rm -rf node_modules/@types /tmp/better-sqlite3-build
 
 # Build Go collector
-FROM --platform=$BUILDPLATFORM golang:1.25.8 AS go-builder
+FROM --platform=$BUILDPLATFORM golang:1.25.9 AS go-builder
 ARG TARGETARCH
 WORKDIR /app
 COPY collector/ ./collector/

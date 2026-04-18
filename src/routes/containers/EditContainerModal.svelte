@@ -259,7 +259,7 @@
 	}
 
 	// Inline title rename functions
-	let titleInputRef = $state<HTMLInputElement | null>(null);
+	let titleInputRef: HTMLInputElement | null = null;
 
 	function startEditingTitle() {
 		editTitleName = name;
@@ -910,6 +910,8 @@
 						retries: healthcheckRetries,
 						startPeriod: healthcheckStartPeriod * 1e9
 					};
+				} else if (!healthcheckEnabled) {
+					healthcheck = null;
 				}
 
 				const devices = deviceMappings
@@ -948,8 +950,8 @@
 				const payload = {
 					name: name.trim(),
 					image: image.trim(),
-					ports: Object.keys(ports).length > 0 ? ports : undefined,
-					volumeBinds: volumeBinds.length > 0 ? volumeBinds : undefined,
+					ports: Object.keys(ports).length > 0 ? ports : null,
+					volumeBinds: volumeBinds.length > 0 ? volumeBinds : null,
 					env: env.length > 0 ? env : undefined,
 					labels: Object.keys(labelsObj).length > 0 ? labelsObj : undefined,
 					cmd,
@@ -1137,8 +1139,8 @@
 					bind:restartPolicy
 					bind:restartMaxRetries
 					bind:networkMode
-					startAfterCreate={startAfterUpdate}
-					{repullImage}
+					bind:startAfterCreate={startAfterUpdate}
+					bind:repullImage
 					bind:portMappings
 					bind:volumeMappings
 					bind:envVars

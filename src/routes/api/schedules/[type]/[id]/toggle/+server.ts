@@ -7,8 +7,14 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { getAutoUpdateSettingById, updateAutoUpdateSettingById, getContainerStartScheduleById, updateContainerStartScheduleById, getGitStack, updateGitStack, getEnvUpdateCheckSettings, setEnvUpdateCheckSettings, getImagePruneSettings, setImagePruneSettings } from '$lib/server/db';
 import { registerSchedule, unregisterSchedule } from '$lib/server/scheduler';
+import { authorize } from '$lib/server/authorize';
 
-export const POST: RequestHandler = async ({ params }) => {
+export const POST: RequestHandler = async ({ params, cookies }) => {
+	const auth = await authorize(cookies);
+	if (auth.authEnabled && !await auth.can('schedules', 'edit')) {
+		return json({ error: 'Permission denied' }, { status: 403 });
+	}
+
 	try {
 		const { type, id } = params;
 		const scheduleId = parseInt(id, 10);

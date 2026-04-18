@@ -415,7 +415,8 @@ export function httpsAgentRequest(
 		if (!streaming) {
 			const isComposeOperation = path === '/_hawser/compose';
 			const composeTimeoutMs = parseInt(process.env.COMPOSE_TIMEOUT || '900') * 1000;
-			reqOptions.timeout = isComposeOperation ? composeTimeoutMs : 30000;
+			const isPrune = path.endsWith('/prune');
+			reqOptions.timeout = isComposeOperation ? composeTimeoutMs : isPrune ? 300000 : 30000;
 		}
 
 		// Honor AbortSignal from caller (e.g., AbortSignal.timeout(5000) for ping)
@@ -884,7 +885,7 @@ export async function dockerFetch(
 				body,
 				headers,
 				streaming || false,
-				(streaming || path === '/_hawser/compose') ? 300000 : 30000, // 5 min for streaming/compose, 30s for normal
+				(streaming || path === '/_hawser/compose' || path.endsWith('/prune')) ? 300000 : 30000, // 5 min for streaming/compose/prune, 30s for normal
 				isBinary,
 				fetchOptions.signal ?? undefined
 			);
@@ -960,7 +961,8 @@ export async function dockerFetch(
 		if (!streaming && !finalOptions.signal) {
 			const isComposeOperation = path === '/_hawser/compose';
 			const composeTimeoutMs = parseInt(process.env.COMPOSE_TIMEOUT || '900') * 1000;
-			finalOptions.signal = AbortSignal.timeout(isComposeOperation ? composeTimeoutMs : 30000);
+			const isPrune = path.endsWith('/prune');
+			finalOptions.signal = AbortSignal.timeout(isComposeOperation ? composeTimeoutMs : isPrune ? 300000 : 30000);
 		}
 
 		try {
@@ -1225,9 +1227,9 @@ export interface DeviceRequest {
 export interface CreateContainerOptions {
 	name: string;
 	image: string;
-	ports?: { [key: string]: { HostIp?: string; HostPort: string } };
+	ports?: { [key: string]: { HostIp?: string; HostPort: string } } | null;
 	volumes?: { [key: string]: {} };
-	volumeBinds?: string[];
+	volumeBinds?: string[] | null;
 	env?: string[];
 	labels?: { [key: string]: string };
 	cmd?: string[];
@@ -1247,7 +1249,7 @@ export interface CreateContainerOptions {
 	networkGwPriority?: number;
 	user?: string | null;
 	privileged?: boolean;
-	healthcheck?: HealthcheckConfig;
+	healthcheck?: HealthcheckConfig | null;
 	memory?: number;
 	memoryReservation?: number;
 	memorySwap?: number;
@@ -1338,7 +1340,10 @@ export async function createContainer(options: CreateContainerOptions, envId?: n
 		containerConfig.User = options.user ?? '';
 	}
 
-	if (options.healthcheck) {
+	if (options.healthcheck === null) {
+		// Explicitly disable healthcheck (user cleared it)
+		containerConfig.Healthcheck = { Test: ["NONE"] };
+	} else if (options.healthcheck) {
 		containerConfig.Healthcheck = {};
 		if (options.healthcheck.test && options.healthcheck.test.length > 0) {
 			containerConfig.Healthcheck.Test = options.healthcheck.test;
@@ -1357,7 +1362,11 @@ export async function createContainer(options: CreateContainerOptions, envId?: n
 		}
 	}
 
-	if (options.ports) {
+	if (options.ports === null) {
+		// Explicitly clear ports (user removed all mappings)
+		containerConfig.ExposedPorts = {};
+		containerConfig.HostConfig.PortBindings = {};
+	} else if (options.ports) {
 		containerConfig.ExposedPorts = {};
 		containerConfig.HostConfig.PortBindings = {};
 
@@ -1367,7 +1376,10 @@ export async function createContainer(options: CreateContainerOptions, envId?: n
 		}
 	}
 
-	if (options.volumeBinds && options.volumeBinds.length > 0) {
+	if (options.volumeBinds === null) {
+		// Explicitly clear volume binds (user removed all)
+		containerConfig.HostConfig.Binds = [];
+	} else if (options.volumeBinds && options.volumeBinds.length > 0) {
 		containerConfig.HostConfig.Binds = options.volumeBinds;
 	}
 
@@ -2393,7 +2405,7 @@ export async function updateContainer(id: string, options: Partial<CreateContain
 	}
 
 	// 5. Start if needed
-	if (startAfterUpdate || wasRunning) {
+	if (startAfterUpdate) {
 		try {
 			await newContainer.start();
 		} catch (startError) {

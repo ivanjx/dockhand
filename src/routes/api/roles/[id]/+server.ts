@@ -8,6 +8,7 @@ import {
 import { authorize } from '$lib/server/authorize';
 import { auditRole } from '$lib/server/audit';
 import { computeAuditDiff } from '$lib/utils/diff';
+import { clearTokenCache } from '$lib/server/api-tokens';
 
 // GET /api/roles/[id] - Get a specific role
 export const GET: RequestHandler = async ({ params, cookies }) => {
@@ -75,6 +76,9 @@ export const PUT: RequestHandler = async (event) => {
 			return json({ error: 'Failed to update role' }, { status: 500 });
 		}
 
+		// Clear token cache — any cached user with this role has stale permissions
+		clearTokenCache();
+
 		// Compute diff for audit
 		const diff = computeAuditDiff(existingRole, role);
 
@@ -127,6 +131,9 @@ export const DELETE: RequestHandler = async (event) => {
 		if (!deleted) {
 			return json({ error: 'Failed to delete role' }, { status: 500 });
 		}
+
+		// Clear token cache — users with this role may have stale cached permissions
+		clearTokenCache();
 
 		// Audit log
 		await auditRole(event, 'delete', id, role.name);

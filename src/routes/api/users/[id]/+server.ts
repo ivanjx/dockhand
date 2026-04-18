@@ -16,6 +16,7 @@ import { hashPassword } from '$lib/server/auth';
 import { authorize } from '$lib/server/authorize';
 import { auditUser } from '$lib/server/audit';
 import { computeAuditDiff } from '$lib/utils/diff';
+import { invalidateTokenCacheForUser } from '$lib/server/api-tokens';
 
 // GET /api/users/[id] - Get a specific user
 // Free for all - local users are needed for basic auth
@@ -125,6 +126,7 @@ export const PUT: RequestHandler = async (event) => {
 					if (isDeactivating) {
 						updateData.isActive = false;
 						await deleteUserSessions(userId);
+						invalidateTokenCacheForUser(userId);
 					}
 
 					// Disable authentication
@@ -142,6 +144,7 @@ export const PUT: RequestHandler = async (event) => {
 						if (adminRole) {
 							await removeUserRole(userId, adminRole.id, null);
 						}
+						invalidateTokenCacheForUser(userId);
 					}
 
 					return json({
@@ -170,9 +173,10 @@ export const PUT: RequestHandler = async (event) => {
 			}
 			if (data.isActive !== undefined) {
 				updateData.isActive = data.isActive;
-				// If deactivating, invalidate all sessions
+				// If deactivating, invalidate all sessions and token cache
 				if (!data.isActive) {
 					await deleteUserSessions(userId);
+					invalidateTokenCacheForUser(userId);
 				}
 			}
 		}
@@ -183,8 +187,9 @@ export const PUT: RequestHandler = async (event) => {
 				return json({ error: 'Password must be at least 8 characters' }, { status: 400 });
 			}
 			updateData.passwordHash = await hashPassword(data.password);
-			// Invalidate all sessions on password change (except current)
+			// Invalidate all sessions and token cache on password change
 			await deleteUserSessions(userId);
+			invalidateTokenCacheForUser(userId);
 		}
 
 		const user = await dbUpdateUser(userId, updateData);
@@ -198,8 +203,10 @@ export const PUT: RequestHandler = async (event) => {
 		if (adminRole) {
 			if (shouldPromote) {
 				await assignUserRole(userId, adminRole.id, null);
+				invalidateTokenCacheForUser(userId);
 			} else if (shouldDemote) {
 				await removeUserRole(userId, adminRole.id, null);
+				invalidateTokenCacheForUser(userId);
 			}
 		}
 
@@ -284,6 +291,7 @@ export const DELETE: RequestHandler = async (event) => {
 
 				// User confirmed - proceed with deletion and disable auth
 				await deleteUserSessions(id);
+				invalidateTokenCacheForUser(id);
 				const deleted = await dbDeleteUser(id);
 				if (!deleted) {
 					return json({ error: 'Failed to delete user' }, { status: 500 });
@@ -299,8 +307,9 @@ export const DELETE: RequestHandler = async (event) => {
 			}
 		}
 
-		// Delete all sessions first
+		// Delete all sessions and invalidate token cache
 		await deleteUserSessions(id);
+		invalidateTokenCacheForUser(id);
 
 		const deleted = await dbDeleteUser(id);
 		if (!deleted) {

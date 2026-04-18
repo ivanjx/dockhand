@@ -1,13 +1,15 @@
 <script lang="ts">
 	import { Sun, Moon } from 'lucide-svelte';
+	import { getTimeFormat } from '$lib/stores/settings';
 
 	interface Props {
 		logs: string | null;
 		darkMode?: boolean;
+		timezone?: string;
 		onToggleTheme?: () => void;
 	}
 
-	let { logs, darkMode = true, onToggleTheme }: Props = $props();
+	let { logs, darkMode = true, timezone, onToggleTheme }: Props = $props();
 
 	// Parse log lines with timestamp and content
 	function parseLogLine(line: string): { timestamp: string; content: string; type: 'trivy' | 'grype' | 'error' | 'default' } {
@@ -44,7 +46,15 @@
 	}
 
 	function formatTimestamp(timestamp: string): string {
-		return timestamp.split('T')[1]?.replace('Z', '') || timestamp;
+		const d = new Date(timestamp);
+		if (isNaN(d.getTime())) return timestamp;
+		return new Intl.DateTimeFormat('en-GB', {
+			timeZone: timezone || undefined,
+			hour: '2-digit',
+			minute: '2-digit',
+			second: '2-digit',
+			hour12: getTimeFormat() === '12h'
+		}).format(d);
 	}
 </script>
 

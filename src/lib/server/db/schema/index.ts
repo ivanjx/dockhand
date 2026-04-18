@@ -482,6 +482,25 @@ export const pendingContainerUpdates = sqliteTable('pending_container_updates', 
 }));
 
 // =============================================================================
+// API TOKENS TABLE
+// =============================================================================
+
+export const apiTokens = sqliteTable('api_tokens', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	userId: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+	name: text('name').notNull(),
+	tokenHash: text('token_hash').notNull().unique(),
+	tokenPrefix: text('token_prefix').notNull(),
+	lastUsed: text('last_used'),
+	expiresAt: text('expires_at'),
+	createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`),
+	updatedAt: text('updated_at').default(sql`CURRENT_TIMESTAMP`)
+}, (table) => ({
+	userIdIdx: index('api_tokens_user_id_idx').on(table.userId),
+	tokenPrefixIdx: index('api_tokens_token_prefix_idx').on(table.tokenPrefix)
+}));
+
+// =============================================================================
 // USER PREFERENCES TABLE (unified key-value store)
 // =============================================================================
 
@@ -587,3 +606,6 @@ export type NewStackEnvironmentVariable = typeof stackEnvironmentVariables.$infe
 
 export type PendingContainerUpdate = typeof pendingContainerUpdates.$inferSelect;
 export type NewPendingContainerUpdate = typeof pendingContainerUpdates.$inferInsert;
+
+export type ApiToken = typeof apiTokens.$inferSelect;
+export type NewApiToken = typeof apiTokens.$inferInsert;

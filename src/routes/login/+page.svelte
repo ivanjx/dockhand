@@ -9,6 +9,7 @@
 	import { Loader2, LogIn, Shield, AlertCircle, Network, User, KeyRound, TriangleAlert } from 'lucide-svelte';
 	import { authStore } from '$lib/stores/auth';
 	import { environments } from '$lib/stores/environment';
+	import { appSettings } from '$lib/stores/settings';
 	import * as Alert from '$lib/components/ui/alert';
 	import { themeStore, applyTheme } from '$lib/stores/theme';
 
@@ -114,7 +115,8 @@
 				return;
 			}
 
-			// Success - refresh environments (they were cleared during pre-login fetch) then redirect
+			// Success - refresh settings and environments (they were fetched before auth) then redirect
+			await appSettings.refresh();
 			await environments.refresh();
 			goto(redirectUrl);
 		} catch (e) {

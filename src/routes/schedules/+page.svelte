@@ -41,13 +41,17 @@
 	import { DataGrid } from '$lib/components/data-grid';
 	import type { DataGridRowState } from '$lib/components/data-grid';
 	import { toast } from 'svelte-sonner';
-	import { formatDateTime, appSettings } from '$lib/stores/settings';
+	import { formatDateTime, getTimeFormat, appSettings } from '$lib/stores/settings';
 	import EnvironmentIcon from '$lib/components/EnvironmentIcon.svelte';
 	import ConfirmPopover from '$lib/components/ConfirmPopover.svelte';
 	import ScannerSeverityPills from '$lib/components/ScannerSeverityPills.svelte';
 	import VulnerabilityCriteriaBadge from '$lib/components/VulnerabilityCriteriaBadge.svelte';
 	import UpdateSummaryStats from '$lib/components/UpdateSummaryStats.svelte';
 	import ExecutionLogViewer from '$lib/components/ExecutionLogViewer.svelte';
+	import { canAccess } from '$lib/stores/auth';
+
+	const canEditSchedules = $derived($canAccess('schedules', 'edit'));
+	const canRunSchedules = $derived($canAccess('schedules', 'run'));
 	import { vulnerabilityCriteriaIcons, vulnerabilityCriteriaLabels } from '$lib/utils/update-steps';
 	import type { VulnerabilityCriteria } from '$lib/server/db';
 	import cronstrue from 'cronstrue';
@@ -183,7 +187,7 @@
 
 	// State
 	let schedules = $state<Schedule[]>([]);
-	let environments = $state<{ id: number; name: string; icon: string }[]>([]);
+	let environments = $state<{ id: number; name: string; icon: string; timezone?: string }[]>([]);
 	let loading = $state(true);
 	let refreshing = $state(false);
 	let searchQuery = $state('');
@@ -204,6 +208,11 @@
 	let selectedExecution = $state<ScheduleExecution | null>(null);
 	let loadingExecutionDetail = $state(false);
 	let logDarkMode = $state(true);
+	let selectedExecutionTimezone = $derived(
+		selectedExecution?.environmentId
+			? environments.find(e => e.id === selectedExecution!.environmentId)?.timezone
+			: undefined
+	);
 
 	function toggleLogTheme() {
 		logDarkMode = !logDarkMode;
@@ -736,9 +745,21 @@
 		}
 	}
 
-	function formatTimestamp(iso: string | null): string {
+	function formatTimestamp(iso: string | null, tz?: string): string {
 		if (!iso) return '-';
-		return formatDateTime(iso, true);
+		if (!tz) return formatDateTime(iso, true);
+		const d = new Date(iso);
+		if (isNaN(d.getTime())) return iso;
+		return new Intl.DateTimeFormat('en-GB', {
+			timeZone: tz,
+			year: 'numeric',
+			month: '2-digit',
+			day: '2-digit',
+			hour: '2-digit',
+			minute: '2-digit',
+			second: '2-digit',
+			hour12: getTimeFormat() === '12h'
+		}).format(d);
 	}
 
 	function formatDuration(ms: number | null): string {
@@ -895,7 +916,7 @@
 <div class="flex-1 min-h-0 flex flex-col gap-3 overflow-hidden">
 	<!-- Header with filters -->
 	<div class="shrink-0 flex flex-wrap justify-between items-center gap-3 min-h-8">
-		<PageHeader icon={Timer as any} title="Schedules" count={filteredSchedules.length} />
+		<PageHeader icon={Timer} title="Schedules" count={filteredSchedules.length} />
 		<div class="flex flex-wrap items-center gap-2">
 			<div class="relative">
 				<Search class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
@@ -1297,27 +1318,31 @@
 							<FileText class="w-3 h-3 text-muted-foreground hover:text-blue-500" />
 						</button>
 					{/if}
-					<button
-						type="button"
-						onclick={(e) => { e.stopPropagation(); toggleScheduleEnabled(schedule); }}
-						title={schedule.enabled ? 'Pause schedule' : 'Resume schedule'}
-						class="p-0.5 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
-					>
-						{#if schedule.enabled}
-							<Pause class="w-3 h-3 text-muted-foreground hover:text-amber-500" />
-						{:else}
-							<PlayCircle class="w-3 h-3 text-muted-foreground hover:text-green-500" />
-						{/if}
-					</button>
-					<button
-						type="button"
-						onclick={(e) => { e.stopPropagation(); triggerSchedule(schedule); }}
-						title="Run now"
-						class="p-0.5 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
-					>
-						<Play class="w-3 h-3 text-muted-foreground hover:text-green-500" />
-					</button>
-					{#if !schedule.isSystem}
+					{#if canEditSchedules}
+						<button
+							type="button"
+							onclick={(e) => { e.stopPropagation(); toggleScheduleEnabled(schedule); }}
+							title={schedule.enabled ? 'Pause schedule' : 'Resume schedule'}
+							class="p-0.5 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
+						>
+							{#if schedule.enabled}
+								<Pause class="w-3 h-3 text-muted-foreground hover:text-amber-500" />
+							{:else}
+								<PlayCircle class="w-3 h-3 text-muted-foreground hover:text-green-500" />
+							{/if}
+						</button>
+					{/if}
+					{#if canRunSchedules}
+						<button
+							type="button"
+							onclick={(e) => { e.stopPropagation(); triggerSchedule(schedule); }}
+							title="Run now"
+							class="p-0.5 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
+						>
+							<Play class="w-3 h-3 text-muted-foreground hover:text-green-500" />
+						</button>
+					{/if}
+					{#if canEditSchedules && !schedule.isSystem}
 						{@const scheduleKey = getScheduleKey(schedule)}
 						<ConfirmPopover
 							open={confirmDeleteId === scheduleKey}
@@ -1345,7 +1370,7 @@
 			<div class="p-4 pl-12 shadow-inner bg-muted isolate sticky left-0 max-w-[calc(100vw-18rem)]">
 				<div class="flex items-center justify-between mb-2">
 					<h4 class="text-xs font-medium">Execution history</h4>
-					{#if executions.length > 0}
+					{#if executions.length > 0 && canEditSchedules}
 						<button
 							type="button"
 							onclick={() => deleteAllExecutions(schedule)}
@@ -1422,14 +1447,16 @@
 												>
 													<FileText class="w-3 h-3 text-muted-foreground hover:text-blue-500" />
 												</button>
-												<button
-													type="button"
-													onclick={() => deleteExecution(schedule, exec.id)}
-													title="Delete execution"
-													class="p-0.5 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
-												>
-													<Trash2 class="w-3 h-3 text-muted-foreground hover:text-red-500" />
-												</button>
+												{#if canEditSchedules}
+													<button
+														type="button"
+														onclick={() => deleteExecution(schedule, exec.id)}
+														title="Delete execution"
+														class="p-0.5 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
+													>
+														<Trash2 class="w-3 h-3 text-muted-foreground hover:text-red-500" />
+													</button>
+												{/if}
 											</div>
 										</td>
 									</tr>
@@ -1503,7 +1530,7 @@
 			</Dialog.Title>
 			{#if selectedExecution}
 				<span class="text-xs text-muted-foreground shrink-0 pr-6 whitespace-nowrap inline-flex items-center gap-1">
-					{formatTimestamp(selectedExecution.triggeredAt)} · <Timer class="w-3 h-3 -mt-px" /> {formatDuration(selectedExecution.duration)}
+					{formatTimestamp(selectedExecution.triggeredAt, selectedExecutionTimezone)} · <Timer class="w-3 h-3 -mt-px" /> {formatDuration(selectedExecution.duration)}
 				</span>
 			{/if}
 		</Dialog.Header>
@@ -1640,6 +1667,7 @@
 					<ExecutionLogViewer
 						logs={selectedExecution.logs}
 						darkMode={logDarkMode}
+						timezone={selectedExecutionTimezone}
 						onToggleTheme={toggleLogTheme}
 					/>
 				</div>

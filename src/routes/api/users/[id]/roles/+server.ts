@@ -10,6 +10,7 @@ import {
 	getRole
 } from '$lib/server/db';
 import { auditUser } from '$lib/server/audit';
+import { invalidateTokenCacheForUser } from '$lib/server/api-tokens';
 
 // GET /api/users/[id]/roles - Get roles assigned to a user
 export const GET: RequestHandler = async ({ params, cookies }) => {
@@ -69,6 +70,7 @@ export const POST: RequestHandler = async (event) => {
 		}
 
 		const userRole = await assignUserRole(userId, roleId, environmentId);
+		invalidateTokenCacheForUser(userId);
 
 		// Audit log - role assigned
 		const role = await getRole(roleId);
@@ -116,6 +118,15 @@ export const DELETE: RequestHandler = async (event) => {
 		const deleted = await removeUserRole(userId, roleId, environmentId);
 		if (!deleted) {
 			return json({ error: 'Role assignment not found' }, { status: 404 });
+		}
+		invalidateTokenCacheForUser(userId);
+
+		// Audit log - role removed
+		if (user) {
+			await auditUser(event, 'update', userId, user.username, {
+				roleRemoved: role?.name || `Role #${roleId}`,
+				roleId
+			});
 		}
 
 		// Audit log - role removed

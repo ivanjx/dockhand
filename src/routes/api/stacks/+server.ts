@@ -144,10 +144,13 @@ export const POST: RequestHandler = async (event) => {
 		}
 
 		// ALWAYS save compose file first - deployStack expects it to exist
-		await saveStackComposeFile(name, compose, true, envIdNum, {
+		const saveResult = await saveStackComposeFile(name, compose, true, envIdNum, {
 			composePath: composePath || undefined,
 			envPath: envPath || undefined
 		});
+		if (!saveResult.success) {
+			return json({ error: saveResult.error }, { status: 400 });
+		}
 
 		// Save environment variables BEFORE deploying so they're available during start
 		if (rawEnvContent || (envVars && Array.isArray(envVars) && envVars.length > 0)) {

@@ -11,6 +11,7 @@ import {
 } from '$lib/server/db';
 import { hashPassword, createUserSession } from '$lib/server/auth';
 import { authorize } from '$lib/server/authorize';
+import { invalidateTokenCacheForUser } from '$lib/server/api-tokens';
 import { auditUser } from '$lib/server/audit';
 
 // GET /api/users - List all users
@@ -108,6 +109,7 @@ export const POST: RequestHandler = async (event) => {
 			const adminRole = await getRoleByName('Admin');
 			if (adminRole) {
 				await assignUserRole(user.id, adminRole.id, null);
+				invalidateTokenCacheForUser(user.id);
 			}
 		}
 

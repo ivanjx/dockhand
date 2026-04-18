@@ -4,7 +4,7 @@ import {
 	removeContainer,
 	getContainerLogs
 } from '$lib/server/docker';
-import { deleteAutoUpdateSchedule, getAutoUpdateSetting, deleteContainerStartSchedule, getContainerStartSchedule, removePendingContainerUpdate } from '$lib/server/db';
+import { deleteAutoUpdateSchedule, getAutoUpdateSetting, deleteContainerStartSchedule, getContainerStartSchedule, getSecretKeyNames, removePendingContainerUpdate } from '$lib/server/db';
 import { authorize } from '$lib/server/authorize';
 import { auditContainer } from '$lib/server/audit';
 import { unregisterSchedule } from '$lib/server/scheduler';
@@ -33,6 +33,24 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
 	try {
 
 		const details = await inspectContainer(params.id, envIdNum);
+
+		// Mask secret env vars for containers belonging to a Compose stack
+		const stackName = details.Config?.Labels?.['com.docker.compose.project'];
+		if (stackName && Array.isArray(details.Config?.Env)) {
+			const secretKeys = await getSecretKeyNames(stackName, envIdNum);
+			if (secretKeys.size > 0) {
+				details.Config.Env = details.Config.Env.map((entry: string) => {
+					const eqIdx = entry.indexOf('=');
+					if (eqIdx === -1) return entry;
+					const key = entry.substring(0, eqIdx);
+					if (secretKeys.has(key)) {
+						return `${key}=***`;
+					}
+					return entry;
+				});
+			}
+		}
+
 		return json(details);
 	} catch (error: any) {
 		if (error?.statusCode === 404) {

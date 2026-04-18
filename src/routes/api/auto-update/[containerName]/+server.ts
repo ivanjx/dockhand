@@ -7,6 +7,7 @@ import {
 	deleteAutoUpdateSchedule
 } from '$lib/server/db';
 import { registerSchedule, unregisterSchedule } from '$lib/server/scheduler';
+import { authorize } from '$lib/server/authorize';
 
 export const GET: RequestHandler = async ({ params, url }) => {
 	try {
@@ -38,7 +39,12 @@ export const GET: RequestHandler = async ({ params, url }) => {
 	}
 };
 
-export const POST: RequestHandler = async ({ params, url, request }) => {
+export const POST: RequestHandler = async ({ params, url, request, cookies }) => {
+	const auth = await authorize(cookies);
+	if (auth.authEnabled && !await auth.can('schedules', 'edit')) {
+		return json({ error: 'Permission denied' }, { status: 403 });
+	}
+
 	try {
 		const containerName = decodeURIComponent(params.containerName);
 		const envIdParam = url.searchParams.get('env');
@@ -101,7 +107,12 @@ export const POST: RequestHandler = async ({ params, url, request }) => {
 	}
 };
 
-export const DELETE: RequestHandler = async ({ params, url }) => {
+export const DELETE: RequestHandler = async ({ params, url, cookies }) => {
+	const auth = await authorize(cookies);
+	if (auth.authEnabled && !await auth.can('schedules', 'edit')) {
+		return json({ error: 'Permission denied' }, { status: 403 });
+	}
+
 	try {
 		const containerName = decodeURIComponent(params.containerName);
 		const envIdParam = url.searchParams.get('env');

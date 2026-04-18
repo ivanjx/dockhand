@@ -11,6 +11,7 @@
 		Shield,
 		ShieldCheck,
 		Key,
+		KeyRound,
 		RefreshCw,
 		Check,
 		Smartphone,
@@ -22,7 +23,8 @@
 		Camera,
 		Trash2,
 		TriangleAlert,
-		Palette
+		Palette,
+		Plus
 	} from 'lucide-svelte';
 	import { authStore } from '$lib/stores/auth';
 	import { formatDateTime } from '$lib/stores/settings';
@@ -32,6 +34,9 @@
 	import ChangePasswordModal from './ChangePasswordModal.svelte';
 	import MfaSetupModal from './MfaSetupModal.svelte';
 	import DisableMfaModal from './DisableMfaModal.svelte';
+	import ApiTokenModal from './ApiTokenModal.svelte';
+	import ConfirmPopover from '$lib/components/ConfirmPopover.svelte';
+	import * as Table from '$lib/components/ui/table';
 	import ThemeSelector from '$lib/components/ThemeSelector.svelte';
 	import { themeStore } from '$lib/stores/theme';
 	import PageHeader from '$lib/components/PageHeader.svelte';
@@ -72,6 +77,49 @@
 	let mfaLoading = $state(false);
 	let mfaError = $state('');
 	let showDisableMfaModal = $state(false);
+
+	// API tokens state
+	interface ApiToken {
+		id: number;
+		name: string;
+		tokenPrefix: string;
+		lastUsed: string | null;
+		expiresAt: string | null;
+		createdAt: string;
+	}
+	let apiTokens = $state<ApiToken[]>([]);
+	let showApiTokenModal = $state(false);
+	let tokensLoading = $state(false);
+
+	async function fetchApiTokens() {
+		tokensLoading = true;
+		try {
+			const response = await fetch('/api/auth/tokens');
+			if (response.ok) {
+				apiTokens = await response.json();
+			}
+		} catch {
+			// Silently fail - tokens section will show empty
+		} finally {
+			tokensLoading = false;
+		}
+	}
+
+	async function revokeToken(tokenId: number) {
+		try {
+			const response = await fetch(`/api/auth/tokens/${tokenId}`, { method: 'DELETE' });
+			if (response.ok) {
+				apiTokens = apiTokens.filter(t => t.id !== tokenId);
+			}
+		} catch {
+			// Ignore
+		}
+	}
+
+	function isTokenExpired(expiresAt: string | null): boolean {
+		if (!expiresAt) return false;
+		return new Date(expiresAt) < new Date();
+	}
 
 	// Avatar state
 	let showAvatarCropper = $state(false);
@@ -291,6 +339,7 @@
 			if (!profileFetched) {
 				profileFetched = true;
 				fetchProfile();
+				fetchApiTokens();
 			}
 		}
 	});
@@ -300,7 +349,7 @@
 	<title>Profile - Dockhand</title>
 </svelte:head>
 
-<div class="container mx-auto p-6 max-w-4xl">
+<div class="container mx-auto p-6">
 	<div class="flex items-center gap-3 mb-6">
 		<PageHeader icon={User} title="Profile" showConnection={false}>
 			<p class="text-muted-foreground text-sm">Manage your account settings</p>
@@ -329,6 +378,9 @@
 					{formSuccess}
 				</div>
 			{/if}
+
+			<!-- Row 1: Account info + Profile details -->
+			<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
 			<!-- Account info card -->
 			<Card.Root>
@@ -431,14 +483,14 @@
 			</Card.Root>
 
 			<!-- Profile details card -->
-			<Card.Root>
+			<Card.Root class="flex flex-col">
 				<Card.Header>
 					<Card.Title class="flex items-center gap-2">
 						<Mail class="w-5 h-5" />
 						Profile details
 					</Card.Title>
 				</Card.Header>
-				<Card.Content class="space-y-4">
+				<Card.Content class="flex-1 flex flex-col space-y-4">
 					{#if formError}
 						<Alert.Root variant="destructive">
 							<TriangleAlert class="h-4 w-4" />
@@ -446,7 +498,7 @@
 						</Alert.Root>
 					{/if}
 
-					<div class="grid grid-cols-2 gap-4">
+					<div class="space-y-4 flex-1">
 						<div class="space-y-2">
 							<Label>Display name</Label>
 							<Input
@@ -477,8 +529,13 @@
 				</Card.Content>
 			</Card.Root>
 
+			</div>
+
+			<!-- Row 2: Security + API tokens -->
+			<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
 			<!-- Security card -->
-			<Card.Root>
+			<Card.Root class="flex flex-col">
 				<Card.Header>
 					<Card.Title class="flex items-center gap-2">
 						<Shield class="w-5 h-5" />
@@ -582,6 +639,81 @@
 				</Card.Content>
 			</Card.Root>
 
+			<!-- API tokens card -->
+			<Card.Root>
+				<Card.Header>
+					<Card.Title class="flex items-center gap-2 justify-between">
+						<span class="flex items-center gap-2">
+							<KeyRound class="w-5 h-5" />
+							API tokens
+						</span>
+						<Button variant="outline" size="sm" onclick={() => showApiTokenModal = true}>
+							<Plus class="w-4 h-4 mr-1" />
+							Generate token
+						</Button>
+					</Card.Title>
+					<Card.Description>Create tokens for CI/CD pipelines and scripts</Card.Description>
+				</Card.Header>
+				<Card.Content>
+					{#if tokensLoading}
+						<p class="text-sm text-muted-foreground">Loading tokens...</p>
+					{:else if apiTokens.length === 0}
+						<p class="text-sm text-muted-foreground">No API tokens created yet.</p>
+					{:else}
+						<Table.Root>
+							<Table.Header>
+								<Table.Row>
+									<Table.Head>Name</Table.Head>
+									<Table.Head>Prefix</Table.Head>
+									<Table.Head>Last used</Table.Head>
+									<Table.Head>Expires</Table.Head>
+									<Table.Head class="w-[80px]"></Table.Head>
+								</Table.Row>
+							</Table.Header>
+							<Table.Body>
+								{#each apiTokens as token (token.id)}
+									<Table.Row class={isTokenExpired(token.expiresAt) ? 'opacity-50' : ''}>
+										<Table.Cell class="font-medium">{token.name}</Table.Cell>
+										<Table.Cell>
+											<code class="text-xs bg-muted px-1.5 py-0.5 rounded">dh_{token.tokenPrefix}...</code>
+										</Table.Cell>
+										<Table.Cell class="text-sm text-muted-foreground">
+											{token.lastUsed ? formatDateTime(token.lastUsed) : 'Never'}
+										</Table.Cell>
+										<Table.Cell class="text-sm">
+											{#if isTokenExpired(token.expiresAt)}
+												<Badge variant="destructive">Expired</Badge>
+											{:else if token.expiresAt}
+												{formatDateTime(token.expiresAt)}
+											{:else}
+												<span class="text-muted-foreground">Never</span>
+											{/if}
+										</Table.Cell>
+										<Table.Cell>
+											<ConfirmPopover
+												title="Revoke token"
+												description="This token will stop working immediately."
+												confirmText="Revoke"
+												onConfirm={() => revokeToken(token.id)}
+											>
+												<Button variant="ghost" size="sm" class="text-destructive hover:text-destructive">
+													<Trash2 class="w-4 h-4" />
+												</Button>
+											</ConfirmPopover>
+										</Table.Cell>
+									</Table.Row>
+								{/each}
+							</Table.Body>
+						</Table.Root>
+					{/if}
+				</Card.Content>
+			</Card.Root>
+
+			</div>
+
+			<!-- Row 3: Appearance (left-aligned with Security) -->
+			<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
 			<!-- Appearance card -->
 			<Card.Root>
 				<Card.Header>
@@ -595,6 +727,8 @@
 					<ThemeSelector userId={profile.id} />
 				</Card.Content>
 			</Card.Root>
+
+			</div>
 		</div>
 	{/if}
 </div>
@@ -624,6 +758,13 @@
 		onSuccess={handleMfaDisabled}
 	/>
 {/if}
+
+<!-- API Token Modal -->
+<ApiTokenModal
+	bind:open={showApiTokenModal}
+	onCreated={fetchApiTokens}
+	provider={profile?.provider ?? 'local'}
+/>
 
 <!-- Avatar Cropper Modal -->
 <AvatarCropper

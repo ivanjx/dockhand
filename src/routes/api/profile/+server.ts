@@ -2,6 +2,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from '@sveltejs/kit';
 import { getUser, updateUser as dbUpdateUser, deleteUserSessions, userHasAdminRole } from '$lib/server/db';
 import { validateSession, hashPassword, isAuthEnabled } from '$lib/server/auth';
+import { invalidateTokenCacheForUser } from '$lib/server/api-tokens';
 
 // GET /api/profile - Get current user's profile
 export const GET: RequestHandler = async ({ cookies }) => {
@@ -85,8 +86,9 @@ export const PUT: RequestHandler = async ({ request, cookies }) => {
 			}
 
 			updateData.passwordHash = await hashPassword(data.newPassword);
-			// Invalidate other sessions on password change
-			deleteUserSessions(currentUser.id);
+			// Invalidate other sessions and token cache on password change
+			await deleteUserSessions(currentUser.id);
+			invalidateTokenCacheForUser(currentUser.id);
 		}
 
 		const user = await dbUpdateUser(currentUser.id, updateData);

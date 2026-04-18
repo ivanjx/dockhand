@@ -135,7 +135,9 @@
 			{ key: 'view', label: 'View audit logs' }
 		],
 		schedules: [
-			{ key: 'view', label: 'View schedules' }
+			{ key: 'view', label: 'View schedules' },
+			{ key: 'edit', label: 'Edit schedules' },
+			{ key: 'run', label: 'Run schedules' }
 		]
 	};
 
@@ -242,6 +244,7 @@
 		disconnect: Unplug,
 		edit: Pencil,
 		test: Play,
+		run: Play,
 		manage: Settings
 	};
 

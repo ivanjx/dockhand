@@ -867,6 +867,9 @@ services:
 		if (!newStackName.trim()) {
 			errors.stackName = 'Stack name is required';
 			hasErrors = true;
+		} else if (!/^[a-z0-9][a-z0-9_-]*$/.test(newStackName.trim())) {
+			errors.stackName = 'Must be lowercase, start with a letter or number, and only contain letters, numbers, hyphens, and underscores';
+			hasErrors = true;
 		}
 
 		const content = composeContent || defaultCompose;
@@ -903,6 +906,7 @@ services:
 		// Prepare env vars for creating - syncs variables and rawContent
 		const prepared = envVarsPanelRef?.prepareForSave() || { rawContent: '', variables: [] };
 
+		let response: Response | undefined;
 		try {
 			// Build request body
 			const requestBody: Record<string, unknown> = {
@@ -930,7 +934,7 @@ services:
 			}
 
 			// Create the stack
-			const response = await fetch(appendEnvParam('/api/stacks', envId), {
+			response = await fetch(appendEnvParam('/api/stacks', envId), {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(requestBody)
@@ -955,9 +959,10 @@ services:
 				message: e.message || 'An error occurred while creating the stack',
 				details: e.details
 			};
-			// If start=true, files were saved and stack is in DB — transition to edit mode
-			// so the user can fix and redeploy without leaving the modal
-			if (start) {
+			// Only transition to edit mode if the stack was actually persisted (response was ok
+			// but deploy failed). A 400 from validation means nothing was saved — stay in create
+			// mode so the name field remains visible and the user can fix the error.
+			if (start && response?.ok) {
 				mode = 'edit';
 				stackName = newStackName.trim();
 				onSuccess(); // refresh stack list so the new stack appears
