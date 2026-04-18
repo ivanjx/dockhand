@@ -129,14 +129,6 @@ export const DELETE: RequestHandler = async (event) => {
 			});
 		}
 
-		// Audit log - role removed
-		if (user) {
-			await auditUser(event, 'update', userId, user.username, {
-				roleRemoved: role?.name || `Role #${roleId}`,
-				roleId
-			});
-		}
-
 		return json({ success: true });
 	} catch (error) {
 		console.error('Failed to remove role:', error);
