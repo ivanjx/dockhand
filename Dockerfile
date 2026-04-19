@@ -77,8 +77,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy package files and install dependencies (--ignore-scripts blocks malicious postinstall hooks)
 COPY package.json package-lock.json ./
-RUN MAKEFLAGS="-j$(nproc)" npm ci --ignore-scripts \
-    && MAKEFLAGS="-j$(nproc)" npm rebuild better-sqlite3
+RUN MAKEFLAGS="-j$(nproc)" npm ci --ignore-scripts
 
 # Copy source code and build
 COPY . .
