@@ -3,6 +3,7 @@ import type { RequestHandler } from './$types';
 import { authorize } from '$lib/server/authorize';
 import { revokeApiToken } from '$lib/server/api-tokens';
 import { isAuthEnabled } from '$lib/server/auth';
+import { getRequestContext } from '$lib/server/request-context';
 import { audit } from '$lib/server/audit';
 
 /**
@@ -14,6 +15,12 @@ export const DELETE: RequestHandler = async (event) => {
 	const authEnabled = await isAuthEnabled();
 	if (!authEnabled) {
 		return json({ error: 'Authentication is not enabled' }, { status: 400 });
+	}
+
+	// Bearer tokens cannot manage tokens (prevent leaked token from revoking others)
+	const reqCtx = getRequestContext();
+	if (reqCtx?.authMethod === 'bearer') {
+		return json({ error: 'Token management requires a cookie session' }, { status: 403 });
 	}
 
 	const auth = await authorize(cookies);

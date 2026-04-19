@@ -1149,29 +1149,7 @@
 		}
 	}
 
-	interface PortMapping {
-		publicPort: number;
-		privatePort: number;
-		display: string;
-	}
-
-	function formatPorts(ports: ContainerInfo['ports']): PortMapping[] {
-		if (!ports || ports.length === 0) return [];
-		const seen = new Set<string>();
-		return ports
-			.filter(p => p.PublicPort)
-			.map(p => ({
-				publicPort: p.PublicPort,
-				privatePort: p.PrivatePort,
-				display: `${p.PublicPort}:${p.PrivatePort}`
-			}))
-			.filter(p => {
-				const key = p.display;
-				if (seen.has(key)) return false;
-				seen.add(key);
-				return true;
-			});
-	}
+	import { formatPorts, type PortMapping } from '$lib/utils/port-format';
 
 	function extractHostFromUrl(urlString: string): string | null {
 		if (!urlString) return null;
@@ -1823,7 +1801,7 @@
 								{@const memoryTooltip = stats.memoryCache > 0
 									? `${formatBytes(stats.memoryUsage)} / ${formatBytes(stats.memoryLimit)} (Total: ${formatBytes(stats.memoryRaw)} | Cache: ${formatBytes(stats.memoryCache)})`
 									: `${formatBytes(stats.memoryUsage)} / ${formatBytes(stats.memoryLimit)}`}
-								<span class="text-xs font-mono {stats.memoryPercent > 80 ? 'text-red-500' : stats.memoryPercent > 50 ? 'text-yellow-500' : 'text-muted-foreground'}" title={memoryTooltip}>{formatBytes(stats.memoryUsage)}</span>
+								<span class="text-xs font-mono {stats.memoryPercent > 80 ? 'text-red-500' : stats.memoryPercent > 50 ? 'text-yellow-500' : 'text-muted-foreground'}" title={memoryTooltip}>{formatBytes(stats.memoryUsage)}<span class="text-muted-foreground/50">/{formatBytes(stats.memoryLimit, 0)}</span></span>
 							{:else if container.state === 'running'}
 								<span class="text-xs text-muted-foreground/50">...</span>
 							{:else}
@@ -1883,7 +1861,7 @@
 							{@const remainingCount = ports.length - 1}
 							<div class="flex {compactPorts ? 'flex-nowrap' : 'flex-wrap'} gap-1">
 								{#each displayPorts as port}
-									{@const url = currentEnvDetails ? getPortUrl(port.publicPort) : null}
+									{@const url = !port.isRange && currentEnvDetails ? getPortUrl(port.publicPort) : null}
 									{#if url}
 										<a
 											href={url}

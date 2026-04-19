@@ -159,8 +159,8 @@ export async function authorize(cookies: Cookies): Promise<AuthorizationContext>
 			// Must be authenticated
 			if (!user) return false;
 
-			// Admins can access all environments
-			if (user.isAdmin) return true;
+			// Admins can access all environments (use fresh isAdmin, not cached user.isAdmin)
+			if (isAdmin) return true;
 
 			// In free edition, all authenticated users have full access
 			if (!enterprise) return true;
@@ -176,8 +176,8 @@ export async function authorize(cookies: Cookies): Promise<AuthorizationContext>
 			// Must be authenticated
 			if (!user) return [];
 
-			// Admins can access all environments
-			if (user.isAdmin) return null;
+			// Admins can access all environments (use fresh isAdmin, not cached user.isAdmin)
+			if (isAdmin) return null;
 
 			// In free edition, all authenticated users have full access
 			if (!enterprise) return null;
@@ -193,8 +193,8 @@ export async function authorize(cookies: Cookies): Promise<AuthorizationContext>
 			// Must be authenticated
 			if (!user) return false;
 
-			// Admins can always manage users
-			if (user.isAdmin) return true;
+			// Admins can always manage users (use fresh isAdmin, not cached user.isAdmin)
+			if (isAdmin) return true;
 
 			// In free edition, all authenticated users have full access
 			if (!enterprise) return true;

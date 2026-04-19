@@ -291,6 +291,7 @@
 							<Label for="mfaToken">Authentication code</Label>
 							<Input
 								id="mfaToken"
+								name="totp"
 								type="text"
 								placeholder="Enter code"
 								bind:value={mfaToken}

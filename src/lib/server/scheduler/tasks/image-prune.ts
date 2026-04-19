@@ -124,7 +124,7 @@ export async function runImagePrune(
 		// Send success notification only when something was actually cleaned up
 		if (imagesRemoved > 0) {
 			await sendEventNotification('image_prune_success', {
-				title: 'Image prune completed',
+				title: `Image prune completed — ${env.name}`,
 				message: `${imagesRemoved} unused images removed, ${formatBytes(spaceReclaimed)} disk space reclaimed`,
 				type: 'success'
 			}, envId);
@@ -142,7 +142,7 @@ export async function runImagePrune(
 
 		// Send failure notification
 		await sendEventNotification('image_prune_failed', {
-			title: 'Image prune failed',
+			title: `Image prune failed — ${env.name}`,
 			message: `Failed to prune images: ${error.message}`,
 			type: 'error'
 		}, envId);

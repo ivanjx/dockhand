@@ -1,12 +1,29 @@
 [
   {
+    "version": "1.0.26",
+    "date": "2026-04-19",
+    "changes": [
+      { "type": "feature", "text": "persist sort order across page navigation for all data grids (#861, #912)" },
+      { "type": "feature", "text": "show git repository URL and branch in git stack edit modal (#856)" },
+      { "type": "feature", "text": "show memory limit alongside usage in containers and stacks views (#893)" },
+      { "type": "feature", "text": "option to delete associated volumes when removing a stack (#655)" },
+      { "type": "feature", "text": "collapse consecutive port mappings into ranges in container list (#821)" },
+      { "type": "fix", "text": "bearer token authentication fails with enterprise license active" },
+      { "type": "fix", "text": "clicking stack name toggles stats accordion instead of just opening editor (#628)" },
+      { "type": "fix", "text": "scheduled image prune notifications missing environment name (#770)" },
+      { "type": "fix", "text": "Gotify, ntfy, Pushover, and webhook notifications missing environment name (#943)" },
+      { "type": "fix", "text": "MFA code field not recognized by Bitwarden and other password managers (#566)" }      
+    ],
+    "imageTag": "fnsys/dockhand:v1.0.26"
+  },
+  {
     "version": "1.0.25",
     "date": "2026-04-18",
     "comingSoon": false,
     "changes": [
       { "type": "feature", "text": "API token authentication — Bearer tokens for CI/CD pipelines and scripts" },
       { "type": "feature", "text": "Telegram topic support — send notifications to supergroup topics (#855)" },
-      { "type": "fix", "text": "allow removing healthcheck, ports, and honor startAfterUpdate=false during container edit (#892)" },
+{ "type": "fix", "text": "allow removing healthcheck, ports, and honor startAfterUpdate=false during container edit (#892)" },
       { "type": "fix", "text": "validate stack names and prevent broken DB entries on invalid input (#876)" },
       { "type": "fix", "text": "use per-environment timezone for schedule execution log timestamps (#882)" },
       { "type": "fix", "text": "\"Pull image before update\" and \"Start after update\" settings ignored (#909)" },

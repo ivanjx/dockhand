@@ -188,8 +188,10 @@
 					<Label>Verification code</Label>
 					<Input
 						bind:value={token}
+						name="totp"
 						placeholder="Enter 6-digit code"
 						maxlength={6}
+						autocomplete="one-time-code"
 					/>
 					<p class="text-xs text-muted-foreground">
 						Enter the code from your authenticator app to verify setup

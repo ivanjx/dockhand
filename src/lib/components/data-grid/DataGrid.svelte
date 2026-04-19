@@ -329,18 +329,40 @@
 		onExpandChange?.(key, nowExpanded);
 	}
 
+	// Sort persistence
+	const SORT_STORAGE_KEY = `dockhand-${gridId}-sort`;
+	let sortInitialized = false;
+
+	// Restore saved sort on mount
+	onMount(() => {
+		if (!onSortChange) return;
+		try {
+			const saved = localStorage.getItem(SORT_STORAGE_KEY);
+			if (saved) {
+				const parsed = JSON.parse(saved) as DataGridSortState;
+				if (parsed.field && parsed.direction) {
+					onSortChange(parsed);
+				}
+			}
+		} catch {}
+		sortInitialized = true;
+	});
+
+	// Persist sort state whenever it changes (after init)
+	$effect(() => {
+		if (!sortInitialized || !sortState) return;
+		try { localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(sortState)); } catch {}
+	});
+
 	// Sort helpers
 	function toggleSort(field: string) {
 		if (!onSortChange) return;
 
-		if (sortState?.field === field) {
-			onSortChange({
-				field,
-				direction: sortState.direction === 'asc' ? 'desc' : 'asc'
-			});
-		} else {
-			onSortChange({ field, direction: 'asc' });
-		}
+		const newState: DataGridSortState = sortState?.field === field
+			? { field, direction: sortState.direction === 'asc' ? 'desc' : 'asc' }
+			: { field, direction: 'asc' };
+
+		onSortChange(newState);
 	}
 
 	// Virtual scroll state
