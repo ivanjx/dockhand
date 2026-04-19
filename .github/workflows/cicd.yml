@@ -3,7 +3,7 @@ name: cicd
 on:
   workflow_dispatch:
   push:
-    branches: [ testing ]
+    branches: [ main ]
     paths:
       - '.github/workflows/cicd.yml'
       - 'Dockerfile'
