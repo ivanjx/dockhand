@@ -4,6 +4,7 @@
 	import * as Dialog from '$lib/components/ui/dialog';
 	import * as Select from '$lib/components/ui/select';
 	import { Label } from '$lib/components/ui/label';
+	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
 	import { TogglePill } from '$lib/components/ui/toggle-pill';
 	import { Loader2, GitBranch, RefreshCw, Webhook, Rocket, RefreshCcw, Copy, Check, XCircle, FolderGit2, Github, Key, KeyRound, Lock, FileText, HelpCircle, GripVertical, X, Download, Hammer, ArrowDownToLine, Zap } from 'lucide-svelte';
@@ -747,6 +748,19 @@
 					<p class="text-xs text-muted-foreground">This will be the name of the deployed stack</p>
 				{/if}
 			</div>
+
+			{#if gitStack && selectedRepo}
+				<div class="space-y-2">
+					<Label>Repository</Label>
+					<div class="flex items-center gap-2 text-xs text-muted-foreground bg-muted/50 rounded-md px-3 py-2">
+						<FolderGit2 class="w-3.5 h-3.5 shrink-0" />
+						<span class="truncate" title={selectedRepo.url}>{selectedRepo.url}</span>
+						{#if selectedRepo.branch}
+							<Badge variant="outline" class="text-2xs py-0 px-1.5 shrink-0">{selectedRepo.branch}</Badge>
+						{/if}
+					</div>
+				</div>
+			{/if}
 
 			<div class="space-y-2">
 				<Label for="compose-path">Compose file path</Label>
