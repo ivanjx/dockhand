@@ -1,0 +1,13 @@
+node_modules
+.svelte-kit
+dist
+build
+.vscode
+.idea
+.git*
+npm-debug.log
+bun-debug.log
+coverage
+Dockerfile*
+docker-compose*.yaml
+*.md

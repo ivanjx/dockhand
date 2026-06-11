@@ -35,9 +35,10 @@ import {
 	disconnectContainerFromNetwork,
 	recreateContainerFromInspect
 } from '../../docker';
+import { updateStackService } from '../../stacks';
 import { getScannerSettings, scanImage, type ScanResult, type VulnerabilitySeverity } from '../../scanner';
 import { sendEventNotification } from '../../notifications';
-import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer } from './update-utils';
+import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer, shouldProceedOnScanError } from './update-utils';
 import { isUpdateDisabledByLabel } from '../../container-labels';
 
 // =============================================================================
@@ -528,16 +529,20 @@ export async function runContainerUpdate(
 					}
 				} catch (scanError: any) {
 					log(`Scan failed: ${scanError.message}`);
-					log(`Removing temp image...`);
-					await removeTempImage(newImageId, envId);
+					if (!shouldProceedOnScanError(vulnerabilityCriteria)) {
+						log(`Removing temp image...`);
+						await removeTempImage(newImageId, envId);
 
-					await updateScheduleExecution(execution.id, {
-						status: 'failed',
-						completedAt: new Date().toISOString(),
-						duration: Date.now() - startTime,
-						errorMessage: `Vulnerability scan failed: ${scanError.message}`
-					});
-					return;
+						await updateScheduleExecution(execution.id, {
+							status: 'failed',
+							completedAt: new Date().toISOString(),
+							duration: Date.now() - startTime,
+							errorMessage: `Vulnerability scan failed: ${scanError.message}`
+						});
+						return;
+					}
+
+					log(`Continuing update because vulnerability criteria is set to never block`);
 				}
 
 				// Re-tag approved image to original
@@ -653,6 +658,29 @@ export async function recreateContainer(
 
 		const inspectData = await inspectContainer(container.id, envId) as any;
 		const imageName = imageNameOverride || inspectData.Config?.Image;
+		const labels = inspectData.Config?.Labels || {};
+		const stackName = labels['com.docker.compose.project'];
+		const serviceName = labels['com.docker.compose.service'];
+		const composeConfigPath = labels['com.docker.compose.project.config_files']
+			?.split(',')
+			.map((path: string) => path.trim())
+			.find(Boolean);
+
+		if (stackName && serviceName) {
+			log?.(`Updating stack service: ${stackName}/${serviceName}`);
+
+			const wasRunning = inspectData.State?.Running;
+			const result = await updateStackService(stackName, serviceName, envId, composeConfigPath, !wasRunning);
+
+			if (!result.success) {
+				const error = result.error || `Failed to update stack service ${stackName}/${serviceName}`;
+				log?.(`Stack service update failed: ${error}`);
+				return { success: false, error };
+			}
+
+			log?.(`Stack service updated successfully: ${stackName}/${serviceName}`);
+			return { success: true };
+		}
 
 		log?.(`Recreating container: ${containerName} (image: ${imageName})`);
 
@@ -663,4 +691,3 @@ export async function recreateContainer(
 		return { success: false, error: error.message };
 	}
 }
-

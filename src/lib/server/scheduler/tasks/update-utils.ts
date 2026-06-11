@@ -92,6 +92,15 @@ export function shouldBlockUpdate(
 }
 
 /**
+ * Determine whether an update should continue when scanning itself fails.
+ * The "never" policy disables vulnerability-based blocking, so scan errors
+ * should not stop the update flow.
+ */
+export function shouldProceedOnScanError(criteria: VulnerabilityCriteria): boolean {
+	return criteria === 'never';
+}
+
+/**
  * Check if a container is the Dockhand application itself.
  * Used to prevent Dockhand from updating its own container.
  */

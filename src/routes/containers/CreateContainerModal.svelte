@@ -114,6 +114,8 @@
 	let autoUpdateEnabled = $state(false);
 	let autoUpdateCronExpression = $state('0 3 * * *');
 	let vulnerabilityCriteria = $state<VulnerabilityCriteria>('never');
+	let scheduledStartEnabled = $state(false);
+	let scheduledStartCronExpression = $state('0 2 * * *');
 
 
 	// User/Group
@@ -502,6 +504,22 @@
 				}
 			}
 
+			if (scheduledStartEnabled) {
+				try {
+					const envParam = $currentEnvironment ? `?env=${$currentEnvironment.id}` : '';
+					await fetch(`/api/container-start/${encodeURIComponent(name.trim())}${envParam}`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({
+							enabled: scheduledStartEnabled,
+							cronExpression: scheduledStartCronExpression
+						})
+					});
+				} catch (err) {
+					console.error('Failed to save container start schedule:', err);
+				}
+			}
+
 			if (result.imagePulled) {
 				toast.success(`Container created (image ${image.trim()} was pulled automatically)`);
 			} else {
@@ -537,6 +555,8 @@
 		autoUpdateEnabled = false;
 		autoUpdateCronExpression = '0 3 * * *';
 		vulnerabilityCriteria = 'never';
+		scheduledStartEnabled = false;
+		scheduledStartCronExpression = '0 2 * * *';
 		errors = {};
 		selectedConfigSetId = '';
 		containerUser = '';
@@ -760,6 +780,8 @@
 				bind:autoUpdateEnabled
 				bind:autoUpdateCronExpression
 				bind:vulnerabilityCriteria
+				bind:scheduledStartEnabled
+				bind:scheduledStartCronExpression
 				{configSets}
 				bind:selectedConfigSetId
 				bind:errors

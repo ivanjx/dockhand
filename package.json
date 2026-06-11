@@ -5,7 +5,6 @@
 	"type": "module",
 	"scripts": {
 		"dev": "npx vite dev",
-		"prebuild": "npx license-checker --json --production | jq 'to_entries | map({name: (.key | split(\"@\")[0:-1] | join(\"@\")), version: (.key | split(\"@\")[-1]), license: .value.licenses, repository: .value.repository}) | sort_by(.name)' > src/lib/data/dependencies.json.tmp && mv src/lib/data/dependencies.json.tmp src/lib/data/dependencies.json || true",
 		"build": "npx vite build",
 		"start": "node ./server.js",
 		"preview": "node ./build/index.js",

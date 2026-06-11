@@ -4,7 +4,7 @@ import {
 	removeContainer,
 	getContainerLogs
 } from '$lib/server/docker';
-import { deleteAutoUpdateSchedule, getAutoUpdateSetting, getSecretKeysToMask, removePendingContainerUpdate } from '$lib/server/db';
+import { deleteAutoUpdateSchedule, getAutoUpdateSetting, deleteContainerStartSchedule, getContainerStartSchedule, getSecretKeysToMask, removePendingContainerUpdate } from '$lib/server/db';
 import { getStackComposeFile } from '$lib/server/stacks';
 import { authorize } from '$lib/server/authorize';
 import { auditContainer } from '$lib/server/audit';
@@ -114,6 +114,17 @@ export const DELETE: RequestHandler = async (event) => {
 		} catch (error) {
 			console.error('Failed to cleanup auto-update schedule:', error);
 			// Don't fail the deletion if schedule cleanup fails
+		}
+
+		// Clean up container start schedule if exists
+		try {
+			const setting = await getContainerStartSchedule(containerName, envIdNum);
+			if (setting) {
+				unregisterSchedule(setting.id, 'container_start');
+				await deleteContainerStartSchedule(containerName, envIdNum);
+			}
+		} catch (error) {
+			console.error('Failed to cleanup container start schedule:', error);
 		}
 
 		// Clean up pending container update if exists
