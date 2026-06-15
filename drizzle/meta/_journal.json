@@ -57,6 +57,13 @@
       "when": 1781164700818,
       "tag": "0007_simple_unicorn",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1781556896222,
+      "tag": "0008_upstream_add_synced_files_sqlite",
+      "breakpoints": true
     }
   ]
 }
