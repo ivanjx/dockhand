@@ -8,13 +8,14 @@
 	import { TogglePill, ToggleSwitch } from '$lib/components/ui/toggle-pill';
 	import CronEditor from '$lib/components/cron-editor.svelte';
 	import TimezoneSelector from '$lib/components/TimezoneSelector.svelte';
-	import { Eye, Bell, Database, Calendar, ShieldCheck, FileText, AlertTriangle, HelpCircle, Globe, Activity, Clock, Info, Save, RotateCcw, LayoutDashboard, Tags } from 'lucide-svelte';
+	import { Eye, Bell, Database, Calendar, ShieldCheck, FileText, AlertTriangle, HelpCircle, Globe, Activity, Clock, Info, Save, RotateCcw, LayoutDashboard, Tags, ChevronRight, ChevronDown } from 'lucide-svelte';
 	import CodeEditor from '$lib/components/CodeEditor.svelte';
 	import { appSettings, type DateFormat, type DownloadFormat, type EventCollectionMode, type LabelFilterMode } from '$lib/stores/settings';
 	import { canAccess, authStore } from '$lib/stores/auth';
 	import { toast } from 'svelte-sonner';
 	import ThemeSelector from '$lib/components/ThemeSelector.svelte';
 	import AnimateIconsToggle from '$lib/components/AnimateIconsToggle.svelte';
+	import ColoredActionsToggle from '$lib/components/ColoredActionsToggle.svelte';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 
 	// General settings state - these derive from the store
@@ -23,6 +24,8 @@
 	let highlightUpdates = $derived($appSettings.highlightUpdates);
 	let compactPorts = $derived($appSettings.compactPorts);
 	let showExposedPorts = $derived($appSettings.showExposedPorts);
+	let honorProxyLabels = $derived($appSettings.honorProxyLabels);
+	let showImageChangelogLinks = $derived($appSettings.showImageChangelogLinks);
 	let timeFormat = $derived($appSettings.timeFormat);
 	let dateFormat = $derived($appSettings.dateFormat);
 	let downloadFormat = $derived($appSettings.downloadFormat);
@@ -30,6 +33,9 @@
 	let defaultTrivyArgs = $derived($appSettings.defaultTrivyArgs);
 	let defaultGrypeImage = $derived($appSettings.defaultGrypeImage);
 	let defaultTrivyImage = $derived($appSettings.defaultTrivyImage);
+	let defaultScannerNetworkMode = $derived($appSettings.defaultScannerNetworkMode);
+	let defaultScannerDns = $derived($appSettings.defaultScannerDns);
+	let showAdvancedScannerSettings = $state(false);
 	let defaultComposeTemplate = $derived($appSettings.defaultComposeTemplate);
 	let labelFilterMode = $derived($appSettings.labelFilterMode);
 	let composeTemplateWIP = $state('');
@@ -116,6 +122,18 @@ services:
 		{ value: 'YYYY-MM-DD', label: 'YYYY-MM-DD', example: '2024-12-31' }
 	];
 
+	const downloadFormatOptions: { value: DownloadFormat; label: string; description: string }[] = [
+		{ value: 'tar', label: 'tar', description: 'Uncompressed archive' },
+		{ value: 'tar.gz', label: 'tar.gz', description: 'Gzip-compressed archive' },
+		{ value: 'raw', label: 'No archive', description: 'Single file, raw bytes' }
+	];
+
+	const downloadFormatLabel: Record<DownloadFormat, string> = {
+		tar: 'tar',
+		'tar.gz': 'tar.gz',
+		raw: 'No archive'
+	};
+
 	function handleScheduleRetentionChange(e: Event) {
 		const value = Math.max(1, Math.min(365, parseInt((e.target as HTMLInputElement).value) || 30));
 		appSettings.setScheduleRetentionDays(value);
@@ -190,6 +208,29 @@ services:
 		if (value !== defaultTrivyArgs) {
 			appSettings.setDefaultTrivyArgs(value);
 			toast.success('Trivy default arguments updated');
+		}
+	}
+
+	function handleScannerNetworkModeChange(value: string) {
+		const trimmed = (value ?? '').trim();
+		if (trimmed !== defaultScannerNetworkMode) {
+			appSettings.setDefaultScannerNetworkMode(trimmed);
+			toast.success(trimmed ? `Scanner network mode set to ${trimmed}` : 'Scanner network mode cleared');
+		}
+	}
+
+	function handleScannerDnsBlur(e: Event) {
+		const raw = (e.target as HTMLInputElement).value.trim();
+		const cleaned = raw
+			.split(',')
+			.map((s) => s.trim())
+			.filter(Boolean);
+		const sameAsCurrent =
+			cleaned.length === defaultScannerDns.length &&
+			cleaned.every((v, i) => v === defaultScannerDns[i]);
+		if (!sameAsCurrent) {
+			appSettings.setDefaultScannerDns(cleaned);
+			toast.success(cleaned.length ? `Scanner DNS set to ${cleaned.join(', ')}` : 'Scanner DNS cleared');
 		}
 	}
 
@@ -290,6 +331,28 @@ services:
 							</div>
 							<div class="space-y-1">
 								<div class="flex items-center gap-3">
+									<Label>Show changelog links</Label>
+									<Tooltip.Root>
+										<Tooltip.Trigger>
+											<HelpCircle class="w-3.5 h-3.5 text-muted-foreground" />
+										</Tooltip.Trigger>
+										<Tooltip.Content side="top" class="w-96 max-w-[90vw]">
+											<p>Surface a release-notes link next to the image name on rows with updates available. The link is resolved from the image's <code>org.opencontainers.image.source</code> label, from the <code>ghcr.io</code> registry path, or from an explicit <code>dockhand.changelog.url</code> label override.</p>
+										</Tooltip.Content>
+									</Tooltip.Root>
+									<TogglePill
+										checked={showImageChangelogLinks}
+										onchange={(checked) => {
+											appSettings.setShowImageChangelogLinks(checked);
+											toast.success(checked ? 'Changelog links shown' : 'Changelog links hidden');
+										}}
+										disabled={!$canAccess('settings', 'edit')}
+									/>
+								</div>
+								<p class="text-xs text-muted-foreground">Show a release-notes icon next to images with updates available</p>
+							</div>
+							<div class="space-y-1">
+								<div class="flex items-center gap-3">
 									<Label>Compact port display</Label>
 									<TogglePill
 										checked={compactPorts}
@@ -309,7 +372,7 @@ services:
 										<Tooltip.Trigger>
 											<HelpCircle class="w-3.5 h-3.5 text-muted-foreground" />
 										</Tooltip.Trigger>
-										<Tooltip.Content side="top" class="max-w-xs">
+										<Tooltip.Content side="top" class="w-96 max-w-[90vw]">
 											<p>Shows internal container ports (from EXPOSE directives) that are not published to the host. These appear in the container list with an amber badge to distinguish them from published port mappings.</p>
 										</Tooltip.Content>
 									</Tooltip.Root>
@@ -323,6 +386,28 @@ services:
 									/>
 								</div>
 								<p class="text-xs text-muted-foreground">Display internal container ports in the container list grid</p>
+							</div>
+							<div class="space-y-1">
+								<div class="flex items-center gap-3">
+									<Label>Honor Traefik/Pangolin labels</Label>
+									<Tooltip.Root>
+										<Tooltip.Trigger>
+											<HelpCircle class="w-3.5 h-3.5 text-muted-foreground" />
+										</Tooltip.Trigger>
+										<Tooltip.Content side="top" class="w-96 max-w-[90vw]">
+											<p>Parse <code>traefik.http.routers.&lt;name&gt;.rule</code>, <code>pangolin.public-resources.&lt;name&gt;.full-domain</code>, and <code>pangolin.private-resources.&lt;name&gt;.full-domain</code> labels and surface the resulting URLs as clickable pills next to ports. When off, only explicit <code>dockhand.url</code> labels are shown.</p>
+										</Tooltip.Content>
+									</Tooltip.Root>
+									<TogglePill
+										checked={honorProxyLabels}
+										onchange={(checked) => {
+											appSettings.setHonorProxyLabels(checked);
+											toast.success(checked ? 'Proxy labels honored' : 'Proxy labels ignored');
+										}}
+										disabled={!$canAccess('settings', 'edit')}
+									/>
+								</div>
+								<p class="text-xs text-muted-foreground">Show URLs inferred from Traefik and Pangolin labels alongside dockhand.url</p>
 							</div>
 							<div class="space-y-1">
 								<div class="flex items-center gap-3">
@@ -376,6 +461,7 @@ services:
 						<!-- Right column: Theme settings (always shown, with hint when auth enabled) -->
 						<div class="space-y-4">
 							<ThemeSelector />
+							<ColoredActionsToggle />
 							<AnimateIconsToggle />
 							{#if $authStore.authEnabled}
 								<div class="text-xs text-muted-foreground flex items-start gap-1.5 mt-2 p-2 bg-muted/50 rounded-md">
@@ -470,18 +556,34 @@ services:
 							<div class="space-y-1">
 								<div class="flex items-center gap-3">
 									<Label>Download format</Label>
-									<ToggleSwitch
+									<Select.Root
+										type="single"
 										value={downloadFormat}
-										leftValue="tar"
-										rightValue="tar.gz"
-										onchange={(newFormat) => {
-											appSettings.setDownloadFormat(newFormat as DownloadFormat);
-											toast.success(`Download format set to ${newFormat}`);
+										onValueChange={(value) => {
+											if (value) {
+												appSettings.setDownloadFormat(value as DownloadFormat);
+												toast.success(`Download format set to ${downloadFormatLabel[value as DownloadFormat]}`);
+											}
 										}}
 										disabled={!$canAccess('settings', 'edit')}
-									/>
+									>
+										<Select.Trigger class="w-[180px]">
+											<FileText class="w-4 h-4 mr-2" />
+											<span>{downloadFormatLabel[downloadFormat]}</span>
+										</Select.Trigger>
+										<Select.Content>
+											{#each downloadFormatOptions as option}
+												<Select.Item value={option.value}>
+													<div class="flex items-center justify-between w-full gap-4">
+														<span>{option.label}</span>
+														<span class="text-xs text-muted-foreground">{option.description}</span>
+													</div>
+												</Select.Item>
+											{/each}
+										</Select.Content>
+									</Select.Root>
 								</div>
-								<p class="text-xs text-muted-foreground">Archive format when downloading files from containers</p>
+								<p class="text-xs text-muted-foreground">Format when downloading files from containers or volumes. "No archive" emits raw bytes for single files; directories still download as tar.</p>
 							</div>
 						</div>
 						<div class="space-y-4">
@@ -597,6 +699,51 @@ services:
 						/>
 						<p class="text-xs text-muted-foreground">Use <code class="bg-muted px-1 rounded">{'{image}'}</code> as placeholder for the image name</p>
 					</div>
+					<div class="pt-2">
+						<button
+							type="button"
+							class="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1 select-none"
+							onclick={() => (showAdvancedScannerSettings = !showAdvancedScannerSettings)}
+						>
+							{#if showAdvancedScannerSettings}
+								<ChevronDown class="w-3.5 h-3.5" />
+							{:else}
+								<ChevronRight class="w-3.5 h-3.5" />
+							{/if}
+							Advanced settings
+						</button>
+					</div>
+					{#if showAdvancedScannerSettings}
+						<div class="space-y-2">
+							<Label for="scanner-network-mode">Network mode</Label>
+							<Select.Root
+								type="single"
+								value={defaultScannerNetworkMode}
+								onValueChange={handleScannerNetworkModeChange}
+							>
+								<Select.Trigger id="scanner-network-mode" class="w-full" disabled={!$canAccess('settings', 'edit')}>
+									<span>{defaultScannerNetworkMode || 'Default (auto-detect)'}</span>
+								</Select.Trigger>
+								<Select.Content>
+									<Select.Item value="">Default (auto-detect)</Select.Item>
+									<Select.Item value="host">host</Select.Item>
+									<Select.Item value="bridge">bridge</Select.Item>
+									<Select.Item value="none">none</Select.Item>
+								</Select.Content>
+							</Select.Root>
+							<p class="text-xs text-muted-foreground">Override the Docker network mode for vulnerability scanner containers. Use <code class="bg-muted px-1 rounded">host</code> on hosts where the default bridge can't reach the internet (e.g. iptables disabled, SELinux restricted).</p>
+						</div>
+						<div class="space-y-2">
+							<Label for="scanner-dns">DNS servers</Label>
+							<Input
+								id="scanner-dns"
+								value={defaultScannerDns.join(', ')}
+								onblur={handleScannerDnsBlur}
+								disabled={!$canAccess('settings', 'edit')}
+							/>
+							<p class="text-xs text-muted-foreground">Comma-separated DNS IPs for scanner containers. Empty = inherit from the Docker daemon.</p>
+						</div>
+					{/if}
 					<div class="pt-2 border-t">
 						<div class="flex items-center justify-between">
 							<div>
@@ -808,9 +955,6 @@ services:
 								onchange={handleScannerCleanupEnabledChange}
 								disabled={!$canAccess('settings', 'edit')}
 							/>
-						</div>
-						<p class="text-xs text-muted-foreground">Remove cached vulnerability databases to reclaim disk space</p>
-						<div class="flex items-center gap-2 mt-2">
 							<div class="ml-auto">
 								<CronEditor
 									value={scannerCleanupCron}
@@ -819,6 +963,29 @@ services:
 								/>
 							</div>
 						</div>
+						<p class="text-xs text-muted-foreground">Remove cached vulnerability databases to reclaim disk space</p>
+					</div>
+					<div class="space-y-1 pt-2 border-t">
+						<div class="flex items-center gap-3">
+							<Label>Protect scanner images from prune</Label>
+							<Tooltip.Root>
+								<Tooltip.Trigger>
+									<HelpCircle class="w-3.5 h-3.5 text-muted-foreground" />
+								</Tooltip.Trigger>
+								<Tooltip.Content side="top" class="w-96 max-w-[90vw]">
+									<p>When ON, "Prune all unused" skips Dockhand's grype and trivy scanner images so the next scan doesn't have to re-pull them (and re-download the ~100MB vuln database). When OFF, prune behaves like vanilla Docker and may remove them.</p>
+								</Tooltip.Content>
+							</Tooltip.Root>
+							<TogglePill
+								checked={$appSettings.protectScannerImages}
+								onchange={(checked) => {
+									appSettings.setProtectScannerImages(checked);
+									toast.success(checked ? 'Scanner images will be skipped during prune' : 'Scanner images will be pruned with everything else');
+								}}
+								disabled={!$canAccess('settings', 'edit')}
+							/>
+						</div>
+						<p class="text-xs text-muted-foreground">Skip grype and trivy images during "Prune all unused"</p>
 					</div>
 				</Card.Content>
 			</Card.Root>

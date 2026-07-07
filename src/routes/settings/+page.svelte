@@ -91,31 +91,31 @@
 			</Tabs.Trigger>
 		</Tabs.List>
 
-		<Tabs.Content value="general" class="flex-1 min-h-0 overflow-y-auto">
+		<Tabs.Content value="general" class="flex-1 min-h-0 overflow-y-auto pr-3">
 			{#if activeTab === 'general'}<GeneralTab />{/if}
 		</Tabs.Content>
 
-		<Tabs.Content value="environments" class="flex-1 min-h-0 overflow-y-auto">
+		<Tabs.Content value="environments" class="flex-1 min-h-0 overflow-y-auto pr-3">
 			{#if activeTab === 'environments'}<EnvironmentsTab {editEnvId} {newEnv} />{/if}
 		</Tabs.Content>
 
-		<Tabs.Content value="labels" class="flex-1 min-h-0 overflow-y-auto">
+		<Tabs.Content value="labels" class="flex-1 min-h-0 overflow-y-auto pr-3">
 			{#if activeTab === 'labels'}<LabelsTab />{/if}
 		</Tabs.Content>
 
-		<Tabs.Content value="registries" class="flex-1 min-h-0 overflow-y-auto">
+		<Tabs.Content value="registries" class="flex-1 min-h-0 overflow-y-auto pr-3">
 			{#if activeTab === 'registries'}<RegistriesTab />{/if}
 		</Tabs.Content>
 
-		<Tabs.Content value="git" class="flex-1 min-h-0 overflow-y-auto">
+		<Tabs.Content value="git" class="flex-1 min-h-0 overflow-y-auto pr-3">
 			{#if activeTab === 'git'}<GitTab />{/if}
 		</Tabs.Content>
 
-		<Tabs.Content value="config-sets" class="flex-1 min-h-0 overflow-y-auto">
+		<Tabs.Content value="config-sets" class="flex-1 min-h-0 overflow-y-auto pr-3">
 			{#if activeTab === 'config-sets'}<ConfigSetsTab />{/if}
 		</Tabs.Content>
 
-		<Tabs.Content value="notifications" class="flex-1 min-h-0 overflow-y-auto">
+		<Tabs.Content value="notifications" class="flex-1 min-h-0 overflow-y-auto pr-3">
 			{#if activeTab === 'notifications'}<NotificationsTab />{/if}
 		</Tabs.Content>
 
@@ -123,11 +123,11 @@
 			{#if activeTab === 'auth'}<AuthTab onTabChange={handleTabChange} />{/if}
 		</Tabs.Content>
 
-		<Tabs.Content value="license" class="flex-1 min-h-0 overflow-y-auto">
+		<Tabs.Content value="license" class="flex-1 min-h-0 overflow-y-auto pr-3">
 			{#if activeTab === 'license'}<LicenseTab />{/if}
 		</Tabs.Content>
 
-		<Tabs.Content value="about" class="flex-1 min-h-0 overflow-y-auto">
+		<Tabs.Content value="about" class="flex-1 min-h-0 overflow-y-auto pr-3">
 			{#if activeTab === 'about'}<AboutTab />{/if}
 		</Tabs.Content>
 	</Tabs.Root>

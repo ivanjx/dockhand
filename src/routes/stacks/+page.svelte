@@ -18,6 +18,9 @@
 	import { Play, Square, Trash2, Plus, ArrowBigDown, Search, Pencil, ExternalLink, GitBranch, RefreshCw, Loader2, FileCode, FileText, FileOutput, Box, RotateCcw, ScrollText, Terminal, Eye, Network, HardDrive, Heart, HeartPulse, HeartOff, ChevronsUpDown, ChevronsDownUp, Rocket, AlertTriangle, X, Layers, Pause, CircleDashed, Skull, FolderOpen, Variable, Clock, RotateCw, Import, Ship, Cable, LayoutPanelLeft, Rows3, GripVertical, Globe } from 'lucide-svelte';
 	import { formatPorts } from '$lib/utils/port-format';
 	import { parseCustomUrl } from '$lib/utils/custom-url';
+	import { extractTraefikUrls } from '$lib/utils/traefik-urls';
+	import { extractPangolinUrls } from '$lib/utils/pangolin-urls';
+	import { appSettings } from '$lib/stores/settings';
 	import ConfirmPopover from '$lib/components/ConfirmPopover.svelte';
 	import BatchOperationModal from '$lib/components/BatchOperationModal.svelte';
 	import type { ComposeStackInfo, ContainerStats } from '$lib/types';
@@ -1747,7 +1750,7 @@
 								title="Edit git stack"
 								class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
 							>
-								<Pencil class="w-3 h-3 text-muted-foreground hover:text-purple-500" />
+								<Pencil class="grid-action-icon grid-action-edit text-muted-foreground hover:text-purple-500" />
 							</button>
 							<GitDeployProgressPopover
 								stackId={source.gitStack.id}
@@ -1760,7 +1763,7 @@
 										title="Deploy"
 										class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
 									>
-										<Rocket class="w-3 h-3 text-muted-foreground hover:text-violet-500" />
+										<Rocket class="grid-action-icon grid-action-start text-muted-foreground hover:text-violet-500" />
 									</button>
 								{/snippet}
 							</GitDeployProgressPopover>
@@ -1777,7 +1780,7 @@
 											title="Sync from Git"
 											class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
 										>
-											<RefreshCw class="w-3 h-3 text-muted-foreground hover:text-purple-500" />
+											<RefreshCw class="grid-action-icon grid-action-restart text-muted-foreground hover:text-purple-500" />
 										</button>
 									{/snippet}
 								</GitDeployProgressPopover>
@@ -1790,7 +1793,7 @@
 										title="Edit git stack"
 										class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
 									>
-										<Pencil class="w-3 h-3 text-muted-foreground hover:text-purple-500" />
+										<Pencil class="grid-action-icon grid-action-edit text-muted-foreground hover:text-purple-500" />
 									</button>
 								{:else}
 									<!-- Internal stacks (including those needing file location) -->
@@ -1800,7 +1803,7 @@
 										title="Edit"
 										class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
 									>
-										<Pencil class="w-3 h-3 text-muted-foreground hover:text-blue-500" />
+										<Pencil class="grid-action-icon grid-action-edit text-muted-foreground hover:text-blue-500" />
 									</button>
 								{/if}
 							{/if}
@@ -1811,7 +1814,7 @@
 									title="View logs"
 									class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
 								>
-									<ScrollText class="w-3 h-3 text-muted-foreground hover:text-blue-500" />
+									<ScrollText class="grid-action-icon grid-action-logs text-muted-foreground hover:text-blue-500" />
 								</button>
 							{/if}
 							{#if source.sourceType !== 'git' && source.sourceType !== 'external' && $canAccess('stacks', 'start')}
@@ -1822,13 +1825,13 @@
 									onDeploy={(options) => redeployStack(stack.name, options)}
 								>
 									{#snippet children()}
-										<Rocket class="w-3 h-3 text-muted-foreground hover:text-violet-500" />
+										<Rocket class="grid-action-icon grid-action-start text-muted-foreground hover:text-violet-500" />
 									{/snippet}
 								</RedeployPopover>
 							{/if}
 							{#if stackActionLoading === stack.name}
 								<div class="p-1">
-									<Loader2 class="w-3 h-3 animate-spin text-muted-foreground" />
+									<Loader2 class="grid-action-icon animate-spin text-muted-foreground" />
 								</div>
 							{:else if stack.status !== 'running' && stack.status !== 'partial' && stack.status !== 'restarting'}
 								{#if $canAccess('stacks', 'start')}
@@ -1838,7 +1841,7 @@
 										title="Start"
 										class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
 									>
-										<Play class="w-3 h-3 text-muted-foreground hover:text-green-500" />
+										<Play class="grid-action-icon grid-action-start text-muted-foreground hover:text-green-500" />
 									</button>
 								{/if}
 							{:else}
@@ -1853,7 +1856,7 @@
 													onclick={(e) => { e.stopPropagation(); restartPopoverOpen[stack.name] = !restartPopoverOpen[stack.name]; }}
 													class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer inline-flex items-center"
 												>
-													<RotateCcw class="w-3 h-3 {restartPopoverOpen[stack.name] ? 'text-amber-500' : 'text-muted-foreground hover:text-amber-500'}" />
+													<RotateCcw class="grid-action-icon grid-action-restart {restartPopoverOpen[stack.name] ? 'text-amber-500' : 'text-muted-foreground hover:text-amber-500'}" />
 												</button>
 											{/snippet}
 										</Popover.Trigger>
@@ -1888,7 +1891,7 @@
 										onOpenChange={(open) => confirmStopName = open ? stack.name : null}
 									>
 										{#snippet children({ open })}
-											<Square class="w-3 h-3 {open ? 'text-destructive' : 'text-muted-foreground hover:text-destructive'}" />
+											<Square class="grid-action-icon grid-action-stop {open ? 'text-destructive' : 'text-muted-foreground hover:text-destructive'}" />
 										{/snippet}
 									</ConfirmPopover>
 								{/if}
@@ -1905,7 +1908,7 @@
 								onOpenChange={(open) => confirmDownName = open ? stack.name : null}
 							>
 								{#snippet children({ open })}
-									<ArrowBigDown class="w-3 h-3 {stackDownLoading === stack.name ? 'animate-bounce text-orange-500' : open ? 'text-orange-500' : 'text-muted-foreground hover:text-orange-500'}" />
+									<ArrowBigDown class="grid-action-icon grid-action-stop {stackDownLoading === stack.name ? 'animate-bounce text-orange-500' : open ? 'text-orange-500' : 'text-muted-foreground hover:text-orange-500'}" />
 								{/snippet}
 							</ConfirmPopover>
 						{/if}
@@ -1926,7 +1929,7 @@
 									</label>
 								{/snippet}
 								{#snippet children({ open })}
-									<Trash2 class="w-3 h-3 {open ? 'text-destructive' : 'text-muted-foreground hover:text-destructive'}" />
+									<Trash2 class="grid-action-icon grid-action-delete {open ? 'text-destructive' : 'text-muted-foreground hover:text-destructive'}" />
 								{/snippet}
 							</ConfirmPopover>
 						{/if}
@@ -2059,6 +2062,38 @@
 													<ExternalLink class="w-2.5 h-2.5 opacity-60" />
 												</a>
 											{/if}
+										{:else}
+											<!-- Traefik fallback URLs (#2). dockhand.url suppresses these, as does the
+											     "Honor Traefik/Pangolin labels" setting being off. -->
+											{#each ($appSettings.honorProxyLabels ? extractTraefikUrls(container.labels) : []) as t}
+												<a
+													href={t.url}
+													target="_blank"
+													rel="noopener noreferrer"
+													onclick={(e) => e.stopPropagation()}
+													class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+													title="Traefik router {t.router} → {t.url}"
+												>
+													<Globe class="w-2.5 h-2.5" />
+													<span class="max-w-[120px] truncate">{t.url.replace(/^https?:\/\//, '')}</span>
+													<ExternalLink class="w-2.5 h-2.5 opacity-60" />
+												</a>
+											{/each}
+											<!-- Pangolin fallback URLs (#2 follow-up). Same suppression rules. -->
+											{#each ($appSettings.honorProxyLabels ? extractPangolinUrls(container.labels) : []) as p}
+												<a
+													href={p.url}
+													target="_blank"
+													rel="noopener noreferrer"
+													onclick={(e) => e.stopPropagation()}
+													class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+													title="Pangolin resource {p.resource} → {p.url}"
+												>
+													<Globe class="w-2.5 h-2.5" />
+													<span class="max-w-[120px] truncate">{p.displayName ?? p.url.replace(/^https?:\/\//, '')}</span>
+													<ExternalLink class="w-2.5 h-2.5 opacity-60" />
+												</a>
+											{/each}
 										{/if}
 										<!-- Clickable ports with range collapsing -->
 										{#if container.ports.length > 0}

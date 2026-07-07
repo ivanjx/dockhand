@@ -16,16 +16,19 @@ import {
 } from './docker';
 import { getEnvironment, getEnvSetting, getSetting } from './db';
 import { sendEventNotification } from './notifications';
+import { detectRemoteSocketPath } from './scanner-socket-detect';
 import {
 	getHostDockerSocket,
 	getHostDataDir,
 	extractUidFromSocketPath,
 	getOwnDockerHost,
 	getOwnExtraHosts,
-	getOwnNetworkMode
+	getOwnNetworkMode,
+	getOwnAllNetworks
 } from './host-path';
 import { resolve } from 'node:path';
 import { mkdir, chown, rm } from 'node:fs/promises';
+import { resolveScannerOverrides } from '$lib/utils/scanner-overrides';
 
 export type ScannerType = 'none' | 'grype' | 'trivy' | 'both';
 
@@ -162,24 +165,47 @@ export interface ScanProgress {
 	output?: string; // Line of scanner output
 }
 
+function parseDnsSetting(raw: string | null | undefined): string[] {
+	if (!raw) return [];
+	const trimmed = raw.trim();
+	if (!trimmed) return [];
+	// Tolerate either JSON-array storage (preferred) or comma-separated string
+	// (defensive — UI submits JSON, but legacy / hand-edited values may exist).
+	if (trimmed.startsWith('[')) {
+		try {
+			const parsed = JSON.parse(trimmed);
+			return Array.isArray(parsed) ? parsed.filter((v) => typeof v === 'string') : [];
+		} catch {
+			return [];
+		}
+	}
+	return trimmed.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
 // Get global default scanner CLI args and images from general settings (or fallback to hardcoded defaults)
 export async function getGlobalScannerDefaults(): Promise<{
 	grypeArgs: string;
 	trivyArgs: string;
 	grypeImage: string;
 	trivyImage: string;
+	networkMode: string;
+	dns: string[];
 }> {
-	const [grypeArgs, trivyArgs, grypeImage, trivyImage] = await Promise.all([
+	const [grypeArgs, trivyArgs, grypeImage, trivyImage, networkMode, dns] = await Promise.all([
 		getSetting('default_grype_args'),
 		getSetting('default_trivy_args'),
 		getSetting('default_grype_image'),
-		getSetting('default_trivy_image')
+		getSetting('default_trivy_image'),
+		getSetting('default_scanner_network_mode'),
+		getSetting('default_scanner_dns')
 	]);
 	return {
 		grypeArgs: grypeArgs ?? DEFAULT_GRYPE_ARGS,
 		trivyArgs: trivyArgs ?? DEFAULT_TRIVY_ARGS,
 		grypeImage: grypeImage ?? DEFAULT_GRYPE_IMAGE,
-		trivyImage: trivyImage ?? DEFAULT_TRIVY_IMAGE
+		trivyImage: trivyImage ?? DEFAULT_TRIVY_IMAGE,
+		networkMode: networkMode ?? '',
+		dns: parseDnsSetting(dns)
 	};
 }
 
@@ -632,7 +658,7 @@ async function runScannerContainerCore(
 	let rootlessUid: string | undefined;
 	let scannerNetworkMode: string | undefined;
 	let scannerDockerHost: string | undefined;
-	const scannerExtraHosts = !isHawser ? getOwnExtraHosts() ?? undefined : undefined;
+	let scannerExtraHosts = !isHawser ? getOwnExtraHosts() ?? undefined : undefined;
 
 	// Check if Dockhand itself uses TCP to reach Docker (e.g., socket proxy).
 	// Detected at startup from Dockhand's own container inspect data.
@@ -641,9 +667,19 @@ async function runScannerContainerCore(
 	const ownDockerHost = getOwnDockerHost();
 
 	if (!isHawser && ownDockerHost?.startsWith('tcp://')) {
-		// TCP mode: scanner uses the same DOCKER_HOST + network as Dockhand
+		// TCP mode: scanner uses the same DOCKER_HOST + network as Dockhand.
 		scannerDockerHost = ownDockerHost;
 		scannerNetworkMode = getOwnNetworkMode() ?? undefined;
+		const allNets = getOwnAllNetworks();
+		if (allNets.length > 1) {
+			// Multiple custom networks — if socket-proxy lives on a network
+			// other than the one we picked, DNS will fail. Make the choice
+			// visible so users with split-network setups can colocate
+			// socket-proxy with Dockhand on the primary network (#1011).
+			console.warn(
+				`[Scanner] Dockhand is on multiple networks (${allNets.join(', ')}); scanner will only join "${scannerNetworkMode}". If DOCKER_HOST=${scannerDockerHost} fails to resolve, put socket-proxy on this network.`
+			);
+		}
 		console.log(
 			`[Scanner] TCP mode (from container inspect) - DOCKER_HOST=${scannerDockerHost}, network=${scannerNetworkMode ?? 'default'}`
 		);
@@ -651,11 +687,15 @@ async function runScannerContainerCore(
 			console.log(`[Scanner] Reusing ExtraHosts from Dockhand: ${scannerExtraHosts.join(', ')}`);
 		}
 	} else if (isHawser) {
-		// Hawser: scanner runs on remote host, uses remote host's standard Docker socket
-		hostSocketPath = '/var/run/docker.sock';
-		console.log(`[Scanner] Remote scan via Hawser (${connectionType}) - using standard socket path`);
+		// Hawser: scanner runs on remote host. Detect the actual socket path
+		// because rootless Podman uses /run/user/UID/podman/podman.sock, not
+		// /var/run/docker.sock (#1076). Falls back to the standard path on
+		// detection failure — no regression for stock Docker hosts.
+		hostSocketPath = await detectRemoteSocketPath(envId);
+		console.log(`[Scanner] Remote scan via Hawser (${connectionType}) - detected socket path: ${hostSocketPath}`);
 	} else {
-		// Local socket — detect host socket path (handles rootless Docker)
+		// Local socket — handles rootless Docker and direct-TCP envs
+		// (the latter via the same socket bind; see #1195, #1076).
 		hostSocketPath = getHostDockerSocket();
 		console.log(`[Scanner] Local socket scan (${connectionType || 'default'}) - detected host Docker socket: ${hostSocketPath}`);
 
@@ -731,6 +771,19 @@ async function runScannerContainerCore(
 		envVars.push(`DOCKER_HOST=${scannerDockerHost}`);
 	}
 
+	// Apply user-configured overrides on top of auto-detection (#1219).
+	// Empty user settings → resolver returns the auto-detected values unchanged.
+	const userScannerSettings = await getGlobalScannerDefaults();
+	const overrides = resolveScannerOverrides(
+		{ networkMode: scannerNetworkMode, extraHosts: scannerExtraHosts },
+		{ networkMode: userScannerSettings.networkMode, dns: userScannerSettings.dns }
+	);
+	if (userScannerSettings.networkMode || userScannerSettings.dns.length > 0) {
+		console.log(
+			`[Scanner] User overrides applied — network=${overrides.networkMode ?? 'default'}, dns=${overrides.dns?.join(',') ?? 'default'}`
+		);
+	}
+
 	console.log(`[Scanner] Running ${scannerType} with cache mounted at ${basePath}`);
 	console.log(`[Scanner] Container command: ${cmd.join(' ')}`);
 	// Run the scanner container with a 10-minute timeout to prevent indefinite hangs
@@ -739,10 +792,11 @@ async function runScannerContainerCore(
 		cmd,
 		binds,
 		env: envVars,
-		extraHosts: scannerExtraHosts,
+		extraHosts: overrides.extraHosts,
 		name: `dockhand-${scannerType}-${Date.now()}`,
 		envId,
-		networkMode: scannerNetworkMode,
+		networkMode: overrides.networkMode,
+		dns: overrides.dns,
 		timeout: 600_000, // 10 minutes
 		onStderr: (data) => {
 			// Stream stderr lines for real-time progress output
@@ -1060,14 +1114,22 @@ async function getScannerVersion(
 		);
 		if (!hasImage) return null;
 
-		// Create temporary container to get version
+		// Create temporary container to get version. Apply user overrides so
+		// version probe works in environments where default networking fails
+		// (#1219 — host needs --network host for scanner images to resolve DNS).
 		const versionCmd = scannerType === 'grype' ? ['version'] : ['--version'];
+		const overrides = resolveScannerOverrides(
+			{},
+			{ networkMode: defaults.networkMode, dns: defaults.dns }
+		);
 		console.log(`[Scanner] Getting ${scannerType} version with cmd:`, versionCmd);
 		const { stdout, stderr } = await runContainer({
 			image: scannerImage,
 			cmd: versionCmd,
 			name: `dockhand-${scannerType}-version-${Date.now()}`,
-			envId
+			envId,
+			networkMode: overrides.networkMode,
+			dns: overrides.dns
 		});
 
 		console.log(`[Scanner] ${scannerType} version check result: stdout="${stdout.substring(0, 100)}", stderr="${stderr.substring(0, 100)}"`);

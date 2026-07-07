@@ -893,7 +893,8 @@
 		if (!formName.trim()) {
 			formErrors.name = 'Name is required';
 			hasErrors = true;
-		} else {
+		} else if (formName.trim() !== environment.name) {
+			// Only validate name format on rename — existing names with legacy characters are allowed
 			const nameCheck = validateEnvName(formName.trim());
 			if (!nameCheck.ok) {
 				formErrors.name = nameCheck.reason!;
@@ -1586,7 +1587,7 @@
 				</Tabs.Trigger>
 			</Tabs.List>
 
-			<div class="overflow-y-auto py-4 h-[520px] [scrollbar-gutter:stable] pr-1">
+			<div class="overflow-y-auto py-4 h-[520px] [scrollbar-gutter:stable] pr-3">
 				<!-- General Tab (Connection Settings) -->
 					<Tabs.Content value="general" class="space-y-4 mt-0 h-full">
 						<!-- Name field -->

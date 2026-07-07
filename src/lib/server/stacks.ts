@@ -5,8 +5,8 @@
  * All lifecycle operations use docker compose commands.
  */
 
-import { existsSync, mkdirSync, rmSync, readdirSync, cpSync, statSync, unlinkSync, renameSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve, dirname, basename } from 'node:path';
+import { existsSync, mkdirSync, rmSync, readdirSync, cpSync, statSync, unlinkSync, renameSync, readFileSync, writeFileSync, realpathSync } from 'node:fs';
+import { join, resolve, dirname, basename, normalize as pathNormalize, sep as pathSep } from 'node:path';
 import { spawn as nodeSpawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import {
@@ -18,6 +18,7 @@ import {
 	type DeletionApplyResult,
 	type DeletionSkipReason
 } from './git-deletions';
+import { isAllowedStackFilename } from './stack-filename';
 import {
 	getEnvironment,
 	getSecretEnvVarsAsRecord,
@@ -351,6 +352,61 @@ export async function getStackDir(stackName: string, envId?: number | null): Pro
 }
 
 /**
+ * Resolve a path against the parent's realpath when the parent exists, so
+ * symlinks resolve to their canonical location. We can't realpath the leaf
+ * because the file may not exist yet (new stack).
+ */
+function resolveStackPath(input: string): string {
+	const abs = resolve(input);
+	const parent = dirname(abs);
+	try {
+		if (existsSync(parent)) {
+			return join(realpathSync(parent), basename(abs));
+		}
+	} catch {
+		// realpath may fail on permission errors; fall through to the plain resolve.
+	}
+	return abs;
+}
+
+export interface StackPathValidation {
+	ok: boolean;
+	error?: string;
+	resolved?: string;
+}
+
+/**
+ * Validate that a custom compose or env file path is writable by this code
+ * path. A path is accepted when:
+ *   - filename matches the stack-filename gate (.yml/.yaml/.env family)
+ *   - normalized form contains no .. segments (parent directory resolved
+ *     via realpath so a symlinked component can't smuggle traversal in)
+ */
+export async function validateStackPath(input: string): Promise<StackPathValidation> {
+	if (!input || typeof input !== 'string') {
+		return { ok: false, error: 'Path is required' };
+	}
+
+	const resolvedPath = resolveStackPath(input);
+
+	// Normalized form must not contain a .. segment.
+	const segments = pathNormalize(resolvedPath).split(pathSep);
+	if (segments.includes('..')) {
+		return { ok: false, error: 'Path traversal not allowed' };
+	}
+
+	const filename = basename(resolvedPath);
+	if (!isAllowedStackFilename(filename)) {
+		return {
+			ok: false,
+			error: `File "${filename}" is not an allowed stack filename (must end in .yml, .yaml, or .env)`
+		};
+	}
+
+	return { ok: true, resolved: resolvedPath };
+}
+
+/**
  * Find stack directory, checking paths in order:
  * 1. Database: Custom composePath in stackSources table (adopted/imported stacks)
  * 2. New path (envName): $DATA_DIR/stacks/<envName>/<stackName>/
@@ -555,6 +611,19 @@ export async function saveStackComposeFile(
 	// Check if this stack has a custom compose path configured, or if one was provided
 	const source = await getStackSource(name, envId);
 	const composePath = options?.composePath || source?.composePath;
+
+	// Validate every caller-supplied or stored path before any disk write.
+	// See validateStackPath() docs.
+	const pathsToCheck = [
+		composePath,
+		options?.envPath ?? source?.envPath,
+		options?.oldComposePath,
+		options?.oldEnvPath
+	].filter((p): p is string => !!p);
+	for (const path of pathsToCheck) {
+		const v = await validateStackPath(path);
+		if (!v.ok) return { success: false, error: v.error };
+	}
 
 	// Handle compose file move/rename when path changes
 	if (options?.oldComposePath && options?.composePath &&
@@ -2789,6 +2858,10 @@ export async function writeStackEnvFile(
 	envId?: number | null,
 	customEnvPath?: string
 ): Promise<void> {
+	if (customEnvPath) {
+		const v = await validateStackPath(customEnvPath);
+		if (!v.ok) throw new Error(v.error || 'Invalid env path');
+	}
 	let envFilePath: string;
 	if (customEnvPath) {
 		envFilePath = customEnvPath;
@@ -2834,6 +2907,10 @@ export async function writeRawStackEnvFile(
 	envId?: number | null,
 	customEnvPath?: string
 ): Promise<void> {
+	if (customEnvPath) {
+		const v = await validateStackPath(customEnvPath);
+		if (!v.ok) throw new Error(v.error || 'Invalid env path');
+	}
 	let envFilePath: string;
 	if (customEnvPath) {
 		envFilePath = customEnvPath;

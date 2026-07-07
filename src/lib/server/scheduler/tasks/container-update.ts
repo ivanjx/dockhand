@@ -38,7 +38,7 @@ import {
 import { updateStackService } from '../../stacks';
 import { getScannerSettings, scanImage, type ScanResult, type VulnerabilitySeverity } from '../../scanner';
 import { sendEventNotification } from '../../notifications';
-import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer, shouldProceedOnScanError } from './update-utils';
+import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer, shouldProceedOnScanError, isPodmanInfraContainer } from './update-utils';
 import { isUpdateDisabledByLabel, isHiddenByLabel } from '../../container-labels';
 
 // =============================================================================
@@ -343,6 +343,19 @@ export async function runContainerUpdate(
 		// Get the full container config to extract the image name (tag)
 		const inspectData = await inspectContainer(container.id, envId) as any;
 		const imageNameFromConfig = inspectData.Config?.Image;
+
+		// Podman pod-infra containers may have an empty Config.Image — silently
+		// skip them before the "Could not determine image name" failure (#1221).
+		if (isPodmanInfraContainer(imageNameFromConfig, inspectData.Config?.Labels)) {
+			log(`Skipping Podman pod-infra container`);
+			await updateScheduleExecution(execution.id, {
+				status: 'skipped',
+				completedAt: new Date().toISOString(),
+				duration: Date.now() - startTime,
+				details: { reason: 'Podman pod-infra container' }
+			});
+			return;
+		}
 
 		if (!imageNameFromConfig) {
 			log(`Could not determine image name from container config`);

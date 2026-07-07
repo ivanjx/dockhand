@@ -64,6 +64,13 @@
       "when": 1781556896222,
       "tag": "0008_upstream_add_synced_files_sqlite",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1781620376161,
+      "tag": "0009_add_template_sources",
+      "breakpoints": true
     }
   ]
 }

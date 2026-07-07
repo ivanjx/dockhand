@@ -6,14 +6,14 @@
  */
 
 import { homedir } from 'node:os';
-import { existsSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as tls from 'node:tls';
 import { createHash } from 'node:crypto';
 import type { Environment } from './db';
-import { getStackEnvVarsAsRecord } from './db';
+import { getSetting } from './db';
 import { getAdditionalVolumeBinds } from './mount-dedupe';
 import { encodeRegistryAuth } from './registry-auth';
 import { isSystemContainer } from './scheduler/tasks/update-utils';
@@ -3168,6 +3168,250 @@ export async function getRegistryAuth(
 	return { baseUrl, orgPath: parsed.path, authHeader };
 }
 
+// --- Harbor fallback for catalog and image search ---
+// Harbor denies access to the V2 _catalog endpoint for robot accounts.
+// We detect Harbor and use the native project API as a fallback.
+
+/** Harbor detection cache per host (TTL 5 min). Only definitive (non-error) detections are cached. */
+const harborDetectionCache = new Map<string, { isHarbor: boolean; ts: number }>();
+const HARBOR_CACHE_TTL = 5 * 60 * 1000;
+
+export interface HarborCatalogResult {
+	repositories: string[];
+	/** Pagination cursor: "harbor:<page>" or null if last page */
+	nextLast: string | null;
+}
+
+/**
+ * Detects whether a registry is a Harbor instance.
+ * Checks for service="harbor-registry" in the WWW-Authenticate header from /v2/,
+ * then confirms via /api/v2.0/ping. Result is cached for 5 min per host.
+ */
+export async function isHarborRegistry(registryUrl: string): Promise<boolean> {
+	const parsed = parseRegistryUrl(registryUrl);
+	const host = parsed.host;
+
+	const cached = harborDetectionCache.get(host);
+	if (cached && Date.now() - cached.ts < HARBOR_CACHE_TTL) {
+		return cached.isHarbor;
+	}
+
+	// Respect the registry's configured scheme and port (parsed.host includes the port).
+	const baseUrl = `${parsed.protocol}://${parsed.host}`;
+
+	let isHarbor = false;
+	try {
+		// Step 1: check the WWW-Authenticate header from /v2/
+		const challengeResp = await fetch(`${baseUrl}/v2/`, {
+			method: 'GET',
+			headers: { 'User-Agent': 'Dockhand/1.0' }
+		});
+		const wwwAuth = challengeResp.headers.get('WWW-Authenticate') || '';
+		if (wwwAuth.toLowerCase().includes('service="harbor-registry"')) {
+			// Step 2: confirm via /api/v2.0/ping
+			const pingResp = await fetch(`${baseUrl}/api/v2.0/ping`, {
+				method: 'GET',
+				headers: { 'User-Agent': 'Dockhand/1.0' }
+			});
+			if (pingResp.ok) {
+				const body = await pingResp.text();
+				if (body.includes('Pong')) {
+					isHarbor = true;
+				}
+			}
+		}
+		// A definitive answer was obtained (no network error): cache it.
+		harborDetectionCache.set(host, { isHarbor, ts: Date.now() });
+	} catch {
+		// Network error: detection is indeterminate. Do NOT cache, so a transient
+		// outage can't pin "not Harbor" for the whole TTL and keep returning 403s
+		// once Harbor recovers.
+	}
+
+	return isHarbor;
+}
+
+/**
+ * Builds the Basic auth header for the Harbor API from a registry object.
+ * Credentials are trimmed: pasted values often carry trailing whitespace that
+ * silently breaks Basic auth.
+ */
+function getHarborBasicAuth(registry: { username?: string | null; password?: string | null }): string | null {
+	const username = registry.username?.trim();
+	const password = registry.password?.trim();
+	if (username && password) {
+		return `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
+	}
+	return null;
+}
+
+/** Builds the common headers (JSON + Basic auth) for Harbor API requests. */
+function harborHeaders(registry: { username?: string | null; password?: string | null }): Record<string, string> {
+	const headers: Record<string, string> = {
+		'Accept': 'application/json',
+		'User-Agent': 'Dockhand/1.0'
+	};
+	const authHeader = getHarborBasicAuth(registry);
+	if (authHeader) headers['Authorization'] = authHeader;
+	return headers;
+}
+
+/** Removes Harbor query-grammar control characters so a search term can't break or alter the q filter. */
+function sanitizeHarborQueryTerm(term: string): string {
+	// Harbor's query grammar uses , = ~ ( ) as control characters.
+	return term.replace(/[,=~()]/g, '');
+}
+
+/**
+ * Follows Harbor list-endpoint pagination, collecting every item's name.
+ * Terminates on a short page or once X-Total-Count is reached; a safety cap
+ * bounds pathological servers (a warning is logged if it is hit).
+ */
+async function harborPaginateNames(
+	urlForPage: (page: number, pageSize: number) => string,
+	headers: Record<string, string>,
+	options: { throwOnFirstError: boolean; label: string }
+): Promise<string[]> {
+	const names: string[] = [];
+	const pageSize = 100;
+	const maxPages = 100; // ~10k items: defensive bound against a server that never returns a short page
+	let total = 0;
+	let page = 1;
+	while (page <= maxPages) {
+		const resp = await fetch(urlForPage(page, pageSize), { headers });
+		if (!resp.ok) {
+			if (page === 1 && options.throwOnFirstError) {
+				throw new Error(`Harbor API error ${resp.status} while ${options.label}`);
+			}
+			break;
+		}
+		if (page === 1) total = parseInt(resp.headers.get('X-Total-Count') || '0', 10);
+		const items: Array<{ name: string }> = await resp.json();
+		for (const item of items) names.push(item.name);
+		if (items.length < pageSize) break;
+		if (total > 0 && names.length >= total) break;
+		page++;
+	}
+	if (page > maxPages) {
+		console.warn(`[Harbor] Pagination safety cap (${maxPages} pages) reached while ${options.label}; the list may be truncated`);
+	}
+	return names;
+}
+
+/** Enumerates the names of all Harbor projects the account can access. */
+async function harborListAllProjects(baseUrl: string, headers: Record<string, string>): Promise<string[]> {
+	return harborPaginateNames(
+		(page, size) => `${baseUrl}/projects?page=${page}&page_size=${size}`,
+		headers,
+		{ throwOnFirstError: true, label: 'listing projects' }
+	);
+}
+
+/** Enumerates the names of all repositories within a single Harbor project. */
+async function harborListProjectRepositories(baseUrl: string, project: string, headers: Record<string, string>): Promise<string[]> {
+	return harborPaginateNames(
+		(page, size) => `${baseUrl}/projects/${encodeURIComponent(project)}/repositories?page=${page}&page_size=${size}`,
+		headers,
+		{ throwOnFirstError: false, label: `listing repositories of project ${project}` }
+	);
+}
+
+/**
+ * Lists repositories via the Harbor project API.
+ * With orgPath set, paginates a single project natively (using X-Total-Count).
+ * Without orgPath, enumerates every accessible project and all of their
+ * repositories, then paginates the flattened list so the UI gets a correct
+ * hasMore signal instead of a silently truncated first page.
+ * @param page - page number (1-based)
+ * @param pageSize - number of results per page
+ */
+export async function harborListRepositories(
+	registry: { url: string; username?: string | null; password?: string | null },
+	orgPath: string,
+	page: number = 1,
+	pageSize: number = 100
+): Promise<HarborCatalogResult> {
+	const parsed = parseRegistryUrl(registry.url);
+	const baseUrl = `${parsed.protocol}://${parsed.host}/api/v2.0`;
+	const headers = harborHeaders(registry);
+
+	if (orgPath) {
+		// Single project: native page-based pagination.
+		const project = orgPath.replace(/^\//, '');
+		const url = `${baseUrl}/projects/${encodeURIComponent(project)}/repositories?page=${page}&page_size=${pageSize}`;
+		const resp = await fetch(url, { headers });
+		if (!resp.ok) {
+			throw new Error(`Harbor API error ${resp.status} for project ${project}`);
+		}
+		const totalCount = parseInt(resp.headers.get('X-Total-Count') || '0', 10);
+		const repos: Array<{ name: string }> = await resp.json();
+		const repositories = repos.map(r => r.name);
+		const hasMore = page * pageSize < totalCount;
+		return { repositories, nextLast: hasMore ? `harbor:${page + 1}` : null };
+	}
+
+	// No orgPath: enumerate all projects and all of their repositories, then
+	// slice the flattened list for the requested page.
+	const projects = await harborListAllProjects(baseUrl, headers);
+	const all: string[] = [];
+	for (const project of projects) {
+		const repos = await harborListProjectRepositories(baseUrl, project, headers);
+		for (const name of repos) all.push(name);
+	}
+
+	const start = (page - 1) * pageSize;
+	const repositories = all.slice(start, start + pageSize);
+	const hasMore = start + pageSize < all.length;
+	return { repositories, nextLast: hasMore ? `harbor:${page + 1}` : null };
+}
+
+/**
+ * Searches repositories via the Harbor API using filter q=name=~{term}.
+ * Iterates through all accessible projects (or a single one if orgPath is set).
+ * The term is sanitized for the Harbor query grammar; a client-side substring
+ * check on the original term keeps the results precise.
+ */
+export async function harborSearchRepositories(
+	registry: { url: string; username?: string | null; password?: string | null },
+	term: string,
+	orgPath: string,
+	limit: number = 25
+): Promise<string[]> {
+	const parsed = parseRegistryUrl(registry.url);
+	const baseUrl = `${parsed.protocol}://${parsed.host}/api/v2.0`;
+	const headers = harborHeaders(registry);
+
+	const termLower = term.toLowerCase();
+	const safeTerm = sanitizeHarborQueryTerm(term);
+	const results: string[] = [];
+
+	const projectNames = orgPath
+		? [orgPath.replace(/^\//, '')]
+		: await harborListAllProjects(baseUrl, headers);
+
+	// Search each project using the Harbor filter
+	for (const project of projectNames) {
+		if (results.length >= limit) break;
+
+		const q = encodeURIComponent(`name=~${safeTerm}`);
+		const url = `${baseUrl}/projects/${encodeURIComponent(project)}/repositories?q=${q}&page=1&page_size=${limit}`;
+		const resp = await fetch(url, { headers });
+		if (!resp.ok) continue;
+
+		const repos: Array<{ name: string }> = await resp.json();
+		for (const r of repos) {
+			// The server filter ran on the sanitized term, so re-check the original
+			// term client-side to guarantee precise substring matches.
+			if (r.name.toLowerCase().includes(termLower)) {
+				results.push(r.name);
+				if (results.length >= limit) break;
+			}
+		}
+	}
+
+	return results;
+}
+
 /**
  * Check the registry for the current manifest digest of an image.
  * Simple HEAD request to get Docker-Content-Digest header.
@@ -4027,11 +4271,69 @@ export async function pruneContainers(envId?: number | null) {
 }
 
 export async function pruneImages(dangling = true, envId?: number | null) {
-	// dangling=true: only remove untagged images (default Docker behavior)
-	// dangling=false: remove ALL unused images including tagged ones
-	// Docker API quirk: to remove all unused, we pass dangling=false filter
-	const filters = dangling ? '{"dangling":["true"]}' : '{"dangling":["false"]}';
-	return dockerJsonRequest(`/images/prune?filters=${encodeURIComponent(filters)}`, { method: 'POST' }, envId);
+	// dangling=true: only remove untagged images. Pass straight through —
+	// scanner images are always tagged so they can't be dangling anyway.
+	if (dangling) {
+		return dockerJsonRequest(
+			`/images/prune?filters=${encodeURIComponent('{"dangling":["true"]}')}`,
+			{ method: 'POST' },
+			envId
+		);
+	}
+
+	// dangling=false: "prune all unused." When the scanner-protection setting
+	// is on, shield grype + trivy with stopped holder containers (Docker's
+	// "in use" check keeps them) then tear them down in a finally (#625).
+	const protect = (await getSetting('protect_scanner_images')) !== false;
+	if (!protect) {
+		return dockerJsonRequest(
+			`/images/prune?filters=${encodeURIComponent('{"dangling":["false"]}')}`,
+			{ method: 'POST' },
+			envId
+		);
+	}
+
+	const { DEFAULT_GRYPE_IMAGE, DEFAULT_TRIVY_IMAGE } = await import('./scanner');
+	const grypeImg = (await getSetting('default_grype_image')) ?? DEFAULT_GRYPE_IMAGE;
+	const trivyImg = (await getSetting('default_trivy_image')) ?? DEFAULT_TRIVY_IMAGE;
+
+	const holderIds: string[] = [];
+	for (const image of [grypeImg, trivyImg]) {
+		try {
+			const safeName = `dockhand-prune-keep-${image.replace(/[^a-z0-9]/gi, '-')}-${Date.now()}`;
+			const created = await dockerJsonRequest<{ Id: string }>(
+				`/containers/create?name=${encodeURIComponent(safeName)}`,
+				{
+					method: 'POST',
+					body: JSON.stringify({ Image: image, Cmd: ['/bin/true'] })
+				},
+				envId
+			);
+			holderIds.push(created.Id);
+		} catch {
+			// Image not present locally → nothing to protect → no-op
+		}
+	}
+
+	try {
+		return await dockerJsonRequest(
+			`/images/prune?filters=${encodeURIComponent('{"dangling":["false"]}')}`,
+			{ method: 'POST' },
+			envId
+		);
+	} finally {
+		for (const id of holderIds) {
+			try {
+				await dockerJsonRequest(
+					`/containers/${id}?force=true`,
+					{ method: 'DELETE' },
+					envId
+				);
+			} catch {
+				// Best-effort cleanup; orphan holders are visible but harmless
+			}
+		}
+	}
 }
 
 export async function pruneVolumes(envId?: number | null) {
@@ -4199,6 +4501,8 @@ export async function runContainer(options: {
 	extraHosts?: string[];
 	name?: string;
 	envId?: number | null;
+	networkMode?: string; // Docker network mode (e.g., 'host', 'bridge', custom network name)
+	dns?: string[]; // Custom DNS servers; undefined = inherit from Docker daemon
 }): Promise<{ stdout: string; stderr: string }> {
 	// Add random suffix to avoid naming conflicts
 	const baseName = options.name || `dockhand-temp-${Date.now()}`;
@@ -4220,6 +4524,14 @@ export async function runContainer(options: {
 
 	if (options.extraHosts && options.extraHosts.length > 0) {
 		containerConfig.HostConfig.ExtraHosts = options.extraHosts;
+	}
+
+	if (options.networkMode) {
+		containerConfig.HostConfig.NetworkMode = options.networkMode;
+	}
+
+	if (options.dns && options.dns.length > 0) {
+		containerConfig.HostConfig.Dns = options.dns;
 	}
 
 	const createResult = await dockerJsonRequest<{ Id: string }>(
@@ -4289,6 +4601,7 @@ export async function runContainerWithStreaming(options: {
 	onStderr?: (data: string) => void;
 	timeout?: number; // Overall timeout in ms (0 or undefined = no timeout)
 	networkMode?: string; // Docker network mode (e.g., network name for TCP access)
+	dns?: string[]; // Custom DNS servers; undefined = inherit from Docker daemon
 }): Promise<string> {
 	const baseName = options.name || `dockhand-stream-${Date.now()}`;
 	const containerName = `${baseName}-${randomSuffix()}`;
@@ -4321,6 +4634,10 @@ export async function runContainerWithStreaming(options: {
 	// Set network mode if specified (e.g., for scanner containers accessing Docker via TCP)
 	if (options.networkMode) {
 		containerConfig.HostConfig.NetworkMode = options.networkMode;
+	}
+
+	if (options.dns && options.dns.length > 0) {
+		containerConfig.HostConfig.Dns = options.dns;
 	}
 
 	const createResult = await dockerJsonRequest<{ Id: string }>(
@@ -4842,18 +5159,20 @@ export async function listContainerDirectory(
 	// Sanitize path to prevent command injection
 	const safePath = path.replace(/[;&|`$(){}[\]<>'"\\]/g, '');
 
-	// Commands to try in order of preference
+	// Commands to try in order of preference (includes /usr/sbin/ls for Wolfi/busybox images)
 	const commands = useSimpleLs
 		? [
 			['ls', '-la', safePath],
 			['/bin/ls', '-la', safePath],
 			['/usr/bin/ls', '-la', safePath],
+			['/usr/sbin/ls', '-la', safePath],
 		]
 		: [
 			['ls', '-la', '--time-style=long-iso', safePath],
 			['ls', '-la', safePath],
 			['/bin/ls', '-la', safePath],
 			['/usr/bin/ls', '-la', safePath],
+			['/usr/sbin/ls', '-la', safePath],
 		];
 
 	let lastError: Error | null = null;
@@ -4936,7 +5255,7 @@ export async function statContainerPath(
 	containerId: string,
 	path: string,
 	envId?: number | null
-): Promise<{ name: string; size: number; mode: number; mtime: string; linkTarget?: string }> {
+): Promise<{ name: string; size: number; mode: number; mtime: string; linkTarget?: string; isDir: boolean }> {
 	// Sanitize path
 	const safePath = path.replace(/[;&|`$(){}[\]<>'"\\]/g, '');
 
@@ -4958,7 +5277,10 @@ export async function statContainerPath(
 	}
 
 	const statJson = Buffer.from(statHeader, 'base64').toString('utf-8');
-	return JSON.parse(statJson);
+	const stat = JSON.parse(statJson);
+	// Go's os.FileMode encodes the file type in the high bits. ModeDir = 1<<31.
+	// Docker emits mode in that format, so the directory bit lives at 0x80000000.
+	return { ...stat, isDir: (stat.mode & 0x80000000) !== 0 };
 }
 
 /**
@@ -5509,6 +5831,22 @@ export async function getVolumeArchive(
 
 	return { response, containerId };
 	// Note: Container is kept alive for reuse. Cache TTL will handle cleanup.
+}
+
+/**
+ * Stat a path inside a volume via the helper container.
+ * Returns the same shape as statContainerPath (#1180 raw download needs isDir).
+ */
+export async function statVolumePath(
+	volumeName: string,
+	path: string,
+	envId?: number | null,
+	readOnly: boolean = true
+): Promise<{ name: string; size: number; mode: number; mtime: string; linkTarget?: string; isDir: boolean }> {
+	const containerId = await getOrCreateVolumeHelperContainer(volumeName, envId, readOnly);
+	const safePath = path.replace(/[;&|`$(){}[\]<>'"\\]/g, '');
+	const fullPath = `${VOLUME_MOUNT_PATH}${safePath.startsWith('/') ? safePath : '/' + safePath}`;
+	return statContainerPath(containerId, fullPath, envId);
 }
 
 /**

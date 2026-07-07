@@ -1,9 +1,15 @@
 import { writable, derived, get } from 'svelte/store';
 import { browser } from '$app/environment';
+import {
+	buildFormatters,
+	formatDatePartWith,
+	formatTimePartWith,
+	type DateTimeFormatters
+} from '$lib/utils/date-format';
 
 export type TimeFormat = '12h' | '24h';
 export type DateFormat = 'MM/DD/YYYY' | 'DD/MM/YYYY' | 'YYYY-MM-DD' | 'DD.MM.YYYY';
-export type DownloadFormat = 'tar' | 'tar.gz';
+export type DownloadFormat = 'tar' | 'tar.gz' | 'raw';
 export type EventCollectionMode = 'stream' | 'poll';
 export type LabelFilterMode = 'any' | 'all';
 
@@ -39,6 +45,12 @@ export interface AppSettings {
 	defaultTrivyImage: string;
 	defaultComposeTemplate: string;
 	labelFilterMode: LabelFilterMode;
+	honorProxyLabels: boolean;
+	showImageChangelogLinks: boolean;
+	protectScannerImages: boolean;
+	// Scanner Advanced settings (#1219). Empty values = use auto-detection.
+	defaultScannerNetworkMode: string;   // '' | 'host' | 'bridge' | 'none' | <custom-network>
+	defaultScannerDns: string[];         // ['1.1.1.1', '8.8.8.8']; empty = inherit
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -72,6 +84,11 @@ const DEFAULT_SETTINGS: AppSettings = {
 	defaultGrypeImage: 'anchore/grype:v0.110.0',
 	defaultTrivyImage: 'aquasec/trivy:0.69.3',
 	labelFilterMode: 'any',
+	honorProxyLabels: true,
+	showImageChangelogLinks: true,
+	protectScannerImages: true,
+	defaultScannerNetworkMode: '',
+	defaultScannerDns: [],
 	defaultComposeTemplate: `version: "3.8"
 
 services:
@@ -151,7 +168,12 @@ function createSettingsStore() {
 					defaultGrypeImage: settings.defaultGrypeImage ?? DEFAULT_SETTINGS.defaultGrypeImage,
 					defaultTrivyImage: settings.defaultTrivyImage ?? DEFAULT_SETTINGS.defaultTrivyImage,
 					defaultComposeTemplate: settings.defaultComposeTemplate ?? DEFAULT_SETTINGS.defaultComposeTemplate,
-				labelFilterMode: settings.labelFilterMode ?? DEFAULT_SETTINGS.labelFilterMode
+				labelFilterMode: settings.labelFilterMode ?? DEFAULT_SETTINGS.labelFilterMode,
+				honorProxyLabels: settings.honorProxyLabels ?? DEFAULT_SETTINGS.honorProxyLabels,
+				showImageChangelogLinks: settings.showImageChangelogLinks ?? DEFAULT_SETTINGS.showImageChangelogLinks,
+				protectScannerImages: settings.protectScannerImages ?? DEFAULT_SETTINGS.protectScannerImages,
+				defaultScannerNetworkMode: settings.defaultScannerNetworkMode ?? DEFAULT_SETTINGS.defaultScannerNetworkMode,
+				defaultScannerDns: Array.isArray(settings.defaultScannerDns) ? settings.defaultScannerDns : DEFAULT_SETTINGS.defaultScannerDns
 				});
 			}
 		} catch {
@@ -202,7 +224,12 @@ function createSettingsStore() {
 					defaultGrypeImage: updatedSettings.defaultGrypeImage ?? DEFAULT_SETTINGS.defaultGrypeImage,
 					defaultTrivyImage: updatedSettings.defaultTrivyImage ?? DEFAULT_SETTINGS.defaultTrivyImage,
 					defaultComposeTemplate: updatedSettings.defaultComposeTemplate ?? DEFAULT_SETTINGS.defaultComposeTemplate,
-				labelFilterMode: updatedSettings.labelFilterMode ?? DEFAULT_SETTINGS.labelFilterMode
+				labelFilterMode: updatedSettings.labelFilterMode ?? DEFAULT_SETTINGS.labelFilterMode,
+				honorProxyLabels: updatedSettings.honorProxyLabels ?? DEFAULT_SETTINGS.honorProxyLabels,
+				showImageChangelogLinks: updatedSettings.showImageChangelogLinks ?? DEFAULT_SETTINGS.showImageChangelogLinks,
+				protectScannerImages: updatedSettings.protectScannerImages ?? DEFAULT_SETTINGS.protectScannerImages,
+				defaultScannerNetworkMode: updatedSettings.defaultScannerNetworkMode ?? DEFAULT_SETTINGS.defaultScannerNetworkMode,
+				defaultScannerDns: Array.isArray(updatedSettings.defaultScannerDns) ? updatedSettings.defaultScannerDns : DEFAULT_SETTINGS.defaultScannerDns
 				});
 			}
 		} catch (error) {
@@ -282,6 +309,20 @@ function createSettingsStore() {
 			update((current) => {
 				const newSettings = { ...current, defaultTrivyArgs: value };
 				saveSettings({ defaultTrivyArgs: value });
+				return newSettings;
+			});
+		},
+		setDefaultScannerNetworkMode: (value: string) => {
+			update((current) => {
+				const newSettings = { ...current, defaultScannerNetworkMode: value };
+				saveSettings({ defaultScannerNetworkMode: value });
+				return newSettings;
+			});
+		},
+		setDefaultScannerDns: (value: string[]) => {
+			update((current) => {
+				const newSettings = { ...current, defaultScannerDns: value };
+				saveSettings({ defaultScannerDns: value });
 				return newSettings;
 			});
 		},
@@ -446,6 +487,27 @@ function createSettingsStore() {
 				return newSettings;
 			});
 		},
+		setHonorProxyLabels: (value: boolean) => {
+			update((current) => {
+				const newSettings = { ...current, honorProxyLabels: value };
+				saveSettings({ honorProxyLabels: value });
+				return newSettings;
+			});
+		},
+		setProtectScannerImages: (value: boolean) => {
+			update((current) => {
+				const newSettings = { ...current, protectScannerImages: value };
+				saveSettings({ protectScannerImages: value });
+				return newSettings;
+			});
+		},
+		setShowImageChangelogLinks: (value: boolean) => {
+			update((current) => {
+				const newSettings = { ...current, showImageChangelogLinks: value };
+				saveSettings({ showImageChangelogLinks: value });
+				return newSettings;
+			});
+		},
 		// Manual refresh from database
 		refresh: () => {
 			initialized = false;
@@ -459,12 +521,30 @@ export const appSettings = createSettingsStore();
 // Cache current settings for synchronous access (updated reactively)
 let cachedTimeFormat: TimeFormat = DEFAULT_SETTINGS.timeFormat;
 let cachedDateFormat: DateFormat = DEFAULT_SETTINGS.dateFormat;
+let cachedDefaultTimezone: string = DEFAULT_SETTINGS.defaultTimezone;
+
+// Intl.DateTimeFormat construction is expensive; build once per timezone
+// change and reuse for every format call (activity log can render hundreds of
+// rows). Built lazily on first format call so the heavy work runs only when
+// needed and after the store subscription has populated cachedDefaultTimezone.
+let formatters: DateTimeFormatters | null = null;
+
+function getFormatters(): DateTimeFormatters {
+	if (formatters === null) {
+		formatters = buildFormatters(cachedDefaultTimezone);
+	}
+	return formatters;
+}
 
 // Subscribe once to keep cache updated
 if (browser) {
 	appSettings.subscribe((s) => {
 		cachedTimeFormat = s.timeFormat;
 		cachedDateFormat = s.dateFormat;
+		if (s.defaultTimezone !== cachedDefaultTimezone) {
+			cachedDefaultTimezone = s.defaultTimezone;
+			formatters = buildFormatters(cachedDefaultTimezone);
+		}
 	});
 }
 
@@ -473,21 +553,7 @@ if (browser) {
  * This is a low-level helper - prefer formatDateTime for most uses.
  */
 function formatDatePart(d: Date): string {
-	const day = d.getDate().toString().padStart(2, '0');
-	const month = (d.getMonth() + 1).toString().padStart(2, '0');
-	const year = d.getFullYear();
-
-	switch (cachedDateFormat) {
-		case 'MM/DD/YYYY':
-			return `${month}/${day}/${year}`;
-		case 'DD/MM/YYYY':
-			return `${day}/${month}/${year}`;
-		case 'YYYY-MM-DD':
-			return `${year}-${month}-${day}`;
-		case 'DD.MM.YYYY':
-		default:
-			return `${day}.${month}.${year}`;
-	}
+	return formatDatePartWith(d, getFormatters().date, cachedDateFormat);
 }
 
 /**
@@ -495,22 +561,7 @@ function formatDatePart(d: Date): string {
  * This is a low-level helper - prefer formatDateTime for most uses.
  */
 function formatTimePart(d: Date, includeSeconds = false): string {
-	const hours = d.getHours();
-	const minutes = d.getMinutes().toString().padStart(2, '0');
-	const seconds = d.getSeconds().toString().padStart(2, '0');
-
-	if (cachedTimeFormat === '12h') {
-		const hour12 = hours === 0 ? 12 : hours > 12 ? hours - 12 : hours;
-		const ampm = hours >= 12 ? 'PM' : 'AM';
-		return includeSeconds
-			? `${hour12}:${minutes}:${seconds} ${ampm}`
-			: `${hour12}:${minutes} ${ampm}`;
-	} else {
-		const hour24 = hours.toString().padStart(2, '0');
-		return includeSeconds
-			? `${hour24}:${minutes}:${seconds}`
-			: `${hour24}:${minutes}`;
-	}
+	return formatTimePartWith(d, getFormatters().time, cachedTimeFormat, includeSeconds);
 }
 
 /**

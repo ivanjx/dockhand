@@ -2,6 +2,8 @@ import { json, redirect } from '@sveltejs/kit';
 import type { RequestHandler } from '@sveltejs/kit';
 import { handleOidcCallback, createUserSession, isAuthEnabled } from '$lib/server/auth';
 import { auditAuth } from '$lib/server/audit';
+import { getClientIp } from '$lib/server/client-ip';
+import { safeRedirectOrRoot } from '$lib/utils/safe-redirect';
 
 // GET /api/auth/oidc/callback - Handle OIDC callback from IdP
 export const GET: RequestHandler = async (event) => {
@@ -17,10 +19,8 @@ export const GET: RequestHandler = async (event) => {
 	const error = url.searchParams.get('error');
 	const errorDescription = url.searchParams.get('error_description');
 
-	// Extract client IP for logging
-	const clientIp = event.request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
-		|| event.request.headers.get('x-real-ip')
-		|| event.getClientAddress();
+	// Extract client IP for logging.
+	const clientIp = getClientIp(event);
 
 	// Handle error from IdP
 	if (error) {
@@ -55,8 +55,8 @@ export const GET: RequestHandler = async (event) => {
 			providerName: result.providerName
 		});
 
-		// Redirect to the original destination or home
-		const redirectUrl = result.redirectUrl || '/';
+		// Redirect to the original destination or home (validated path-relative)
+		const redirectUrl = safeRedirectOrRoot(result.redirectUrl);
 		throw redirect(302, redirectUrl);
 	} catch (error: any) {
 		// Re-throw redirect

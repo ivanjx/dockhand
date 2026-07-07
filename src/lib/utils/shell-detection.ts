@@ -135,16 +135,24 @@ export async function detectShells(
 /**
  * Get the best available shell from the detection result
  * Returns the user's preferred shell if available, otherwise the default
+ *
+ * Preference matching is by shell name (basename), not full path — so a
+ * preference of `/bin/bash` will still match when the server resolved bash
+ * to a non-standard path like `/usr/bin/bash` (issue #1189).
  */
 export function getBestShell(
 	result: ShellDetectionResult,
 	preferredShell: string
 ): string | null {
-	// If preferred shell is available, use it
-	if (result.shells.includes(preferredShell)) {
-		return preferredShell;
+	const exact = result.shells.find(s => s === preferredShell);
+	if (exact) return exact;
+
+	const preferredName = preferredShell.split('/').pop();
+	if (preferredName) {
+		const byName = result.shells.find(s => s.split('/').pop() === preferredName);
+		if (byName) return byName;
 	}
-	// Otherwise use the default shell
+
 	return result.defaultShell;
 }
 
