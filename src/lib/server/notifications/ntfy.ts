@@ -1,5 +1,5 @@
 /** ntfy.sh + self-hosted ntfy. ntfy:// or ntfys:// (HTTPS). */
-import { drainResponse, type NotificationPayload, type NotificationResult } from './shared';
+import { notificationFetch, drainResponse, type NotificationPayload, type NotificationResult } from './shared';
 
 // HTTP header values must be ByteString (every char ≤ 0xFF). Reject anything
 // else so we never blow up fetch() with a 65533 (U+FFFD) replacement char.
@@ -35,7 +35,7 @@ export async function sendNtfy(appriseUrl: string, payload: NotificationPayload)
 	// ntfy://user:pass@host/topic (custom server with basic auth)
 	// ntfy://token@host/topic (custom server with bearer token)
 	// ntfy://host/topic?auth=TOKEN (raw token, e.g. tk_..., or base64-encoded "Bearer <token>")
-	// Query params: ?tags=ship,whale &title=Custom &priority=5
+	// Query params: ?tags=ship,whale &title=Custom &priority=5 &email=me@example.com
 	// ntfys:// variants for HTTPS
 	const isSecure = appriseUrl.startsWith('ntfys');
 	const path = appriseUrl.replace(/^ntfys?:\/\//, '');
@@ -47,6 +47,7 @@ export async function sendNtfy(appriseUrl: string, payload: NotificationPayload)
 	let queryTags: string | null = null;
 	let queryTitle: string | null = null;
 	let queryPriority: string | null = null;
+	let queryEmail: string | null = null;
 	let cleanPath = path;
 	const qIndex = path.indexOf('?');
 	if (qIndex !== -1) {
@@ -55,6 +56,7 @@ export async function sendNtfy(appriseUrl: string, payload: NotificationPayload)
 		queryTags = params.get('tags');
 		queryTitle = params.get('title');
 		queryPriority = params.get('priority');
+		queryEmail = params.get('email');
 		cleanPath = path.substring(0, qIndex);
 	}
 
@@ -95,8 +97,13 @@ export async function sendNtfy(appriseUrl: string, payload: NotificationPayload)
 		headers['Authorization'] = authHeader;
 	}
 
+	// ?email=<address> → ntfy's Email header so ntfy forwards the message as email (#1231)
+	if (queryEmail && isHeaderSafe(queryEmail)) {
+		headers['Email'] = queryEmail;
+	}
+
 	try {
-		const response = await fetch(url, {
+		const response = await notificationFetch(url, {
 			method: 'POST',
 			headers,
 			body: payload.message

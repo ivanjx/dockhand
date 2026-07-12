@@ -831,6 +831,13 @@ function webSocketPlugin(): Plugin {
 						dockerStreams.delete(connId);
 					}
 				});
+
+				// Without an 'error' listener, an emitted socket error is re-thrown
+				// as an uncaught exception and crashes the dev server. The 'close'
+				// handler above does the actual cleanup (errors are followed by close).
+				ws.on('error', (err: Error) => {
+					console.error('[Terminal WS] Connection error:', err.message);
+				});
 			});
 
 			httpServer.listen(WS_PORT, () => {
@@ -852,7 +859,7 @@ interface ReconnectTrackerEntry {
 }
 const reconnectTracker = new Map<number, ReconnectTrackerEntry>();
 const RECONNECT_WINDOW_MS = 2 * 60 * 1000;
-const RECONNECT_BURST = 3;
+const RECONNECT_BURST = 10; // keep in sync with hawser.ts (production source of truth)
 const COOLDOWN_LEVELS_SECS = [30, 60, 120, 300];
 const STABLE_THRESHOLD_MS = 5 * 60 * 1000;
 const STALE_TRACKER_MS = 10 * 60 * 1000;
@@ -894,6 +901,10 @@ function recordReconnection(envId: number): { allowed: true } | { allowed: false
 }
 
 // Handle Hawser Edge protocol messages
+// NOTE: This is the dev-mode fork of the Hawser WS handler. Production uses
+// hawser.ts handleHawserWsMessage (via server.js → globalThis.__hawserHandleMessage),
+// which is the source of truth. Keep auth/expiry/rate-limit/throttle behavior here
+// in sync with hawser.ts until the two are unified.
 async function handleHawserMessage(ws: any, msg: any) {
 	if (msg.type === 'hello') {
 		const agentId = msg.agentId || 'unknown';
@@ -939,6 +950,15 @@ async function handleHawserMessage(ws: any, msg: any) {
 
 		if (!matchedToken) {
 			console.log(`[Hawser WS] Invalid token (IP: ${rateLimitKey})`);
+			hawserAuthFailCache.set(rateLimitKey, Date.now());
+			ws.send(JSON.stringify({ type: 'error', error: 'Invalid token' }));
+			ws.close();
+			return;
+		}
+
+		// Reject expired tokens (parity with hawser.ts validateHawserToken)
+		if (matchedToken.expires_at && new Date(matchedToken.expires_at) < new Date()) {
+			console.log(`[Hawser WS] Expired token (IP: ${rateLimitKey})`);
 			hawserAuthFailCache.set(rateLimitKey, Date.now());
 			ws.send(JSON.stringify({ type: 'error', error: 'Invalid token' }));
 			ws.close();

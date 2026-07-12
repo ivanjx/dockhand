@@ -134,6 +134,7 @@ export interface StackContainer {
 	restartCount: number;
 	created: number;
 	labels: Record<string, string>;
+	updateAvailable?: boolean;
 }
 
 export interface ComposeStackInfo {
@@ -141,6 +142,8 @@ export interface ComposeStackInfo {
 	containers: string[];
 	containerDetails: StackContainer[];
 	status: string;
+	updatesAvailable?: boolean;
+	updateCount?: number;
 	sourceType?: 'external' | 'internal' | 'git';
 	repository?: {
 		id: number;
@@ -170,7 +173,7 @@ export interface GitRepository {
 }
 
 // Grid column configuration types
-export type GridId = 'containers' | 'images' | 'imageTags' | 'networks' | 'stacks' | 'volumes' | 'activity' | 'schedules' | 'audit' | 'environments';
+export type GridId = 'containers' | 'images' | 'imageTags' | 'networks' | 'stacks' | 'volumes' | 'activity' | 'schedules' | 'audit' | 'environments' | 'vulnerabilities';
 
 export interface ColumnConfig {
 	id: string;

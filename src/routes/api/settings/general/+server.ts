@@ -103,6 +103,8 @@ export interface GeneralSettings {
 	// Whether to surface a "view changelog" link next to the update badge.
 	// Resolved client-side from OCI labels / GHCR image names; no server hit.
 	showImageChangelogLinks: boolean;
+	// Show the "What's New" modal after an upgrade (#1235)
+	showWhatsNew: boolean;
 	// Whether spinning icons (animate-spin etc.) are animated (#1169)
 	animateIcons: boolean;
 	// Skip Dockhand's scanner images (grype, trivy) during 'prune all unused' (#625)
@@ -146,6 +148,7 @@ const DEFAULT_SETTINGS: Omit<GeneralSettings, 'scheduleRetentionDays' | 'eventRe
 	labelFilterMode: 'any' as const,
 	honorProxyLabels: true,
 	showImageChangelogLinks: true,
+	showWhatsNew: true,
 	animateIcons: true,
 	protectScannerImages: true,
 	defaultScannerNetworkMode: '',
@@ -250,6 +253,7 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			labelFilterMode,
 			honorProxyLabels,
 			showImageChangelogLinks,
+			showWhatsNew,
 			animateIcons,
 			protectScannerImages,
 			defaultScannerNetworkMode,
@@ -297,6 +301,7 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			getSetting('label_filter_mode'),
 			getSetting('honor_proxy_labels'),
 			getSetting('show_image_changelog_links'),
+			getSetting('show_whats_new'),
 			getSetting('animate_icons'),
 			getSetting('protect_scanner_images'),
 			getSetting('default_scanner_network_mode'),
@@ -348,6 +353,7 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			labelFilterMode: labelFilterMode ?? DEFAULT_SETTINGS.labelFilterMode,
 			honorProxyLabels: honorProxyLabels ?? DEFAULT_SETTINGS.honorProxyLabels,
 			showImageChangelogLinks: showImageChangelogLinks ?? DEFAULT_SETTINGS.showImageChangelogLinks,
+			showWhatsNew: showWhatsNew ?? DEFAULT_SETTINGS.showWhatsNew,
 			animateIcons: animateIcons ?? DEFAULT_SETTINGS.animateIcons,
 			protectScannerImages: protectScannerImages ?? DEFAULT_SETTINGS.protectScannerImages,
 			defaultScannerNetworkMode: defaultScannerNetworkMode ?? DEFAULT_SETTINGS.defaultScannerNetworkMode,
@@ -369,7 +375,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 
 	try {
 		const body = await request.json();
-		const { confirmDestructive, showStoppedContainers, highlightUpdates, coloredActionButtons, actionIconSize, timeFormat, dateFormat, downloadFormat, defaultGrypeArgs, defaultTrivyArgs, scheduleRetentionDays, eventRetentionDays, scheduleCleanupCron, eventCleanupCron, scheduleCleanupEnabled, eventCleanupEnabled, scannerCleanupCron, scannerCleanupEnabled, logBufferSizeKb, logMaxLines, defaultTimezone, eventCollectionMode, eventPollInterval, metricsCollectionInterval, lightTheme, darkTheme, font, fontSize, gridFontSize, terminalFont, editorFont, compactPorts, showExposedPorts, formatLogTimestamps, externalStackPaths, primaryStackLocation, defaultGrypeImage, defaultTrivyImage, defaultComposeTemplate, labelFilterMode, honorProxyLabels, showImageChangelogLinks, animateIcons, protectScannerImages, defaultScannerNetworkMode, defaultScannerDns } = body;
+		const { confirmDestructive, showStoppedContainers, highlightUpdates, coloredActionButtons, actionIconSize, timeFormat, dateFormat, downloadFormat, defaultGrypeArgs, defaultTrivyArgs, scheduleRetentionDays, eventRetentionDays, scheduleCleanupCron, eventCleanupCron, scheduleCleanupEnabled, eventCleanupEnabled, scannerCleanupCron, scannerCleanupEnabled, logBufferSizeKb, logMaxLines, defaultTimezone, eventCollectionMode, eventPollInterval, metricsCollectionInterval, lightTheme, darkTheme, font, fontSize, gridFontSize, terminalFont, editorFont, compactPorts, showExposedPorts, formatLogTimestamps, externalStackPaths, primaryStackLocation, defaultGrypeImage, defaultTrivyImage, defaultComposeTemplate, labelFilterMode, honorProxyLabels, showImageChangelogLinks, animateIcons, protectScannerImages, showWhatsNew, defaultScannerNetworkMode, defaultScannerDns } = body;
 
 		if (confirmDestructive !== undefined) {
 			await setSetting('confirm_destructive', confirmDestructive);
@@ -521,6 +527,9 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 		if (showImageChangelogLinks !== undefined && typeof showImageChangelogLinks === 'boolean') {
 			await setSetting('show_image_changelog_links', showImageChangelogLinks);
 		}
+		if (showWhatsNew !== undefined && typeof showWhatsNew === 'boolean') {
+			await setSetting('show_whats_new', showWhatsNew);
+		}
 		if (animateIcons !== undefined && typeof animateIcons === 'boolean') {
 			await setSetting('animate_icons', animateIcons);
 		}
@@ -586,6 +595,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			labelFilterModeVal,
 			honorProxyLabelsVal,
 			showImageChangelogLinksVal,
+			showWhatsNewVal,
 			animateIconsVal,
 			protectScannerImagesVal,
 			defaultScannerNetworkModeVal,
@@ -633,6 +643,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			getSetting('label_filter_mode'),
 			getSetting('honor_proxy_labels'),
 			getSetting('show_image_changelog_links'),
+			getSetting('show_whats_new'),
 			getSetting('animate_icons'),
 			getSetting('protect_scanner_images'),
 			getSetting('default_scanner_network_mode'),
@@ -685,6 +696,7 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			honorProxyLabels: honorProxyLabelsVal ?? DEFAULT_SETTINGS.honorProxyLabels,
 			protectScannerImages: protectScannerImagesVal ?? DEFAULT_SETTINGS.protectScannerImages,
 			showImageChangelogLinks: showImageChangelogLinksVal ?? DEFAULT_SETTINGS.showImageChangelogLinks,
+			showWhatsNew: showWhatsNewVal ?? DEFAULT_SETTINGS.showWhatsNew,
 			animateIcons: animateIconsVal ?? DEFAULT_SETTINGS.animateIcons,
 			defaultScannerNetworkMode: defaultScannerNetworkModeVal ?? DEFAULT_SETTINGS.defaultScannerNetworkMode,
 			defaultScannerDns: parseScannerDnsStorage(defaultScannerDnsRawVal)

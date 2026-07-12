@@ -59,7 +59,7 @@
 </script>
 
 <Select.Root type="multiple" bind:value bind:open>
-	<Select.Trigger size="sm" class="{width} text-sm">
+	<Select.Trigger size="sm" class="{width} max-w-full text-sm overflow-hidden">
 		{#if hasIcons || defaultIcon}
 			{@const opt = singleOption()}
 			{@const IconComponent = opt?.icon || defaultIcon}
@@ -67,11 +67,11 @@
 				<svelte:component this={IconComponent} class="w-3.5 h-3.5 mr-1.5 {opt?.color || 'text-muted-foreground'} shrink-0" />
 			{/if}
 		{/if}
-		<span class="{value.length === 0 ? 'text-muted-foreground' : ''}">
+		<span class="truncate {value.length === 0 ? 'text-muted-foreground' : ''}" title={value.length === 1 ? displayLabel() : ''}>
 			{displayLabel()}
 		</span>
 	</Select.Trigger>
-	<Select.Content>
+	<Select.Content align="start">
 		{#if value.length > 0}
 			<button
 				type="button"
@@ -85,8 +85,10 @@
 			<Select.Item value={option.value}>
 				{#if option.icon}
 					<svelte:component this={option.icon} class="w-4 h-4 mr-2 {option.color || ''}" />
+				{:else if option.color}
+					<span class="w-2 h-2 mr-2 rounded-full shrink-0 {option.color.replace('text-', 'bg-')}"></span>
 				{/if}
-				{option.label}
+				<span class={option.color && !option.icon ? option.color : ''}>{option.label}</span>
 			</Select.Item>
 		{/each}
 	</Select.Content>

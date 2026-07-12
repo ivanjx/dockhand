@@ -41,6 +41,7 @@
 	import ConfirmPopover from '$lib/components/ConfirmPopover.svelte';
 	import { toast } from 'svelte-sonner';
 	import { formatDateTime, appSettings } from '$lib/stores/settings';
+	import { currentDateInTimezone, dayBoundaryToUtcISO } from '$lib/utils/date-format';
 	import { NoEnvironment } from '$lib/components/ui/empty-state';
 	import { DataGrid } from '$lib/components/data-grid';
 
@@ -175,16 +176,21 @@
 		{ value: 'lastMonth', label: 'Last month' }
 	];
 
+	// Filter dates are calendar days in the configured display timezone (#1269).
+	// Presets do their arithmetic on UTC-midnight tokens so the browser's own
+	// timezone never leaks in; boundaries convert to UTC instants when querying.
+	const filterTimezone = $derived($appSettings.defaultTimezone || undefined);
+
 	function formatDateForInput(date: Date): string {
-		const year = date.getFullYear();
-		const month = String(date.getMonth() + 1).padStart(2, '0');
-		const day = String(date.getDate()).padStart(2, '0');
+		const year = date.getUTCFullYear();
+		const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+		const day = String(date.getUTCDate()).padStart(2, '0');
 		return `${year}-${month}-${day}`;
 	}
 
 	function applyDatePreset(preset: string): { from: string; to: string } {
-		const today = new Date();
-		today.setHours(0, 0, 0, 0);
+		const [y, m, d] = currentDateInTimezone(filterTimezone).split('-').map(Number);
+		const today = new Date(Date.UTC(y, m - 1, d));
 
 		let from = '';
 		let to = '';
@@ -196,34 +202,34 @@
 				break;
 			case 'yesterday': {
 				const yesterday = new Date(today);
-				yesterday.setDate(yesterday.getDate() - 1);
+				yesterday.setUTCDate(yesterday.getUTCDate() - 1);
 				from = formatDateForInput(yesterday);
 				to = formatDateForInput(yesterday);
 				break;
 			}
 			case 'last7days': {
 				const weekAgo = new Date(today);
-				weekAgo.setDate(weekAgo.getDate() - 6);
+				weekAgo.setUTCDate(weekAgo.getUTCDate() - 6);
 				from = formatDateForInput(weekAgo);
 				to = formatDateForInput(today);
 				break;
 			}
 			case 'last30days': {
 				const monthAgo = new Date(today);
-				monthAgo.setDate(monthAgo.getDate() - 29);
+				monthAgo.setUTCDate(monthAgo.getUTCDate() - 29);
 				from = formatDateForInput(monthAgo);
 				to = formatDateForInput(today);
 				break;
 			}
 			case 'thisMonth': {
-				const firstOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+				const firstOfMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
 				from = formatDateForInput(firstOfMonth);
 				to = formatDateForInput(today);
 				break;
 			}
 			case 'lastMonth': {
-				const firstOfLastMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1);
-				const lastOfLastMonth = new Date(today.getFullYear(), today.getMonth(), 0);
+				const firstOfLastMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 1, 1));
+				const lastOfLastMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 0));
 				from = formatDateForInput(firstOfLastMonth);
 				to = formatDateForInput(lastOfLastMonth);
 				break;
@@ -292,8 +298,10 @@
 			if (filterActions.length > 0) params.set('actions', filterActions.join(','));
 			if (filterEnvironmentId !== null) params.set('environmentId', String(filterEnvironmentId));
 			if (filterLabels.length > 0) params.set('labels', filterLabels.join(','));
-			if (filterFromDate) params.set('fromDate', filterFromDate);
-			if (filterToDate) params.set('toDate', filterToDate + 'T23:59:59');
+			// Convert configured-timezone day boundaries to UTC instants so they
+			// compare correctly against UTC-stored timestamps (#1269)
+			if (filterFromDate) params.set('fromDate', dayBoundaryToUtcISO(filterFromDate, filterTimezone, false));
+			if (filterToDate) params.set('toDate', dayBoundaryToUtcISO(filterToDate, filterTimezone, true));
 			params.set('limit', String(FETCH_BATCH_SIZE));
 			params.set('offset', String(append ? events.length : 0));
 
@@ -508,14 +516,12 @@
 				if (filterActions.length > 0 && !filterActions.includes(newEvent.action)) return;
 				if (filterEnvironmentId !== null && newEvent.environmentId !== filterEnvironmentId) return;
 
-				// Check date filters
-				if (filterFromDate) {
-					const eventDate = new Date(newEvent.timestamp).toISOString().split('T')[0];
-					if (eventDate < filterFromDate) return;
-				}
-				if (filterToDate) {
-					const eventDate = new Date(newEvent.timestamp).toISOString().split('T')[0];
-					if (eventDate > filterToDate) return;
+				// Check date filters - boundaries are days in the configured
+				// timezone, compared as UTC instants (#1269)
+				if (filterFromDate || filterToDate) {
+					const eventTime = new Date(newEvent.timestamp).getTime();
+					if (filterFromDate && eventTime < new Date(dayBoundaryToUtcISO(filterFromDate, filterTimezone, false)).getTime()) return;
+					if (filterToDate && eventTime > new Date(dayBoundaryToUtcISO(filterToDate, filterTimezone, true)).getTime()) return;
 				}
 
 				// Add to beginning of events (prepend new events) - use Set for fast duplicate check

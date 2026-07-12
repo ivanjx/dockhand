@@ -30,7 +30,8 @@ import {
 } from '../../docker';
 import { sendEventNotification } from '../../notifications';
 import { getScannerSettings, scanImage, type VulnerabilitySeverity } from '../../scanner';
-import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer, shouldProceedOnScanError, isPodmanInfraContainer } from './update-utils';
+import { parseImageNameAndTag, combineScanSummaries, isSystemContainer, shouldProceedOnScanError, isPodmanInfraContainer } from './update-utils';
+import { resolveBlockDecision } from './block-decision';
 import { isUpdateDisabledByLabel, isHiddenByLabel } from '../../container-labels';
 import { recreateContainer } from './container-update';
 
@@ -110,7 +111,7 @@ export async function runEnvUpdateCheckJob(
 		const allContainers = await listContainers(true, environmentId);
 		// Skip hidden + Podman pod-infra (#1083, #1221)
 		const containers = allContainers.filter(
-			(c) => !isHiddenByLabel(c.labels) && !isPodmanInfraContainer(c.image, c.labels)
+			(c) => !isHiddenByLabel(c.labels) && !isPodmanInfraContainer(c.name)
 		);
 		const hiddenCount = allContainers.length - containers.length;
 		await log(`Found ${containers.length} containers${hiddenCount ? ` (${hiddenCount} hidden/infra)` : ''}`);
@@ -324,8 +325,16 @@ export async function runEnvUpdateCheckJob(
 									} catch { /* ignore save errors */ }
 								}
 
-								// Check if blocked
-								const { blocked, reason } = shouldBlockUpdate(vulnerabilityCriteria, scanSummary, undefined);
+								// Decide whether to block. For 'more_than_current' this
+								// re-scans the current image so the comparison uses
+								// up-to-date numbers (#1022) and works on a cold cache.
+								const { blocked, reason } = await resolveBlockDecision(
+									scanSummary,
+									update.currentImageId,
+									environmentId,
+									vulnerabilityCriteria,
+									(m) => { void log(`  ${m}`); }
+								);
 								if (blocked) {
 									scanBlocked = true;
 									blockReason = reason;

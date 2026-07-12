@@ -8,6 +8,7 @@
  * - dockhand.url=<url>     — Custom clickable URL displayed alongside container ports
  * - dockhand.port.<hostPort>.url=<url> — Override the click URL for a specific published port
  * - dockhand.order=<int>  — Controls display order within a stack (lower = first, default 0)
+ * - dockhand.adopt=false  — Prevent this stack from being adopted (any container in the stack)
  *
  * All label values are case-insensitive and accept: true/yes/1 and false/no/0.
  * The opt-out model means labels override DB settings (label wins).
@@ -20,6 +21,7 @@ export const DOCKHAND_LABELS = {
 	NOTIFY: 'dockhand.notify',
 	URL: 'dockhand.url',
 	ORDER: 'dockhand.order',
+	ADOPT: 'dockhand.adopt',
 } as const;
 
 const TRUTHY_VALUES = new Set(['true', 'yes', '1']);
@@ -75,6 +77,26 @@ export function isHiddenByLabel(labels: Record<string, string> | undefined | nul
 export function isNotifyDisabledByLabel(labels: Record<string, string> | undefined | null): boolean {
 	const value = parseLabelBool(getLabel(labels, DOCKHAND_LABELS.NOTIFY));
 	return value === false; // explicitly disabled
+}
+
+/**
+ * Check if a single container opts out of stack adoption.
+ * Returns true if dockhand.adopt is explicitly set to false/no/0.
+ * Default (no label): adoptable (opt-out model).
+ */
+export function isAdoptDisabledByLabel(labels: Record<string, string> | undefined | null): boolean {
+	return parseLabelBool(getLabel(labels, DOCKHAND_LABELS.ADOPT)) === false;
+}
+
+/**
+ * Check if a stack should be excluded from adoption. A stack is unadoptable when
+ * ANY of its containers carries dockhand.adopt=false. Only enforceable while the
+ * stack is running (the label lives on containers, not the compose file).
+ */
+export function isStackUnadoptable(
+	containerLabels: Array<Record<string, string> | undefined | null>
+): boolean {
+	return containerLabels.some(isAdoptDisabledByLabel);
 }
 
 /**

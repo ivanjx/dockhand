@@ -1,29 +1,9 @@
 import { json, type RequestHandler } from '@sveltejs/kit';
-import { scanImage, type ScanProgress, type ScanResult } from '$lib/server/scanner';
+import { scanImage, scanResultToDbFormat, type ScanProgress } from '$lib/server/scanner';
 import { saveVulnerabilityScan, getLatestScanForImage } from '$lib/server/db';
 import { inspectImage } from '$lib/server/docker';
 import { authorize } from '$lib/server/authorize';
 import { createJobResponse } from '$lib/server/sse';
-
-// Helper to convert ScanResult to database format
-function scanResultToDbFormat(result: ScanResult, envId?: number) {
-	return {
-		environmentId: envId ?? null,
-		imageId: result.imageId || result.imageName, // Fallback to imageName if imageId is undefined
-		imageName: result.imageName,
-		scanner: result.scanner,
-		scannedAt: result.scannedAt,
-		scanDuration: result.scanDuration,
-		criticalCount: result.summary.critical,
-		highCount: result.summary.high,
-		mediumCount: result.summary.medium,
-		lowCount: result.summary.low,
-		negligibleCount: result.summary.negligible,
-		unknownCount: result.summary.unknown,
-		vulnerabilities: JSON.stringify(result.vulnerabilities),
-		error: result.error ?? null
-	};
-}
 
 // POST - Start a scan (returns { jobId } for progress polling, or synchronous JSON for Accept: application/json)
 export const POST: RequestHandler = async ({ request, url, cookies }) => {

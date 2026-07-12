@@ -81,6 +81,7 @@ import {
 import type { AllGridPreferences, GridId, GridColumnPreferences } from '$lib/types';
 import { encrypt, decrypt } from './encryption.js';
 import { parseEnvInterpolation } from './env-interpolation';
+import { invalidateVulnerabilitiesCache } from './vulnerabilities-cache';
 
 // Re-export for backwards compatibility
 export { db, isPostgres, isSqlite };
@@ -491,6 +492,31 @@ export async function deleteGridPreferences(gridId: GridId, userId?: number): Pr
 
 export async function resetAllGridPreferences(userId?: number): Promise<void> {
 	const key = userId ? `user:${userId}:grid_preferences` : 'grid_preferences';
+	await deleteSetting(key);
+}
+
+// =============================================================================
+// SIDEBAR MENU PREFERENCES
+// =============================================================================
+
+export interface SidebarPreferences {
+	order: string[];
+	hidden: string[];
+}
+
+export async function getSidebarPreferences(userId?: number): Promise<SidebarPreferences> {
+	const key = userId ? `user:${userId}:sidebar_preferences` : 'sidebar_preferences';
+	const value = await getSetting(key);
+	return value || { order: [], hidden: [] };
+}
+
+export async function setSidebarPreferences(prefs: SidebarPreferences, userId?: number): Promise<void> {
+	const key = userId ? `user:${userId}:sidebar_preferences` : 'sidebar_preferences';
+	await setSetting(key, prefs);
+}
+
+export async function deleteSidebarPreferences(userId?: number): Promise<void> {
+	const key = userId ? `user:${userId}:sidebar_preferences` : 'sidebar_preferences';
 	await deleteSetting(key);
 }
 
@@ -3126,6 +3152,9 @@ export async function saveVulnerabilityScan(data: {
 		vulnerabilities: JSON.stringify(data.vulnerabilities),
 		error: data.error ?? null
 	}).returning();
+	// A new scan makes the dashboard's cached findings stale — drop them so every
+	// writer (routes + schedulers) refreshes it, no separate call to remember.
+	invalidateVulnerabilitiesCache(data.environmentId ?? undefined);
 	return getVulnerabilityScan(result[0].id) as Promise<VulnerabilityScanData>;
 }
 
@@ -3169,9 +3198,47 @@ export async function getLatestScanForImage(
 	} as VulnerabilityScanData;
 }
 
-export async function getScansForImage(imageId: string, limit = 10): Promise<VulnerabilityScanData[]> {
+/**
+ * Delete all previous scan rows for a specific image + scanner in an environment.
+ * Used by "scan all" to replace an image's prior scan rather than accumulate rows.
+ * Returns the number of rows removed.
+ */
+export async function deleteScansForImageScanner(
+	imageId: string,
+	scanner: 'grype' | 'trivy',
+	environmentId?: number | null
+): Promise<number> {
+	const conditions = [
+		eq(vulnerabilityScans.imageId, imageId),
+		eq(vulnerabilityScans.scanner, scanner)
+	];
+	if (environmentId === null || environmentId === undefined) {
+		conditions.push(isNull(vulnerabilityScans.environmentId));
+	} else {
+		conditions.push(eq(vulnerabilityScans.environmentId, environmentId));
+	}
+	const result = await db.delete(vulnerabilityScans).where(and(...conditions)).returning({ id: vulnerabilityScans.id });
+	return result.length;
+}
+
+export async function getScansForImage(
+	imageId: string,
+	environmentId?: number | null,
+	limit = 10
+): Promise<VulnerabilityScanData[]> {
+	// Scope by environment so a caller can't read another environment's scans for
+	// the same image SHA (the vulnerability_scans table is per-environment). When
+	// environmentId is omitted (undefined) all environments are returned — callers
+	// exposed to untrusted input MUST pass a concrete env.
+	const conditions = [eq(vulnerabilityScans.imageId, imageId)];
+	if (environmentId !== undefined) {
+		conditions.push(environmentId === null
+			? isNull(vulnerabilityScans.environmentId)
+			: eq(vulnerabilityScans.environmentId, environmentId));
+	}
+
 	const results = await db.select().from(vulnerabilityScans)
-		.where(eq(vulnerabilityScans.imageId, imageId))
+		.where(and(...conditions))
 		.orderBy(desc(vulnerabilityScans.scannedAt))
 		.limit(limit);
 
@@ -3263,11 +3330,56 @@ export async function getAllLatestScans(environmentId?: number | null): Promise<
 	})) as VulnerabilityScanData[];
 }
 
+/**
+ * Scan freshness for the metrics endpoint: how stale the OLDEST scan is
+ * (surfaces environments whose scans have gone stale) and the average scan
+ * duration (surfaces slow scanners). Ages/durations in seconds; nulls when there
+ * are no scans.
+ *
+ * A pure SQL aggregate over only scanned_at / scan_duration — it deliberately
+ * does NOT touch the large `vulnerabilities` JSON blob (unlike getAllLatestScans),
+ * so it stays cheap when called per-environment on every scrape.
+ */
+export async function getScanFreshness(environmentId?: number | null): Promise<{
+	scans: number; oldestAgeSeconds: number | null; avgDurationSeconds: number | null;
+}> {
+	const envCond = environmentId === undefined
+		? undefined
+		: environmentId === null
+			? isNull(vulnerabilityScans.environmentId)
+			: eq(vulnerabilityScans.environmentId, environmentId);
+
+	const rows = await db
+		.select({
+			n: sql<number>`count(*)`,
+			oldest: sql<string | null>`min(${vulnerabilityScans.scannedAt})`,
+			avgDur: sql<number | null>`avg(${vulnerabilityScans.scanDuration})`
+		})
+		.from(vulnerabilityScans)
+		.where(envCond);
+
+	const r = rows[0];
+	const n = Number(r?.n ?? 0);
+	if (n === 0) return { scans: 0, oldestAgeSeconds: null, avgDurationSeconds: null };
+
+	const oldestT = r?.oldest ? new Date(r.oldest).getTime() : NaN;
+	const oldestAgeSeconds = Number.isNaN(oldestT) ? null : Math.max(0, Math.round((Date.now() - oldestT) / 1000));
+	const avgDurationSeconds = r?.avgDur != null ? Math.round(Number(r.avgDur) / 1000) : null;
+
+	return { scans: n, oldestAgeSeconds, avgDurationSeconds };
+}
+
 export async function deleteOldScans(keepDays = 30): Promise<number> {
 	const cutoffDate = new Date(Date.now() - keepDays * 24 * 60 * 60 * 1000).toISOString();
-	await db.delete(vulnerabilityScans)
+	const countResult = await db.select({ count: sql<number>`count(*)` })
+		.from(vulnerabilityScans)
 		.where(sql`scanned_at < ${cutoffDate}`);
-	return 0;
+	const count = Number(countResult[0]?.count ?? 0);
+	if (count > 0) {
+		await db.delete(vulnerabilityScans)
+			.where(sql`scanned_at < ${cutoffDate}`);
+	}
+	return count;
 }
 
 // =============================================================================
@@ -4177,6 +4289,55 @@ export async function getScheduleExecutions(filters: ScheduleExecutionFilters = 
 		total,
 		limit,
 		offset
+	};
+}
+
+/**
+ * Scheduled-task health for the metrics endpoint: execution counts by
+ * (scheduleType, status), and per-type age (seconds) of the last run and last
+ * SUCCESSFUL run. The last-run age detects a scheduler that stopped firing; the
+ * last-success age detects one that fires but keeps failing. Best-effort.
+ */
+export async function getScheduleStats(): Promise<{
+	byTypeStatus: Array<{ type: string; status: string; count: number }>;
+	lastRunSecondsByType: Record<string, number>;
+	lastSuccessSecondsByType: Record<string, number>;
+}> {
+	const counts = await db
+		.select({
+			type: scheduleExecutions.scheduleType,
+			status: scheduleExecutions.status,
+			count: sql<number>`count(*)`
+		})
+		.from(scheduleExecutions)
+		.groupBy(scheduleExecutions.scheduleType, scheduleExecutions.status);
+
+	// Most-recent triggeredAt per type (any status) and per type for successes.
+	const lastAny = await db
+		.select({ type: scheduleExecutions.scheduleType, ts: sql<string>`max(${scheduleExecutions.triggeredAt})` })
+		.from(scheduleExecutions)
+		.groupBy(scheduleExecutions.scheduleType);
+	const lastOk = await db
+		.select({ type: scheduleExecutions.scheduleType, ts: sql<string>`max(${scheduleExecutions.triggeredAt})` })
+		.from(scheduleExecutions)
+		.where(eq(scheduleExecutions.status, 'success'))
+		.groupBy(scheduleExecutions.scheduleType);
+
+	const now = Date.now();
+	const ageMap = (rows: Array<{ type: string; ts: string | null }>): Record<string, number> => {
+		const out: Record<string, number> = {};
+		for (const r of rows) {
+			if (!r.ts) continue;
+			const t = new Date(r.ts).getTime();
+			if (!Number.isNaN(t)) out[r.type] = Math.max(0, Math.round((now - t) / 1000));
+		}
+		return out;
+	};
+
+	return {
+		byTypeStatus: counts.map((c) => ({ type: c.type, status: c.status, count: Number(c.count) })),
+		lastRunSecondsByType: ageMap(lastAny),
+		lastSuccessSecondsByType: ageMap(lastOk)
 	};
 }
 

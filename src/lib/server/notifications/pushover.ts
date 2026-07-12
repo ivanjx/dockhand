@@ -1,5 +1,5 @@
 /** Pushover. pushover://user_key/api_token. */
-import { drainResponse, type NotificationPayload, type NotificationResult } from './shared';
+import { notificationFetch, drainResponse, type NotificationPayload, type NotificationResult } from './shared';
 
 export async function sendPushover(appriseUrl: string, payload: NotificationPayload): Promise<NotificationResult> {
 	const match = appriseUrl.match(/^pushover:\/\/([^/]+)\/(.+)/);
@@ -12,7 +12,7 @@ export async function sendPushover(appriseUrl: string, payload: NotificationPayl
 	const titleWithEnv = payload.environmentName ? `${payload.title} [${payload.environmentName}]` : payload.title;
 
 	try {
-		const response = await fetch(url, {
+		const response = await notificationFetch(url, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({

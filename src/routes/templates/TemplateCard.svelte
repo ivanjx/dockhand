@@ -3,6 +3,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { Package, Star, Download, Loader2, ExternalLink } from 'lucide-svelte';
 	import type { TemplateItem } from '../api/templates/+server';
+	import { renderDescription } from '$lib/utils/template-description';
 
 	interface Props {
 		template: TemplateItem;
@@ -24,14 +25,6 @@
 		return String(pulls);
 	}
 
-	// Convert markdown links [text](url) to HTML <a> tags, strip other HTML
-	function renderDescription(text: string): string {
-		return text
-			.replace(/<a\s+href="([^"]+)"[^>]*>([^<]+)<\/a>/gi, '[$2]($1)')  // normalize HTML links to markdown first
-			.replace(/<[^>]+>/g, '')  // strip remaining HTML tags
-			.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener" class="text-primary hover:underline">$1</a>')
-			.trim();
-	}
 </script>
 
 <button

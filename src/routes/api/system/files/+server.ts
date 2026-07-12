@@ -3,6 +3,7 @@ import type { RequestHandler } from './$types';
 import { readdirSync, statSync, existsSync, mkdirSync } from 'node:fs';
 import { join, basename, isAbsolute } from 'node:path';
 import { authorize } from '$lib/server/authorize';
+import { isProtectedPath } from '$lib/server/fs-guard';
 
 export interface FileEntry {
 	name: string;
@@ -42,6 +43,10 @@ export const POST: RequestHandler = async ({ request, cookies }) => {
 			return json({ error: 'Path must not contain ..' }, { status: 400 });
 		}
 
+		if (isProtectedPath(path)) {
+			return json({ error: 'Access denied' }, { status: 403 });
+		}
+
 		if (existsSync(path)) {
 			return json({ error: 'Path already exists' }, { status: 409 });
 		}
@@ -72,6 +77,10 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
 
 	const path = url.searchParams.get('path') || '/';
 
+	if (isProtectedPath(path)) {
+		return json({ error: 'Access denied' }, { status: 403 });
+	}
+
 	try {
 		if (!existsSync(path)) {
 			return json({ error: `Path not found: ${path}` }, { status: 404 });
@@ -88,6 +97,8 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
 		for (const entry of dirEntries) {
 			try {
 				const fullPath = join(path, entry.name);
+				// Hide Dockhand's secrets (db dir, encryption key) from the listing.
+				if (isProtectedPath(fullPath)) continue;
 				const entryStat = statSync(fullPath);
 
 				entries.push({

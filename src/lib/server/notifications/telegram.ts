@@ -1,6 +1,6 @@
 /** Telegram bot. tgram://bot_token/chat_id[:topic_id]. */
 import { escapeTelegramMarkdown, parseTelegramUrl } from '$lib/utils/notification-parsers';
-import { drainResponse, type NotificationPayload, type NotificationResult } from './shared';
+import { notificationFetch, drainResponse, type NotificationPayload, type NotificationResult } from './shared';
 
 export async function sendTelegram(appriseUrl: string, payload: NotificationPayload): Promise<NotificationResult> {
 	const parsed = parseTelegramUrl(appriseUrl);
@@ -16,7 +16,7 @@ export async function sendTelegram(appriseUrl: string, payload: NotificationPayl
 	const envTag = payload.environmentName ? ` [${escapeTelegramMarkdown(payload.environmentName)}]` : '';
 
 	try {
-		const response = await fetch(url, {
+		const response = await notificationFetch(url, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({

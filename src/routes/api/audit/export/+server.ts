@@ -1,15 +1,7 @@
 import { authorize, enterpriseRequired } from '$lib/server/authorize';
 import { getAuditLogs, type AuditLogFilters, type AuditEntityType, type AuditAction, type AuditLog } from '$lib/server/db';
+import { rowsToCSV } from '$lib/server/csv';
 import type { RequestHandler } from './$types';
-
-function escapeCSV(value: string | null | undefined): string {
-	if (value === null || value === undefined) return '';
-	const str = String(value);
-	if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-		return `"${str.replace(/"/g, '""')}"`;
-	}
-	return str;
-}
 
 function formatToJSON(logs: AuditLog[]): string {
 	return JSON.stringify(logs, null, 2);
@@ -34,19 +26,19 @@ function formatToCSV(logs: AuditLog[]): string {
 	const rows = logs.map((log) => [
 		log.id,
 		log.createdAt,
-		escapeCSV(log.username),
-		escapeCSV(log.action),
-		escapeCSV(log.entityType),
-		escapeCSV(log.entityId),
-		escapeCSV(log.entityName),
+		log.username,
+		log.action,
+		log.entityType,
+		log.entityId,
+		log.entityName,
 		log.environmentId ?? '',
-		escapeCSV(log.description),
-		escapeCSV(log.ipAddress),
-		escapeCSV(log.userAgent),
-		escapeCSV(log.details ? JSON.stringify(log.details) : '')
+		log.description,
+		log.ipAddress,
+		log.userAgent,
+		log.details ? JSON.stringify(log.details) : ''
 	]);
 
-	return [headers.join(','), ...rows.map((row) => row.join(','))].join('\n');
+	return rowsToCSV(headers, rows);
 }
 
 function formatToMarkdown(logs: AuditLog[]): string {

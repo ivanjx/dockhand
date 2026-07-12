@@ -3,7 +3,9 @@
 	import { Button } from '$lib/components/ui/button';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 	import { Checkbox } from '$lib/components/ui/checkbox';
-	import { Download, CheckCircle2, XCircle, ShieldCheck, ShieldAlert, ShieldX, FileText, FileSpreadsheet } from 'lucide-svelte';
+	import { Download, CheckCircle2, XCircle, ShieldCheck, ShieldAlert, ShieldX, FileText, FileJson, FileSpreadsheet, ShieldPlus } from 'lucide-svelte';
+	import { findingsToSarif } from '$lib/utils/sarif';
+	import { flattenScansToFindings } from '$lib/utils/vulnerability';
 	import { currentEnvironment } from '$lib/stores/environment';
 	import ScanTab from '$lib/components/ScanTab.svelte';
 	import type { ScanResult } from '$lib/components/ScanTab.svelte';
@@ -224,6 +226,24 @@
 		downloadFile(jsonContent, filename, 'application/json');
 	}
 
+	function exportToSARIF() {
+		if (exportResults.length === 0) return;
+		// Reuse the shared flattener so cross-scanner duplicates (grype + trivy
+		// reporting the same CVE) are deduped, matching the server exports.
+		const findings = flattenScansToFindings(
+			exportResults.map((r) => ({
+				imageId: r.imageId ?? imageName,
+				imageName,
+				scannedAt: new Date().toISOString(),
+				vulnerabilities: r.vulnerabilities
+			}))
+		);
+		const sarif = findingsToSarif(findings, { toolName: 'Dockhand' });
+		const scannerSuffix = exportResults.length > 1 ? 'combined' : exportResults[0].scanner;
+		const filename = `vuln-report-${sanitizeFilename(imageName)}-${scannerSuffix}-${new Date().toISOString().split('T')[0]}.sarif`;
+		downloadFile(JSON.stringify(sarif, null, 2), filename, 'application/sarif+json');
+	}
+
 	const totalVulnerabilities = $derived(
 		scanResults.reduce((total, r) => total + r.vulnerabilities.length, 0)
 	);
@@ -312,8 +332,12 @@
 								CSV spreadsheet (.csv)
 							</DropdownMenu.Item>
 							<DropdownMenu.Item onclick={exportToJSON} disabled={exportResults.length === 0}>
-								<FileText class="w-4 h-4 mr-2 text-amber-500" />
+								<FileJson class="w-4 h-4 mr-2 text-amber-500" />
 								JSON data (.json)
+							</DropdownMenu.Item>
+							<DropdownMenu.Item onclick={exportToSARIF} disabled={exportResults.length === 0}>
+								<ShieldPlus class="w-4 h-4 mr-2 text-blue-500" />
+								SARIF (.sarif)
 							</DropdownMenu.Item>
 						</DropdownMenu.Content>
 					</DropdownMenu.Root>

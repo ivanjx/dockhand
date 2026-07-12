@@ -2,6 +2,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { authorize } from '$lib/server/authorize';
+import { isProtectedPath } from '$lib/server/fs-guard';
 
 /**
  * GET /api/system/files/content
@@ -21,6 +22,10 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
 
 	if (!path) {
 		return json({ error: 'Path is required' }, { status: 400 });
+	}
+
+	if (isProtectedPath(path)) {
+		return json({ error: 'Access denied' }, { status: 403 });
 	}
 
 	try {

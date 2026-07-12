@@ -47,6 +47,7 @@ export interface AppSettings {
 	labelFilterMode: LabelFilterMode;
 	honorProxyLabels: boolean;
 	showImageChangelogLinks: boolean;
+	showWhatsNew: boolean;   // show the "What's New" modal after an upgrade (#1235)
 	protectScannerImages: boolean;
 	// Scanner Advanced settings (#1219). Empty values = use auto-detection.
 	defaultScannerNetworkMode: string;   // '' | 'host' | 'bridge' | 'none' | <custom-network>
@@ -81,11 +82,12 @@ const DEFAULT_SETTINGS: AppSettings = {
 	formatLogTimestamps: false,
 	externalStackPaths: [],
 	primaryStackLocation: null,
-	defaultGrypeImage: 'anchore/grype:v0.110.0',
-	defaultTrivyImage: 'aquasec/trivy:0.69.3',
+	defaultGrypeImage: 'anchore/grype:v0.115.0',
+	defaultTrivyImage: 'aquasec/trivy:0.71.2',
 	labelFilterMode: 'any',
 	honorProxyLabels: true,
 	showImageChangelogLinks: true,
+	showWhatsNew: true,
 	protectScannerImages: true,
 	defaultScannerNetworkMode: '',
 	defaultScannerDns: [],
@@ -171,6 +173,7 @@ function createSettingsStore() {
 				labelFilterMode: settings.labelFilterMode ?? DEFAULT_SETTINGS.labelFilterMode,
 				honorProxyLabels: settings.honorProxyLabels ?? DEFAULT_SETTINGS.honorProxyLabels,
 				showImageChangelogLinks: settings.showImageChangelogLinks ?? DEFAULT_SETTINGS.showImageChangelogLinks,
+				showWhatsNew: settings.showWhatsNew ?? DEFAULT_SETTINGS.showWhatsNew,
 				protectScannerImages: settings.protectScannerImages ?? DEFAULT_SETTINGS.protectScannerImages,
 				defaultScannerNetworkMode: settings.defaultScannerNetworkMode ?? DEFAULT_SETTINGS.defaultScannerNetworkMode,
 				defaultScannerDns: Array.isArray(settings.defaultScannerDns) ? settings.defaultScannerDns : DEFAULT_SETTINGS.defaultScannerDns
@@ -227,6 +230,7 @@ function createSettingsStore() {
 				labelFilterMode: updatedSettings.labelFilterMode ?? DEFAULT_SETTINGS.labelFilterMode,
 				honorProxyLabels: updatedSettings.honorProxyLabels ?? DEFAULT_SETTINGS.honorProxyLabels,
 				showImageChangelogLinks: updatedSettings.showImageChangelogLinks ?? DEFAULT_SETTINGS.showImageChangelogLinks,
+				showWhatsNew: updatedSettings.showWhatsNew ?? DEFAULT_SETTINGS.showWhatsNew,
 				protectScannerImages: updatedSettings.protectScannerImages ?? DEFAULT_SETTINGS.protectScannerImages,
 				defaultScannerNetworkMode: updatedSettings.defaultScannerNetworkMode ?? DEFAULT_SETTINGS.defaultScannerNetworkMode,
 				defaultScannerDns: Array.isArray(updatedSettings.defaultScannerDns) ? updatedSettings.defaultScannerDns : DEFAULT_SETTINGS.defaultScannerDns
@@ -505,6 +509,13 @@ function createSettingsStore() {
 			update((current) => {
 				const newSettings = { ...current, showImageChangelogLinks: value };
 				saveSettings({ showImageChangelogLinks: value });
+				return newSettings;
+			});
+		},
+		setShowWhatsNew: (value: boolean) => {
+			update((current) => {
+				const newSettings = { ...current, showWhatsNew: value };
+				saveSettings({ showWhatsNew: value });
 				return newSettings;
 			});
 		},

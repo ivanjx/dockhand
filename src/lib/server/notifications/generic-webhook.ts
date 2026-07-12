@@ -1,12 +1,12 @@
 /** Generic JSON webhook. json:// or jsons:// (HTTPS). */
-import { drainResponse, type NotificationPayload, type NotificationResult } from './shared';
+import { notificationFetch, drainResponse, type NotificationPayload, type NotificationResult } from './shared';
 
 export async function sendGenericWebhook(appriseUrl: string, payload: NotificationPayload): Promise<NotificationResult> {
 	// json://hostname/path or jsons://hostname/path
 	const url = appriseUrl.replace(/^jsons?:\/\//, appriseUrl.startsWith('jsons') ? 'https://' : 'http://');
 
 	try {
-		const response = await fetch(url, {
+		const response = await notificationFetch(url, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({

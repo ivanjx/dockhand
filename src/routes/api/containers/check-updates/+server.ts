@@ -2,7 +2,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { authorize } from '$lib/server/authorize';
 import { listContainers, inspectContainer, checkImageUpdateAvailable } from '$lib/server/docker';
-import { clearPendingContainerUpdates, addPendingContainerUpdate } from '$lib/server/db';
+import { clearPendingContainerUpdates, addPendingContainerUpdate, getPendingContainerUpdates } from '$lib/server/db';
 import { isSystemContainer, isPodmanInfraContainer } from '$lib/server/scheduler/tasks/update-utils';
 import { isUpdateDisabledByLabel, isHiddenByLabel } from '$lib/server/container-labels';
 import { createJobResponse } from '$lib/server/sse';
@@ -21,7 +21,43 @@ export interface UpdateCheckResult {
 }
 
 /**
- * Check all containers for available image updates.
+ * GET = READ the cached result of the last update check (no side effects, does NOT
+ * trigger a new check). Returns the containers currently flagged as having a pending
+ * image update. Use POST (below) to actually run a fresh check. (issue #1266)
+ */
+export const GET: RequestHandler = async ({ url, cookies }) => {
+	const auth = await authorize(cookies);
+
+	const envId = url.searchParams.get('env');
+	const envIdNum = envId ? parseInt(envId) : undefined;
+
+	if (!envIdNum) {
+		return json({ error: 'Environment ID required' }, { status: 400 });
+	}
+
+	if (auth.authEnabled && !await auth.can('containers', 'view', envIdNum)) {
+		return json({ error: 'Permission denied' }, { status: 403 });
+	}
+
+	try {
+		const pendingUpdates = await getPendingContainerUpdates(envIdNum);
+		return json({
+			environmentId: envIdNum,
+			pendingUpdates: pendingUpdates.map(u => ({
+				containerId: u.containerId,
+				containerName: u.containerName,
+				currentImage: u.currentImage,
+				checkedAt: u.checkedAt
+			}))
+		});
+	} catch (error: any) {
+		console.error('Error getting pending updates:', error);
+		return json({ error: 'Failed to get pending updates', details: error.message }, { status: 500 });
+	}
+};
+
+/**
+ * POST = TRIGGER a fresh update check across all containers (job-based).
  * Returns progress events during checking, final result when done.
  */
 export const POST: RequestHandler = async ({ url, cookies, request }) => {
@@ -44,9 +80,9 @@ export const POST: RequestHandler = async ({ url, cookies, request }) => {
 		const allContainers = await listContainers(true, envIdNum);
 		// Skip:
 		// - dockhand.hidden=true (invisible to user, so no update alerts) (#1083)
-		// - Podman pod-infra containers (localhost/podman-pause, never published) (#1221)
+		// - Podman pod-infra containers (named <pod>-infra, never published) (#1221)
 		const containers = allContainers.filter(
-			(c) => !isHiddenByLabel(c.labels) && !isPodmanInfraContainer(c.image, c.labels)
+			(c) => !isHiddenByLabel(c.labels) && !isPodmanInfraContainer(c.name)
 		);
 
 		send('progress', { checked: 0, total: containers.length });

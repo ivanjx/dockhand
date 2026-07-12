@@ -218,6 +218,7 @@
 	const isProcessing = $derived(pullStatus === 'pulling' || scanStatus === 'scanning' || isDeleting);
 
 	const effectiveEnvId = $derived(envId ?? $currentEnvironment?.id ?? null);
+	const effectiveEnvName = $derived($currentEnvironment?.id === effectiveEnvId ? $currentEnvironment?.name : null);
 
 	const title = $derived(envHasScanning ? 'Pull & scan image' : 'Pull image');
 </script>
@@ -241,7 +242,7 @@
 				{:else}
 					<Download class="w-5 h-5" />
 				{/if}
-				{title}
+				<span>{title}{#if effectiveEnvName}&nbsp;to <span class="text-amber-500">{effectiveEnvName}</span>{/if}</span>
 				{#if effectiveImageName}
 					<code class="text-sm font-normal bg-muted px-1.5 py-0.5 rounded ml-1">{effectiveImageName}</code>
 				{/if}

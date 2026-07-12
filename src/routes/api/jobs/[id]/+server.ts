@@ -1,5 +1,5 @@
 import { json } from '@sveltejs/kit';
-import { getJob } from '$lib/server/jobs';
+import { getJob, cancelJob } from '$lib/server/jobs';
 import type { RequestHandler } from './$types';
 
 /**
@@ -20,4 +20,14 @@ export const GET: RequestHandler = async ({ params }) => {
 		lines: job.lines,
 		result: job.result ?? null
 	});
+};
+
+/**
+ * DELETE /api/jobs/[id]
+ * Request cancellation of a running job. The job's operation polls the flag
+ * between units of work and stops gracefully.
+ */
+export const DELETE: RequestHandler = async ({ params }) => {
+	const cancelled = cancelJob(params.id);
+	return json({ cancelled });
 };

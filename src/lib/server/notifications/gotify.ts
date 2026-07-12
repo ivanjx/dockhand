@@ -1,6 +1,6 @@
 /** Gotify. gotify:// or gotifys:// (HTTPS). */
 import { buildGotifyUrl } from '$lib/utils/notification-parsers';
-import { drainResponse, type NotificationPayload, type NotificationResult } from './shared';
+import { notificationFetch, drainResponse, type NotificationPayload, type NotificationResult } from './shared';
 
 export async function sendGotify(appriseUrl: string, payload: NotificationPayload): Promise<NotificationResult> {
 	const parsed = buildGotifyUrl(appriseUrl);
@@ -12,7 +12,7 @@ export async function sendGotify(appriseUrl: string, payload: NotificationPayloa
 	const defaultPriority = payload.type === 'error' ? 8 : payload.type === 'warning' ? 5 : 2;
 
 	try {
-		const response = await fetch(parsed.url, {
+		const response = await notificationFetch(parsed.url, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({

@@ -1,5 +1,5 @@
 /** Slack incoming webhook. slack:// or slacks:// or a raw hooks.slack.com URL. */
-import { drainResponse, type NotificationPayload, type NotificationResult } from './shared';
+import { notificationFetch, drainResponse, type NotificationPayload, type NotificationResult } from './shared';
 
 export async function sendSlack(appriseUrl: string, payload: NotificationPayload): Promise<NotificationResult> {
 	// slack://token_a/token_b/token_c or webhook URL
@@ -14,7 +14,7 @@ export async function sendSlack(appriseUrl: string, payload: NotificationPayload
 	const envTag = payload.environmentName ? ` \`${payload.environmentName}\`` : '';
 
 	try {
-		const response = await fetch(url, {
+		const response = await notificationFetch(url, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({

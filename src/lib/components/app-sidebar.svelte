@@ -25,12 +25,20 @@
 		Activity,
 		Timer,
 		LibraryBig,
-		CircleArrowUp
+		CircleArrowUp,
+		Pencil,
+		Check,
+		GripVertical,
+		Eye,
+		EyeOff,
+		RotateCcw
 	} from 'lucide-svelte';
+	import { flip } from 'svelte/animate';
 	import { licenseStore } from '$lib/stores/license';
 	import { authStore, hasAnyAccess } from '$lib/stores/auth';
 	import { selfUpdate } from '$lib/stores/self-update';
 	import { appSettings } from '$lib/stores/settings';
+	import { sidebarPreferencesStore, orderItems } from '$lib/stores/sidebar-preferences';
 	import * as Avatar from '$lib/components/ui/avatar';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 
@@ -41,6 +49,7 @@
 		// One-shot Dockhand update check (#1146). Result is cached for the
 		// browser session — the Settings → About page reads the same store.
 		selfUpdate.checkOnce();
+		sidebarPreferencesStore.init();
 	});
 
 	import type { Permissions } from '$lib/stores/auth';
@@ -67,6 +76,8 @@
 
 	async function handleLogout() {
 		sidebar.setOpenMobile(false);
+		// Per-user layout must not leak to the next user on this browser
+		sidebarPreferencesStore.clearLocal();
 		await authStore.logout();
 		goto('/login');
 	}
@@ -119,6 +130,89 @@
 		{ href: '/audit', Icon: ClipboardList, label: 'Audit log', permission: 'audit_logs', enterpriseOnly: true },
 		{ href: '/settings', Icon: Settings, label: 'Settings', permission: 'settings' }
 	] as const;
+
+	// --- Sidebar customization (#1252): reorder + hide/show menu items ---
+
+	let editMode = $state(false);
+	let dragHref = $state<string | null>(null);
+	// Order buffer while dragging - persisted once on drop, not per dragover
+	let draftOrder = $state<string[] | null>(null);
+
+	// Full menu (incl. permission-hidden items) in the user's saved order,
+	// so reordering never loses positions of items the user can't see.
+	const orderedItems = $derived(orderItems(menuItems, draftOrder ?? $sidebarPreferencesStore.order));
+	const hiddenSet = $derived(new Set($sidebarPreferencesStore.hidden));
+	// Permission filter first, then user-hidden filter
+	const editableItems = $derived(orderedItems.filter(canSeeMenuItem));
+	const visibleItems = $derived(editableItems.filter((item) => !hiddenSet.has(item.href)));
+
+	// Edit mode only makes sense expanded - exit when the sidebar collapses
+	$effect(() => {
+		if (sidebar.state === 'collapsed' && editMode) {
+			editMode = false;
+		}
+	});
+
+	function persist(order: string[]) {
+		sidebarPreferencesStore.save({ order, hidden: [...hiddenSet] });
+	}
+
+	function toggleHidden(href: string) {
+		const hidden = new Set(hiddenSet);
+		if (hidden.has(href)) {
+			hidden.delete(href);
+		} else {
+			hidden.add(href);
+		}
+		sidebarPreferencesStore.save({ order: orderedItems.map((i) => i.href), hidden: [...hidden] });
+	}
+
+	/**
+	 * Place fromHref before/after toHref in the full order list.
+	 * No-ops when the result wouldn't change, which keeps dragover
+	 * events from thrashing the list while the pointer hovers a row.
+	 */
+	function moveTo(fromHref: string, toHref: string, before: boolean) {
+		const current = orderedItems.map((i) => i.href);
+		if (!current.includes(fromHref) || !current.includes(toHref)) return;
+		const order = current.filter((h) => h !== fromHref);
+		const insertAt = order.indexOf(toHref) + (before ? 0 : 1);
+		order.splice(insertAt, 0, fromHref);
+		if (order.join('\n') !== current.join('\n')) {
+			draftOrder = order;
+		}
+	}
+
+	function moveBy(href: string, delta: -1 | 1) {
+		const visible = editableItems.map((i) => i.href);
+		const from = visible.indexOf(href);
+		const to = from + delta;
+		if (to < 0 || to >= visible.length) return;
+		moveTo(href, visible[to], delta < 0);
+		if (draftOrder) {
+			persist(draftOrder);
+			draftOrder = null;
+		}
+	}
+
+	function endDrag() {
+		if (draftOrder) {
+			persist(draftOrder);
+			draftOrder = null;
+		}
+		dragHref = null;
+	}
+
+	// Transparent 1x1 drag image: suppresses the browser's ghost snapshot so
+	// the flip animation of the list itself reads as the drag movement.
+	let ghostImg: HTMLImageElement | null = null;
+	function transparentGhost(): HTMLImageElement {
+		if (!ghostImg) {
+			ghostImg = new Image(1, 1);
+			ghostImg.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+		}
+		return ghostImg;
+	}
 </script>
 
 {#snippet versionTooltip()}
@@ -172,17 +266,98 @@
 	<Sidebar.Content>
 		<Sidebar.Group>
 			<Sidebar.Menu>
-				{#each menuItems as item}
-					{#if canSeeMenuItem(item)}
-					<Sidebar.MenuItem>
-						<Sidebar.MenuButton href={item.href} isActive={isActive(item.href)} tooltipContent={item.label} onclick={() => sidebar.setOpenMobile(false)}>
-							<item.Icon aria-hidden="true" />
-							<span class="group-data-[state=collapsed]:hidden">{item.label}</span>
-						</Sidebar.MenuButton>
-					</Sidebar.MenuItem>
-					{/if}
+				{#each editMode ? editableItems : visibleItems as item (item.href)}
+					<li class="group/menu-item relative" animate:flip={{ duration: 200 }}>
+						{#if editMode}
+							<div
+								role="listitem"
+								class="flex items-center gap-1.5 px-1.5 py-1 rounded-md text-xs select-none transition-opacity
+									{hiddenSet.has(item.href) ? 'opacity-40' : ''}
+									{dragHref === item.href ? 'opacity-30 bg-sidebar-accent' : ''}"
+								draggable="true"
+								ondragstart={(e) => {
+									dragHref = item.href;
+									if (e.dataTransfer) {
+										e.dataTransfer.effectAllowed = 'move';
+										// Safari won't start a drag without data
+										e.dataTransfer.setData('text/plain', item.href);
+										e.dataTransfer.setDragImage(transparentGhost(), 0, 0);
+									}
+								}}
+								ondragover={(e) => {
+									e.preventDefault();
+									if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+									if (!dragHref || dragHref === item.href) return;
+									// Only reorder when the pointer is past the row midpoint,
+									// so a hover near the boundary doesn't flip back and forth
+									const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+									const before = e.clientY < rect.top + rect.height / 2;
+									moveTo(dragHref, item.href, before);
+								}}
+								ondrop={(e) => e.preventDefault()}
+								ondragend={endDrag}
+							>
+								<button
+									type="button"
+									class="cursor-grab text-muted-foreground/60 hover:text-foreground focus:outline-none focus-visible:text-foreground"
+									aria-label="Reorder {item.label}"
+									title="Drag to reorder (or use arrow keys)"
+									onkeydown={(e) => {
+										if (e.key === 'ArrowUp') { e.preventDefault(); moveBy(item.href, -1); }
+										if (e.key === 'ArrowDown') { e.preventDefault(); moveBy(item.href, 1); }
+									}}
+								>
+									<GripVertical class="w-3 h-3" />
+								</button>
+								<item.Icon class="!w-3.5 !h-3.5 shrink-0" aria-hidden="true" />
+								<span class="flex-1 truncate">{item.label}</span>
+								<button
+									type="button"
+									class="text-muted-foreground/60 hover:text-foreground transition-colors"
+									title={hiddenSet.has(item.href) ? `Show ${item.label}` : `Hide ${item.label}`}
+									aria-label={hiddenSet.has(item.href) ? `Show ${item.label}` : `Hide ${item.label}`}
+									onclick={() => toggleHidden(item.href)}
+								>
+									{#if hiddenSet.has(item.href)}
+										<EyeOff class="w-3 h-3" />
+									{:else}
+										<Eye class="w-3 h-3" />
+									{/if}
+								</button>
+							</div>
+						{:else}
+							<Sidebar.MenuButton href={item.href} isActive={isActive(item.href)} tooltipContent={item.label} onclick={() => sidebar.setOpenMobile(false)}>
+								<item.Icon aria-hidden="true" />
+								<span class="group-data-[state=collapsed]:hidden">{item.label}</span>
+							</Sidebar.MenuButton>
+						{/if}
+					</li>
 				{/each}
 			</Sidebar.Menu>
+			{#if editMode}
+				<div class="flex items-center justify-between px-2 py-1 mt-1 text-xs leading-none">
+					<button
+						type="button"
+						class="flex items-center gap-1 whitespace-nowrap font-medium text-muted-foreground hover:text-foreground transition-colors"
+						title="Reset menu to default order and visibility"
+						onclick={() => {
+							sidebarPreferencesStore.reset();
+							editMode = false;
+						}}
+					>
+						<RotateCcw class="w-3 h-3 shrink-0 text-red-400" />
+						Reset
+					</button>
+					<button
+						type="button"
+						class="flex items-center gap-1 whitespace-nowrap font-medium text-muted-foreground hover:text-foreground transition-colors"
+						onclick={() => (editMode = false)}
+					>
+						<Check class="w-3 h-3 shrink-0 text-emerald-500" />
+						Apply
+					</button>
+				</div>
+			{/if}
 		</Sidebar.Group>
 	</Sidebar.Content>
 
@@ -222,6 +397,20 @@
 				</a>
 			{/if}
 		</span>
+		<!-- Customize-menu toggle (#1252): invisible until this bottom strip is
+		     hovered, so it never distracts users who don't customize. Hidden
+		     while editing - the Apply button under the menu exits edit mode. -->
+		{#if !editMode}
+			<button
+				type="button"
+				class="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-md text-muted-foreground/50 hover:text-foreground hover:bg-sidebar-accent transition-all opacity-0 group-hover/version:opacity-100 focus-visible:opacity-100"
+				title="Customize menu"
+				aria-label="Customize menu"
+				onclick={() => (editMode = true)}
+			>
+				<Pencil class="w-3 h-3" />
+			</button>
+		{/if}
 		<div
 			role="tooltip"
 			class="pointer-events-none absolute left-0 bottom-full mb-1 whitespace-nowrap rounded-md border bg-popover text-popover-foreground text-xs px-3 py-1.5 shadow-lg opacity-0 group-hover/version:opacity-100 transition-opacity z-50"

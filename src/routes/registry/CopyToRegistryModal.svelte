@@ -79,7 +79,12 @@
 
 	const fullSourceImageName = $derived(() => {
 		const tagToUse = sourceTag.trim() || 'latest';
-		const imageWithTag = imageName.includes(':') ? imageName : `${imageName}:${tagToUse}`;
+		// "Already tagged" means a colon AFTER the last slash (or a @digest) — NOT the
+		// colon in a registry host:port like registry.example.com:5000/myimage, which
+		// would otherwise swallow the real tag and default it to :latest (#1243).
+		const lastSlash = imageName.lastIndexOf('/');
+		const alreadyTagged = imageName.lastIndexOf(':') > lastSlash || imageName.includes('@');
+		const imageWithTag = alreadyTagged ? imageName : `${imageName}:${tagToUse}`;
 		if (sourceRegistry && !isDockerHub(sourceRegistry)) {
 			const urlObj = new URL(sourceRegistry.url);
 			// Include both host and path (e.g., registry.example.com/organization)

@@ -3,6 +3,7 @@
 	import { Loader2, Layers, ChevronDown, ChevronRight } from 'lucide-svelte';
 	import { currentEnvironment, appendEnvParam } from '$lib/stores/environment';
 	import { formatDateTime } from '$lib/stores/settings';
+	import { highlightCommand } from '$lib/utils/highlight-command';
 
 	interface Props {
 		imageId: string;
@@ -125,37 +126,6 @@
 		return parts[0];
 	}
 
-	function highlightCommand(cmd: string): string {
-		if (!cmd) return '';
-
-		// Dockerfile instructions
-		const dockerInstructions = ['ADD', 'COPY', 'ENV', 'ARG', 'WORKDIR', 'RUN', 'CMD', 'ENTRYPOINT', 'EXPOSE', 'VOLUME', 'USER', 'LABEL', 'HEALTHCHECK', 'SHELL', 'ONBUILD', 'STOPSIGNAL', 'MAINTAINER', 'FROM'];
-		const dockerInstructionPattern = new RegExp(`\\b(${dockerInstructions.join('|')})\\b`, 'g');
-
-		// Shell keywords
-		const shellKeywords = ['if', 'then', 'else', 'elif', 'fi', 'for', 'while', 'do', 'done', 'case', 'esac', 'function', 'in', 'select'];
-		const shellKeywordPattern = new RegExp(`\\b(${shellKeywords.join('|')})\\b`, 'g');
-
-		// Common commands
-		const commands = ['apt-get', 'apk', 'yum', 'pip', 'npm', 'yarn', 'git', 'curl', 'wget', 'mkdir', 'cd', 'cp', 'mv', 'rm', 'chmod', 'chown', 'echo', 'cat', 'grep', 'sed', 'awk', 'tar', 'unzip', 'make', 'gcc', 'python', 'node', 'sh', 'bash'];
-		const commandPattern = new RegExp(`\\b(${commands.join('|')})\\b`, 'g');
-
-		let highlighted = cmd
-			// Strings in quotes
-			.replace(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g, '<span class="text-green-600 dark:text-green-400">$1</span>')
-			// Comments
-			.replace(/(#[^\n]*)/g, '<span class="text-gray-500 dark:text-gray-400 italic">$1</span>')
-			// Dockerfile instructions (must be before shell keywords to take precedence)
-			.replace(dockerInstructionPattern, '<span class="text-blue-600 dark:text-blue-400 font-semibold">$1</span>')
-			// Shell keywords
-			.replace(shellKeywordPattern, '<span class="text-purple-600 dark:text-purple-400">$1</span>')
-			// Commands
-			.replace(commandPattern, '<span class="text-cyan-600 dark:text-cyan-400">$1</span>')
-			// Flags (words starting with - or --)
-			.replace(/(\s)(--?[a-zA-Z0-9-]+)/g, '$1<span class="text-yellow-600 dark:text-yellow-400">$2</span>');
-
-		return highlighted;
-	}
 </script>
 
 <div class="space-y-4">

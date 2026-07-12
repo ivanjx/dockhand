@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { Badge } from '$lib/components/ui/badge';
 	import { CheckCircle2, ExternalLink, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-svelte';
+	import { getSeverityColor, SEVERITY_ORDER } from '$lib/utils/vulnerability';
 
 	interface ScanResult {
 		scanner: 'grype' | 'trivy';
@@ -40,10 +41,6 @@
 	let sortBy = $state<'severity' | 'id' | 'package'>('severity');
 	let sortDir = $state<'asc' | 'desc'>('asc');
 
-	const SEVERITY_ORDER: Record<string, number> = {
-		critical: 0, high: 1, medium: 2, low: 3, negligible: 4, unknown: 5
-	};
-
 	const sortedVulns = $derived.by(() => {
 		if (!activeResult) return [];
 		const vulns = [...activeResult.vulnerabilities];
@@ -77,22 +74,6 @@
 		return `${(ms / 1000).toFixed(1)}s`;
 	}
 
-	function getSeverityColor(severity: string): string {
-		switch (severity.toLowerCase()) {
-			case 'critical':
-				return 'bg-red-500/10 text-red-500 border-red-500/30';
-			case 'high':
-				return 'bg-orange-500/10 text-orange-500 border-orange-500/30';
-			case 'medium':
-				return 'bg-yellow-500/10 text-yellow-600 border-yellow-500/30';
-			case 'low':
-				return 'bg-blue-500/10 text-blue-500 border-blue-500/30';
-			case 'negligible':
-			case 'unknown':
-			default:
-				return 'bg-gray-500/10 text-gray-500 border-gray-500/30';
-		}
-	}
 
 	function toggleVulnDetails(id: string) {
 		if (expandedVulns.has(id)) {

@@ -12,6 +12,8 @@ export interface Job {
 	result?: unknown;
 	createdAt: number;
 	updatedAt: number;
+	/** Set when a client requests cancellation; long-running jobs should poll this. */
+	cancelRequested?: boolean;
 }
 
 const jobs = new Map<string, Job>();
@@ -32,6 +34,17 @@ export function getJob(id: string): Job | undefined {
 	return jobs.get(id);
 }
 
+/** Live job counts by status — for the metrics endpoint. */
+export function getJobStats(): { running: number; done: number; error: number; total: number } {
+	let running = 0, done = 0, error = 0;
+	for (const job of jobs.values()) {
+		if (job.status === 'running') running++;
+		else if (job.status === 'done') done++;
+		else if (job.status === 'error') error++;
+	}
+	return { running, done, error, total: jobs.size };
+}
+
 export function appendLine(job: Job, line: JobLine): void {
 	job.lines.push(line);
 	job.updatedAt = Date.now();
@@ -47,6 +60,15 @@ export function failJob(job: Job, error: string): void {
 	job.result = { success: false, error };
 	job.status = 'error';
 	job.updatedAt = Date.now();
+}
+
+/** Request cancellation of a running job. The job's operation must poll job.cancelRequested. */
+export function cancelJob(id: string): boolean {
+	const job = jobs.get(id);
+	if (!job || job.status !== 'running') return false;
+	job.cancelRequested = true;
+	job.updatedAt = Date.now();
+	return true;
 }
 
 // Cleanup jobs older than 10 minutes that are no longer running

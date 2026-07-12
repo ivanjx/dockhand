@@ -37,6 +37,16 @@
 		onLoadMore?: () => void;
 		loadMoreThreshold?: number;
 
+		// Sliding-window mode (opt-in, fully isolated). When `windowed` is false
+		// (default) every windowed branch below is skipped and the grid behaves
+		// byte-for-byte as before. When true, `data` holds only rows from absolute
+		// index `windowOffset` of `windowTotal` total; unloaded positions render a
+		// loading row, and `onWindowShift(target)` is called to fetch a new window.
+		windowed?: boolean;
+		windowOffset?: number;
+		windowTotal?: number;
+		onWindowShift?: (targetStart: number) => void;
+
 		// Visible range callback (for virtual scroll)
 		onVisibleRangeChange?: (start: number, end: number, total: number) => void;
 
@@ -85,6 +95,10 @@
 		hasMore = false,
 		onLoadMore,
 		loadMoreThreshold = 200,
+		windowed = false,
+		windowOffset = 0,
+		windowTotal,
+		onWindowShift,
 		onVisibleRangeChange,
 		onRowClick,
 		highlightedKey,
@@ -373,8 +387,12 @@
 	// Container width for grow column calculation
 	let scrollContainerWidth = $state(0);
 
+	// Scroll-height row count. In non-windowed mode `rowCount === data.length`, so
+	// every use below is identical to the original `data.length`.
+	const rowCount = $derived(windowed ? (windowTotal ?? data.length) : data.length);
+
 	// Virtual scroll calculations
-	const totalHeight = $derived(virtualScroll ? data.length * rowHeight : 0);
+	const totalHeight = $derived(virtualScroll ? rowCount * rowHeight : 0);
 
 	// Memoization state for visibleData to prevent creating new arrays on every scroll
 	let prevStartIndex = -1;
@@ -382,13 +400,16 @@
 	let prevDataRef: T[] | null = null;
 	let cachedVisibleData: T[] = [];
 
-	// Memoized startIndex/endIndex/visibleData calculation
+	// Memoized startIndex/endIndex — ABSOLUTE indices. Non-windowed: rowCount is
+	// data.length, so this equals the original.
 	const startIndex = $derived(virtualScroll ? Math.max(0, Math.floor(scrollTop / rowHeight) - bufferRows) : 0);
 	const endIndex = $derived(
-		virtualScroll ? Math.min(data.length, Math.ceil((scrollTop + containerHeight) / rowHeight) + bufferRows) : data.length
+		virtualScroll ? Math.min(rowCount, Math.ceil((scrollTop + containerHeight) / rowHeight) + bufferRows) : rowCount
 	);
 
-	// Memoized visibleData - only create new array when bounds or data actually change
+	// Memoized visibleData (ORIGINAL, unchanged) — used by the non-windowed paths.
+	// In windowed mode the offsets are absolute, so this slice would be wrong; the
+	// windowed table uses `windowedVisible` instead (below).
 	const visibleData = $derived.by(() => {
 		if (!virtualScroll) return data;
 
@@ -407,7 +428,60 @@
 		return cachedVisibleData;
 	});
 
+	// Windowed rows for the absolute range [startIndex, endIndex): each position is
+	// the loaded row or undefined (→ a loading placeholder row).
+	const windowedVisible = $derived.by<(T | undefined)[]>(() => {
+		if (!windowed) return [];
+		const out: (T | undefined)[] = [];
+		for (let abs = startIndex; abs < endIndex; abs++) {
+			const local = abs - windowOffset;
+			out.push(local >= 0 && local < data.length ? data[local] : undefined);
+		}
+		return out;
+	});
+
+	// Count of rendered virtual rows (loaded slice, or the windowed range).
+	const renderedCount = $derived(windowed ? windowedVisible.length : visibleData.length);
+
 	const offsetY = $derived(virtualScroll ? startIndex * rowHeight : 0);
+
+	// Windowed only: when the viewport nears/leaves the loaded window, ask the
+	// parent to shift it. Fire once per viewport position while a fetch is pending;
+	// re-arm when the window actually moves so a failed/superseded shift (window
+	// never advanced to cover startIndex) can ask again instead of stranding blank
+	// rows. Keyed on (startIndex, windowOffset): same request suppressed only until
+	// either the viewport or the loaded window changes.
+	//
+	// Failed-shift recovery: if a fetch settles (loading→false) without moving the
+	// window to cover us, retry ONCE for this exact (startIndex, windowOffset) so a
+	// transient error doesn't leave permanent blank rows — but not in a loop, so a
+	// hard-failing endpoint just shows loading placeholders until the user scrolls.
+	let lastReqStart = -1;
+	let lastReqOffset = -1;
+	let retriedUncovered = false;
+	let wasLoading = false;
+	$effect(() => {
+		if (!virtualScroll || !windowed || !onWindowShift) return;
+		const loadedEnd = windowOffset + data.length;
+		const needsBelow = endIndex > loadedEnd && loadedEnd < rowCount;
+		const needsAbove = startIndex < windowOffset && windowOffset > 0;
+		const settledEdge = wasLoading && !loading; // a fetch just finished
+		wasLoading = loading;
+		if (!needsBelow && !needsAbove) { lastReqStart = -1; lastReqOffset = -1; retriedUncovered = false; return; }
+		const sameRequest = startIndex === lastReqStart && windowOffset === lastReqOffset;
+		if (sameRequest) {
+			// Still uncovered for the same (viewport, window). Only re-request on the
+			// loading→false edge, and only once, so we recover from a failed fetch
+			// without spinning against a persistently failing endpoint.
+			if (!(settledEdge && !retriedUncovered)) return;
+			retriedUncovered = true;
+		} else {
+			retriedUncovered = false;
+		}
+		lastReqStart = startIndex;
+		lastReqOffset = windowOffset;
+		onWindowShift(startIndex);
+	});
 
 	// Notify parent of visible range changes (throttled via RAF)
 	$effect(() => {
@@ -415,7 +489,7 @@
 			// Capture values for RAF callback
 			const st = scrollTop;
 			const ch = containerHeight;
-			const len = data.length;
+			const len = rowCount; // === data.length when not windowed
 			const rh = rowHeight;
 			const cb = onVisibleRangeChange;
 
@@ -761,91 +835,100 @@
 	</thead>
 {/snippet}
 
+<!--
+	One data row + its optional expanded row. Shared by the plain virtual body
+	(tableBody, iterating visibleData) and the windowed body (iterating
+	windowedVisible). Keeping the row markup in one place means a change reaches
+	both render paths — the windowed branch used to be a ~85-line copy of this.
+-->
+{#snippet dataRow(item: T, rowState: ReturnType<typeof getRowState>)}
+	<tr
+		class="group cursor-pointer {rowState.isHighlighted ? 'selected' : ''} {rowState.isSelected ? 'checkbox-selected' : ''} {rowState.isExpanded ? 'row-expanded' : ''} {rowClass?.(item) ?? ''}"
+		onclick={(e) => onRowClick?.(item, e)}
+	>
+		<!-- Fixed start columns (select checkbox, expand chevron) -->
+		{#each fixedStartCols as colId (colId)}
+			{@const colConfig = columnConfigMap.get(colId)}
+			<td class="py-1.5 px-1 {colId === 'select' ? 'select-col' : ''} {colId === 'expand' ? 'expand-col' : ''}" style="width: {getDisplayWidth(colId)}px">
+				{#if colId === 'select' && selectable}
+					{#if rowState.isSelectable}
+						<button
+							type="button"
+							onclick={(e) => {
+								e.stopPropagation();
+								toggleSelection(item[keyField]);
+							}}
+							class="flex items-center justify-center w-full h-full min-h-[24px] transition-colors cursor-pointer {rowState.isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-40 hover:!opacity-100'}"
+						>
+							{#if rowState.isSelected}
+								<CheckSquare class="w-3.5 h-3.5 text-muted-foreground" />
+							{:else}
+								<SquareIcon class="w-3.5 h-3.5 text-muted-foreground" />
+							{/if}
+						</button>
+					{/if}
+				{:else if colId === 'expand' && expandable}
+					<button
+						type="button"
+						onclick={(e) => {
+							e.stopPropagation();
+							toggleExpand(item[keyField]);
+						}}
+						class="flex items-center justify-center transition-colors cursor-pointer opacity-50 hover:opacity-100"
+						title={rowState.isExpanded ? 'Collapse' : 'Expand'}
+					>
+						{#if rowState.isExpanded}
+							<ChevronDown class="w-4 h-4 text-muted-foreground" />
+						{:else}
+							<ChevronRight class="w-4 h-4 text-muted-foreground" />
+						{/if}
+					</button>
+				{:else if cell}
+					{@render cell(colConfig!, item, rowState)}
+				{/if}
+			</td>
+		{/each}
+
+		<!-- Configurable columns -->
+		{#each orderedColumns as colId (colId)}
+			{@const colConfig = columnConfigMap.get(colId)}
+			{#if colConfig}
+				<td class="py-1.5 px-2 {colConfig.noTruncate ? 'no-truncate' : ''}" style="width: {getDisplayWidth(colId)}px">
+					{#if cell}
+						{@render cell(colConfig, item, rowState)}
+					{:else}
+						<!-- Default: render as text -->
+						{String(item[colId as keyof T] ?? '')}
+					{/if}
+				</td>
+			{/if}
+		{/each}
+
+		<!-- Fixed end columns (actions) -->
+		{#each fixedEndCols as colId (colId)}
+			{@const colConfig = columnConfigMap.get(colId)}
+			<td class="py-1.5 px-2 text-right actions-col" style="width: {getDisplayWidth(colId)}px" onclick={(e) => e.stopPropagation()}>
+				{#if cell}
+					{@render cell(colConfig!, item, rowState)}
+				{/if}
+			</td>
+		{/each}
+	</tr>
+
+	<!-- Expanded row content -->
+	{#if rowState.isExpanded && expandedRow}
+		<tr class="expanded-row">
+			<td colspan={fixedStartCols.length + orderedColumns.length + fixedEndCols.length}>
+				{@render expandedRow(item, rowState)}
+			</td>
+		</tr>
+	{/if}
+{/snippet}
+
 {#snippet tableBody()}
 	<tbody>
 		{#each visibleData as item, index (item[keyField])}
-			{@const rowState = getRowState(item, index)}
-			<tr
-				class="group cursor-pointer {rowState.isHighlighted ? 'selected' : ''} {rowState.isSelected ? 'checkbox-selected' : ''} {rowState.isExpanded ? 'row-expanded' : ''} {rowClass?.(item) ?? ''}"
-				onclick={(e) => onRowClick?.(item, e)}
-			>
-				<!-- Fixed start columns (select checkbox, expand chevron) -->
-				{#each fixedStartCols as colId (colId)}
-					{@const colConfig = columnConfigMap.get(colId)}
-					<td class="py-1.5 px-1 {colId === 'select' ? 'select-col' : ''} {colId === 'expand' ? 'expand-col' : ''}" style="width: {getDisplayWidth(colId)}px">
-						{#if colId === 'select' && selectable}
-							{#if rowState.isSelectable}
-								<button
-									type="button"
-									onclick={(e) => {
-										e.stopPropagation();
-										toggleSelection(item[keyField]);
-									}}
-									class="flex items-center justify-center w-full h-full min-h-[24px] transition-colors cursor-pointer {rowState.isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-40 hover:!opacity-100'}"
-								>
-									{#if rowState.isSelected}
-										<CheckSquare class="w-3.5 h-3.5 text-muted-foreground" />
-									{:else}
-										<SquareIcon class="w-3.5 h-3.5 text-muted-foreground" />
-									{/if}
-								</button>
-							{/if}
-						{:else if colId === 'expand' && expandable}
-							<button
-								type="button"
-								onclick={(e) => {
-									e.stopPropagation();
-									toggleExpand(item[keyField]);
-								}}
-								class="flex items-center justify-center transition-colors cursor-pointer opacity-50 hover:opacity-100"
-								title={rowState.isExpanded ? 'Collapse' : 'Expand'}
-							>
-								{#if rowState.isExpanded}
-									<ChevronDown class="w-4 h-4 text-muted-foreground" />
-								{:else}
-									<ChevronRight class="w-4 h-4 text-muted-foreground" />
-								{/if}
-							</button>
-						{:else if cell}
-							{@render cell(colConfig!, item, rowState)}
-						{/if}
-					</td>
-				{/each}
-
-				<!-- Configurable columns -->
-				{#each orderedColumns as colId (colId)}
-					{@const colConfig = columnConfigMap.get(colId)}
-					{#if colConfig}
-						<td class="py-1.5 px-2 {colConfig.noTruncate ? 'no-truncate' : ''}" style="width: {getDisplayWidth(colId)}px">
-							{#if cell}
-								{@render cell(colConfig, item, rowState)}
-							{:else}
-								<!-- Default: render as text -->
-								{String(item[colId as keyof T] ?? '')}
-							{/if}
-						</td>
-					{/if}
-				{/each}
-
-				<!-- Fixed end columns (actions) -->
-				{#each fixedEndCols as colId (colId)}
-					{@const colConfig = columnConfigMap.get(colId)}
-					<td class="py-1.5 px-2 text-right actions-col" style="width: {getDisplayWidth(colId)}px" onclick={(e) => e.stopPropagation()}>
-						{#if cell}
-							{@render cell(colConfig!, item, rowState)}
-						{/if}
-					</td>
-				{/each}
-			</tr>
-
-			<!-- Expanded row content -->
-			{#if rowState.isExpanded && expandedRow}
-				<tr class="expanded-row">
-					<td colspan={fixedStartCols.length + orderedColumns.length + fixedEndCols.length}>
-						{@render expandedRow(item, rowState)}
-					</td>
-				</tr>
-			{/if}
+			{@render dataRow(item, getRowState(item, index))}
 		{/each}
 	</tbody>
 {/snippet}
@@ -876,79 +959,21 @@
 					<tr><td colspan={fixedStartCols.length + orderedColumns.length + fixedEndCols.length} style="height: {offsetY}px; padding: 0; border: none;"></td></tr>
 				{/if}
 				<!-- Visible rows -->
-				{#each visibleData as item, index (item[keyField])}
-					{@const rowState = getRowState(item, index)}
-					<tr
-						class="group cursor-pointer {rowState.isHighlighted ? 'selected' : ''} {rowState.isSelected ? 'checkbox-selected' : ''} {rowState.isExpanded ? 'row-expanded' : ''} {rowClass?.(item) ?? ''}"
-						onclick={(e) => onRowClick?.(item, e)}
-					>
-						{#each fixedStartCols as colId (colId)}
-							{@const colConfig = columnConfigMap.get(colId)}
-							<td class="py-1.5 px-1 {colId === 'select' ? 'select-col' : ''} {colId === 'expand' ? 'expand-col' : ''}" style="width: {getDisplayWidth(colId)}px">
-								{#if colId === 'select' && selectable}
-									{#if rowState.isSelectable}
-										<button
-											type="button"
-											onclick={(e) => { e.stopPropagation(); toggleSelection(item[keyField]); }}
-											class="flex items-center justify-center w-full h-full min-h-[24px] transition-colors cursor-pointer {rowState.isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-40 hover:!opacity-100'}"
-										>
-											{#if rowState.isSelected}
-												<CheckSquare class="w-3.5 h-3.5 text-muted-foreground" />
-											{:else}
-												<SquareIcon class="w-3.5 h-3.5 text-muted-foreground" />
-											{/if}
-										</button>
-									{/if}
-								{:else if colId === 'expand' && expandable}
-									<button
-										type="button"
-										onclick={(e) => { e.stopPropagation(); toggleExpand(item[keyField]); }}
-										class="flex items-center justify-center transition-colors cursor-pointer opacity-50 hover:opacity-100"
-										title={rowState.isExpanded ? 'Collapse' : 'Expand'}
-									>
-										{#if rowState.isExpanded}
-											<ChevronDown class="w-4 h-4 text-muted-foreground" />
-										{:else}
-											<ChevronRight class="w-4 h-4 text-muted-foreground" />
-										{/if}
-									</button>
-								{:else if cell}
-									{@render cell(colConfig!, item, rowState)}
-								{/if}
-							</td>
-						{/each}
-						{#each orderedColumns as colId (colId)}
-							{@const colConfig = columnConfigMap.get(colId)}
-							{#if colConfig}
-								<td class="py-1.5 px-2 {colConfig.noTruncate ? 'no-truncate' : ''}" style="width: {getDisplayWidth(colId)}px">
-									{#if cell}
-										{@render cell(colConfig, item, rowState)}
-									{:else}
-										{String(item[colId as keyof T] ?? '')}
-									{/if}
-								</td>
-							{/if}
-						{/each}
-						{#each fixedEndCols as colId (colId)}
-							{@const colConfig = columnConfigMap.get(colId)}
-							<td class="py-1.5 px-2 text-right actions-col" style="width: {getDisplayWidth(colId)}px" onclick={(e) => e.stopPropagation()}>
-								{#if cell}
-									{@render cell(colConfig!, item, rowState)}
-								{/if}
-							</td>
-						{/each}
-					</tr>
-					{#if rowState.isExpanded && expandedRow}
-						<tr class="expanded-row">
-							<td colspan={fixedStartCols.length + orderedColumns.length + fixedEndCols.length}>
-								{@render expandedRow(item, rowState)}
+				{#each (windowed ? windowedVisible : visibleData) as item, index (windowed ? startIndex + index : item![keyField])}
+					{#if item === undefined}
+						<!-- Windowed: this absolute row isn't loaded yet — show a loading row. -->
+						<tr class="animate-pulse">
+							<td colspan={fixedStartCols.length + orderedColumns.length + fixedEndCols.length} style="height: {rowHeight}px" class="px-2">
+								<div class="h-3 bg-muted rounded" style="width: 30%"></div>
 							</td>
 						</tr>
+					{:else}
+						{@render dataRow(item, getRowState(item, index))}
 					{/if}
 				{/each}
 				<!-- Bottom spacer -->
-				{#if totalHeight - offsetY - (visibleData.length * rowHeight) > 0}
-					<tr><td colspan={fixedStartCols.length + orderedColumns.length + fixedEndCols.length} style="height: {totalHeight - offsetY - (visibleData.length * rowHeight)}px; padding: 0; border: none;"></td></tr>
+				{#if totalHeight - offsetY - (renderedCount * rowHeight) > 0}
+					<tr><td colspan={fixedStartCols.length + orderedColumns.length + fixedEndCols.length} style="height: {totalHeight - offsetY - (renderedCount * rowHeight)}px; padding: 0; border: none;"></td></tr>
 				{/if}
 				<!-- Footer (rendered at the bottom of virtual scroll) -->
 				{#if footer}

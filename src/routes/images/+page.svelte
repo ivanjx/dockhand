@@ -4,14 +4,23 @@
 
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+	import { page } from '$app/stores';
+	import { goto } from '$app/navigation';
 	import { toast } from 'svelte-sonner';
+	import * as Tabs from '$lib/components/ui/tabs';
+	import VulnerabilitiesTab from './VulnerabilitiesTab.svelte';
+	import VulnerabilityScanModal from './VulnerabilityScanModal.svelte';
+	import type { Finding as VulnFinding, VulnerabilitySummary as VulnSummary, SortField as VulnSortField } from '$lib/utils/vulnerability';
+	import { EMPTY_SUMMARY } from '$lib/utils/vulnerability';
+	import { createWindowedList } from '$lib/utils/windowed-list.svelte';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import * as Select from '$lib/components/ui/select';
-	import { Trash2, Upload, RefreshCw, Play, Search, Layers, Server, ShieldCheck, CheckSquare, Square, Tag, Check, XCircle, Icon, AlertTriangle, X, Images, Copy, Download, ChevronRight, ChevronDown, Loader2, ArrowUp, ArrowDown, ArrowUpDown, CircleDashed, CircleDot, Circle, Filter } from 'lucide-svelte';
+	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+	import { Trash2, Upload, RefreshCw, Play, Search, Layers, Server, ShieldCheck, ShieldAlert, Shield, ShieldQuestion, CheckSquare, Square, Tag, Check, XCircle, Icon, AlertTriangle, X, Images, Copy, Download, ChevronRight, ChevronDown, Loader2, ArrowUp, ArrowDown, ArrowUpDown, CircleDashed, CircleDot, Circle, Filter, FileJson, FileSpreadsheet, ShieldPlus } from 'lucide-svelte';
 	import { broom, whale } from '@lucide/lab';
 	import { formatBytes } from '$lib/utils/format';
 	import * as Tooltip from '$lib/components/ui/tooltip';
@@ -30,7 +39,8 @@
 	import { formatDate, appSettings } from '$lib/stores/settings';
 	import { readJobResponse } from '$lib/utils/sse-fetch';
 	import { EmptyState, NoEnvironment } from '$lib/components/ui/empty-state';
-	import PageHeader from '$lib/components/PageHeader.svelte';
+	import TabbedPageHeader from '$lib/components/TabbedPageHeader.svelte';
+	import MultiSelectFilter from '$lib/components/MultiSelectFilter.svelte';
 	import { DataGrid } from '$lib/components/data-grid';
 	import type { DataGridSortState } from '$lib/components/data-grid/types';
 
@@ -104,6 +114,152 @@
 
 	// Scanner settings (loaded per-environment)
 	let scannerEnabled = $state(false);
+
+	// Vulnerability findings use a server-fetched sliding window (createWindowedList)
+	// so the browser only ever holds ~windowSize rows regardless of env size.
+	let vulnSummary = $state<VulnSummary>({ ...EMPTY_SUMMARY });
+	let vulnFetched = $state(false); // has the tab been opened + first window fetched
+	let showVulnScanModal = $state(false);
+
+	const vulnList = createWindowedList<VulnFinding>({
+		windowSize: 400,
+		onError: (e) => console.error('Failed to load vulnerabilities:', e),
+		fetchPage: async (offset, limit, signal) => {
+			// Mark the tab as "opened" up front so a failed load doesn't leave the
+			// lazy-load effect re-firing in a tight retry loop (it gates on !vulnFetched).
+			vulnFetched = true;
+			const res = await fetch(`/api/vulnerabilities?${vulnQueryParams(offset, limit)}`, { signal });
+			if (!res.ok) throw new Error(`Failed to load vulnerabilities (${res.status})`);
+			const data = await res.json();
+			// The paged response carries a filtered summary — update the header pills so
+			// the severity counts + total reflect the active filters, not the env total.
+			if (data.summary) vulnSummary = data.summary;
+			return { items: data.findings ?? [], total: data.total ?? 0 };
+		}
+	});
+
+	// Vulnerabilities toolbar state (owned here so it renders in the header row).
+	let vulnSearch = $state('');
+	let vulnSeverityFilter = $state<string[]>([]);
+	let vulnImageFilter = $state<string[]>([]);
+	let vulnContainerFilter = $state<string[]>([]);
+	let vulnStackFilter = $state<string[]>([]);
+	// Server-driven sort (grid header clicks bubble up and refetch from offset 0).
+	let vulnSort = $state<VulnSortField>('severity');
+	let vulnDir = $state<'asc' | 'desc'>('asc');
+
+	// Header badge total (from the meta endpoint), shown even from the Images tab.
+	let vulnBadgeTotal = $state<number | null>(null);
+
+	// Filter-dropdown options come from the meta endpoint (distinct across the full set).
+	let vulnImageOptions = $state<{ value: string; label: string }[]>([]);
+	let vulnContainerOptions = $state<{ value: string; label: string }[]>([]);
+	let vulnStackOptions = $state<{ value: string; label: string }[]>([]);
+
+	// Header counter: visible row range (from the grid) over the filtered total.
+	let vulnVisibleStart = $state(1);
+	let vulnVisibleEnd = $state(0);
+	function handleVulnRange(start: number, end: number) {
+		vulnVisibleStart = start;
+		vulnVisibleEnd = end;
+	}
+
+	const toOpts = (vals: string[]) => vals.map((v) => ({ value: v, label: v }));
+
+	// Meta (total + filter options) — fetched on env change without pulling findings,
+	// so the Images page stays light for users who never open the Vulnerabilities tab.
+	async function fetchVulnMeta() {
+		if (envId === null) {
+			vulnBadgeTotal = null;
+			return;
+		}
+		try {
+			const res = await fetch(appendEnvParam('/api/vulnerabilities/count', envId));
+			if (res.ok) {
+				const data = await res.json();
+				vulnBadgeTotal = data.total ?? 0;
+				vulnSummary = data.summary ?? vulnSummary;
+				vulnImageOptions = toOpts(data.options?.images ?? []);
+				vulnContainerOptions = toOpts(data.options?.containers ?? []);
+				vulnStackOptions = toOpts(data.options?.stacks ?? []);
+			}
+		} catch (e) {
+			console.error('Failed to load vulnerability meta:', e);
+		}
+	}
+
+	// Single source of the env + filter + sort params. Both the paged grid fetch
+	// and the export URL build on this, so a new filter can't be added to one and
+	// silently dropped from the other (export would export a different set).
+	function vulnFilterParams(): URLSearchParams {
+		const p = new URLSearchParams();
+		if (envId !== null) p.set('env', String(envId));
+		p.set('sort', vulnSort);
+		p.set('dir', vulnDir);
+		if (vulnSearch.trim()) p.set('q', vulnSearch.trim());
+		if (vulnSeverityFilter.length) p.set('severity', vulnSeverityFilter.join(','));
+		if (vulnImageFilter.length) p.set('image', vulnImageFilter.join(','));
+		if (vulnContainerFilter.length) p.set('container', vulnContainerFilter.join(','));
+		if (vulnStackFilter.length) p.set('stack', vulnStackFilter.join(','));
+		return p;
+	}
+
+	function vulnQueryParams(offset: number, limit: number): URLSearchParams {
+		const p = vulnFilterParams();
+		p.set('limit', String(limit));
+		p.set('offset', String(offset));
+		return p;
+	}
+
+	// Reset to the first window (env/filter/sort change). The windowed list owns
+	// the window offset, abort/generation guarding, and centering on scroll.
+	function fetchVulnerabilities() {
+		// Drop the old visible range so a filter/env change that yields fewer (or
+		// zero) rows doesn't briefly show a stale "380-400 of 0" until the grid
+		// re-emits. The grid only re-emits when it has rows, so an empty result
+		// would otherwise keep the last non-zero range.
+		vulnVisibleStart = 1;
+		vulnVisibleEnd = 0;
+		if (envId === null) { vulnList.clear(); vulnFetched = false; return; }
+		vulnList.reset();
+	}
+
+	// Refresh meta + findings — used by the Refresh button and after a scan completes.
+	function refreshVulnerabilities() {
+		fetchVulnMeta();
+		fetchVulnerabilities();
+	}
+
+	// Build an export URL that mirrors the active view (same filters/sort as the
+	// grid), then trigger a download. Shares vulnFilterParams() with the grid fetch.
+	function exportVulnerabilities(format: 'json' | 'csv' | 'sarif') {
+		const params = vulnFilterParams();
+		params.set('format', format);
+		window.location.href = `/api/vulnerabilities/export?${params.toString()}`;
+	}
+
+	const vulnSeverityOptions = [
+		{ value: 'critical', label: 'Critical', color: 'text-red-500', icon: ShieldAlert },
+		{ value: 'high', label: 'High', color: 'text-orange-500', icon: ShieldAlert },
+		{ value: 'medium', label: 'Medium', color: 'text-yellow-600', icon: Shield },
+		{ value: 'low', label: 'Low', color: 'text-blue-500', icon: Shield },
+		{ value: 'negligible', label: 'Negligible', color: 'text-gray-500', icon: ShieldCheck },
+		{ value: 'unknown', label: 'Unknown', color: 'text-gray-500', icon: ShieldQuestion }
+	];
+
+	// Tab state (persisted in the URL: /images?tab=vulnerabilities)
+	let activeTab = $derived($page.url.searchParams.get('tab') || 'images');
+	function handleTabChange(tab: string) {
+		goto(`/images?tab=${tab}`, { replaceState: true, noScroll: true });
+	}
+
+	// Vulnerabilities header count: on the vuln tab with rows visible → "X-Y of N";
+	// otherwise the plain badge total (from the cheap count endpoint).
+	const showVulnRange = $derived(activeTab === 'vulnerabilities' && vulnFetched && vulnVisibleEnd > 0);
+	const vulnCount = $derived(
+		showVulnRange ? `${vulnVisibleStart}-${vulnVisibleEnd}` : (vulnBadgeTotal ?? undefined)
+	);
+	const vulnCountTotal = $derived(showVulnRange ? vulnList.total : undefined);
 
 	// Search and sort state
 	let searchQuery = $state('');
@@ -465,11 +621,38 @@
 			initialFetchDone = true;
 			fetchImages();
 			fetchScannerSettings();
+			fetchVulnMeta(); // badge total + filter options; findings load lazily on tab open
+			vulnFetched = false; // env changed → the lazy-load effect below re-fetches if the vuln tab is active
 		} else if (!env) {
 			// No environment - clear data and stop loading
 			envId = null;
 			images = [];
 			loading = false;
+		}
+	});
+
+	// Lazy-load the first page the first time the Vulnerabilities tab is opened
+	// (or re-opened after an env change), so the Images page stays light otherwise.
+	$effect(() => {
+		if (activeTab === 'vulnerabilities' && envId !== null && !vulnFetched && !vulnList.loading) {
+			fetchVulnerabilities();
+		}
+	});
+
+	// When filters/search/sort change (while the vuln tab is active), refetch from
+	// offset 0 — the server applies them and returns the new first page + total.
+	// Debounced so typing in the search box fires one request when the user pauses,
+	// not one per keystroke (reset() forces through the in-flight dedupe, so an
+	// un-debounced burst would abort+refetch on every character).
+	let vulnFilterReady = false;
+	let vulnFilterTimer: ReturnType<typeof setTimeout> | null = null;
+	$effect(() => {
+		// Track all filter/sort inputs.
+		vulnSearch; vulnSeverityFilter; vulnImageFilter; vulnContainerFilter; vulnStackFilter; vulnSort; vulnDir;
+		if (!vulnFilterReady) { vulnFilterReady = true; return; }
+		if (activeTab === 'vulnerabilities' && envId !== null && vulnFetched) {
+			if (vulnFilterTimer) clearTimeout(vulnFilterTimer);
+			vulnFilterTimer = setTimeout(() => { vulnFilterTimer = null; fetchVulnerabilities(); }, 200);
 		}
 	});
 
@@ -706,17 +889,39 @@
 		document.removeEventListener('resume', handleVisibilityChange);
 		pendingTimeouts.forEach(id => clearTimeout(id));
 		pendingTimeouts = [];
+
+		// Abort any in-flight vuln window fetch and drop its ~400-row buffer, and
+		// cancel a pending debounced refetch, so nothing lingers after unmount.
+		if (vulnFilterTimer) { clearTimeout(vulnFilterTimer); vulnFilterTimer = null; }
+		vulnList.clear();
 	});
 </script>
 
 <div class="flex-1 min-h-0 flex flex-col gap-3 overflow-hidden">
 	<div class="shrink-0 flex flex-wrap justify-between items-center gap-3 min-h-8">
-		<PageHeader
-			icon={Images}
-			title="Images"
-			count={sortedGroups.length}
-			total={(searchQuery || usageFilter !== 'all') && sortedGroups.length !== groupedImages.length ? groupedImages.length : undefined}
+		<TabbedPageHeader
+			tabs={[
+				{
+					id: 'images',
+					label: 'Images',
+					icon: Images,
+					count: activeTab === 'images' ? sortedGroups.length : groupedImages.length,
+					total: activeTab === 'images' && (searchQuery || usageFilter !== 'all') && sortedGroups.length !== groupedImages.length ? groupedImages.length : undefined,
+					showConnection: true
+				},
+				{
+					id: 'vulnerabilities',
+					label: 'Vulnerabilities',
+					icon: ShieldCheck,
+					count: vulnCount,
+					total: vulnCountTotal
+				}
+			]}
+			{activeTab}
+			onTabChange={handleTabChange}
 		/>
+
+		{#if activeTab === 'images'}
 		<div class="flex flex-wrap items-center gap-2">
 			<div class="relative">
 				<Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
@@ -829,10 +1034,96 @@
 			{/if}
 			<Button size="sm" variant="outline" onclick={fetchImages}>Refresh</Button>
 		</div>
+		{/if}
+
+		{#if activeTab === 'vulnerabilities'}
+		<div class="flex flex-wrap items-center gap-2 w-full">
+			<div class="relative">
+				<Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+				<Input
+					type="text"
+					placeholder="Search CVE, package, image, container, stack..."
+					bind:value={vulnSearch}
+					onkeydown={(e) => e.key === 'Escape' && (vulnSearch = '')}
+					class="pl-8 h-8 w-80 text-sm"
+				/>
+			</div>
+			<MultiSelectFilter
+				bind:value={vulnSeverityFilter}
+				options={vulnSeverityOptions}
+				placeholder="All severities"
+				pluralLabel="severities"
+				width="w-40"
+				defaultIcon={ShieldCheck}
+			/>
+			<MultiSelectFilter
+				bind:value={vulnImageFilter}
+				options={vulnImageOptions}
+				placeholder="All images"
+				pluralLabel="images"
+				width="w-48"
+			/>
+			<MultiSelectFilter
+				bind:value={vulnContainerFilter}
+				options={vulnContainerOptions}
+				placeholder="All containers"
+				pluralLabel="containers"
+				width="w-44"
+			/>
+			<MultiSelectFilter
+				bind:value={vulnStackFilter}
+				options={vulnStackOptions}
+				placeholder="All stacks"
+				pluralLabel="stacks"
+				width="w-40"
+			/>
+			<div class="flex items-center gap-2 ml-auto">
+				<DropdownMenu.Root>
+					<DropdownMenu.Trigger>
+						{#snippet child({ props })}
+							<Button size="sm" variant="outline" title="Export findings" {...props}>
+								<Download class="w-3.5 h-3.5" />
+								Export
+							</Button>
+						{/snippet}
+					</DropdownMenu.Trigger>
+					<DropdownMenu.Content align="start">
+						<DropdownMenu.Item onclick={() => exportVulnerabilities('json')}>
+							<FileJson class="w-4 h-4 mr-2 text-amber-500" />
+							JSON
+						</DropdownMenu.Item>
+						<DropdownMenu.Item onclick={() => exportVulnerabilities('csv')}>
+							<FileSpreadsheet class="w-4 h-4 mr-2 text-green-500" />
+							CSV
+						</DropdownMenu.Item>
+						<DropdownMenu.Item onclick={() => exportVulnerabilities('sarif')}>
+							<ShieldPlus class="w-4 h-4 mr-2 text-blue-500" />
+							SARIF
+						</DropdownMenu.Item>
+					</DropdownMenu.Content>
+				</DropdownMenu.Root>
+				<Button size="sm" variant="outline" onclick={refreshVulnerabilities} disabled={vulnList.loading}>
+					<RefreshCw class="w-3.5 h-3.5 {vulnList.loading ? 'animate-spin' : ''}" />
+					Refresh
+				</Button>
+				{#if scannerEnabled}
+					<Button size="sm" variant="secondary" onclick={() => showVulnScanModal = true}>
+						<ShieldCheck class="w-3.5 h-3.5" />
+						Scan all images
+					</Button>
+				{/if}
+			</div>
+		</div>
+		{/if}
 	</div>
 
-	<!-- Selection bar - always reserve space to prevent layout shift -->
-	<div class="h-4 shrink-0">
+	<Tabs.Root value={activeTab} onValueChange={handleTabChange} class="w-full flex-1 min-h-0 flex flex-col gap-2">
+		<Tabs.Content value="images" class="flex-1 min-h-0 flex flex-col gap-2">
+		{#if activeTab === 'images'}
+
+	<!-- Selection bar - only occupies space when something is selected -->
+	{#if selectedImages.size > 0}
+	<div class="shrink-0">
 		{#if selectedImages.size > 0}
 			<div class="flex items-center gap-1 text-xs text-muted-foreground h-full">
 			<span>{selectedInFilter.length} selected</span>
@@ -857,6 +1148,7 @@
 			</div>
 		{/if}
 	</div>
+	{/if}
 
 	{#if !loading && ($environments.length === 0 || !$currentEnvironment)}
 		<NoEnvironment />
@@ -1171,7 +1463,32 @@
 			{/snippet}
 		</DataGrid>
 	{/if}
+	{/if}
+	</Tabs.Content>
+
+	<Tabs.Content value="vulnerabilities" class="flex-1 min-h-0 flex flex-col">
+		{#if activeTab === 'vulnerabilities'}
+			<VulnerabilitiesTab
+				{envId}
+				{scannerEnabled}
+				findings={vulnList.items}
+				summary={vulnSummary}
+				loading={vulnList.loading}
+				dataOffset={vulnList.offset}
+				virtualTotal={vulnList.total}
+				onWindowShift={vulnList.shiftTo}
+				sortField={vulnSort}
+				sortDirection={vulnDir}
+				onSortChange={(field, dir) => { vulnSort = field; vulnDir = dir; }}
+				onRangeChange={handleVulnRange}
+			/>
+		{/if}
+	</Tabs.Content>
+	</Tabs.Root>
 </div>
+
+<!-- Vulnerability Scan-all Modal -->
+<VulnerabilityScanModal bind:open={showVulnScanModal} {envId} envName={$currentEnvironment?.name} onComplete={refreshVulnerabilities} />
 
 <!-- Pull Image Modal -->
 <ImagePullModal
@@ -1217,6 +1534,7 @@
 	imageName={scanImageName}
 	mode="scan"
 	{envId}
+	onComplete={refreshVulnerabilities}
 />
 
 <!-- Batch Operation Modal -->

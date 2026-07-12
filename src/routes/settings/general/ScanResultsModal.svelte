@@ -5,7 +5,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { Checkbox } from '$lib/components/ui/checkbox';
 	import { Label } from '$lib/components/ui/label';
-	import { Search, FolderOpen, CheckCircle2, SkipForward, AlertCircle, FileText, Import, Loader2, Play, HelpCircle } from 'lucide-svelte';
+	import { Search, FolderOpen, CheckCircle2, SkipForward, AlertCircle, FileText, Import, Loader2, Play, HelpCircle, Lock } from 'lucide-svelte';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import { toast } from 'svelte-sonner';
 	import { onMount } from 'svelte';
@@ -23,6 +23,7 @@
 		envPath: string | null;
 		sourceDir?: string;
 		runningOn?: RunningStackInfo[];
+		unadoptable?: boolean;
 	}
 
 	interface AdoptedStack {
@@ -93,6 +94,7 @@
 			// Auto-select the environment where stack is already running, otherwise use default
 			const newSelections = new Map<string, number>();
 			for (const stack of result.discovered) {
+				if (stack.unadoptable) continue; // dockhand.adopt=false — not selectable (#998)
 				const runningEnvId = stack.runningOn?.[0]?.envId;
 				newSelections.set(stack.composePath, runningEnvId ?? defaultEnvId);
 			}
@@ -108,15 +110,20 @@
 
 	const selectedCount = $derived(stackSelections.size);
 
+	// Stacks marked dockhand.adopt=false can't be selected (#998), so select-all
+	// reasons over the adoptable subset only.
+	const adoptableCount = $derived(
+		result?.discovered.filter((s) => !s.unadoptable).length ?? 0
+	);
+
 	const allSelected = $derived(
-		result?.discovered.length > 0 &&
-		stackSelections.size === result.discovered.length
+		adoptableCount > 0 &&
+		stackSelections.size === adoptableCount
 	);
 
 	const someSelected = $derived(
 		stackSelections.size > 0 &&
-		result?.discovered.length > 0 &&
-		stackSelections.size < result.discovered.length
+		stackSelections.size < adoptableCount
 	);
 
 	const defaultEnv = $derived(environments.find(e => e.id === defaultEnvId));
@@ -159,6 +166,7 @@
 		} else {
 			const newSelections = new Map<string, number>();
 			for (const stack of result.discovered) {
+				if (stack.unadoptable) continue; // dockhand.adopt=false (#998)
 				// Preserve existing env selection or use default
 				const existingEnv = stackSelections.get(stack.composePath);
 				newSelections.set(stack.composePath, existingEnv ?? defaultEnvId);
@@ -386,24 +394,42 @@
 								{@const stackEnv = stackEnvId ? environments.find(e => e.id === stackEnvId) : null}
 								<div
 									class="flex items-start gap-3 p-2 rounded-md border transition-colors
-										{isSelected(stack.composePath)
+										{stack.unadoptable
+											? 'bg-muted/20 border-transparent opacity-60'
+											: isSelected(stack.composePath)
 											? 'bg-blue-500/10 border-blue-500/30'
 											: 'bg-muted/30 border-transparent hover:bg-muted/50'}"
 								>
 									<button
 										type="button"
 										class="pt-0.5 shrink-0"
+										disabled={stack.unadoptable}
 										onclick={() => toggleStack(stack.composePath)}
 									>
-										<Checkbox checked={isSelected(stack.composePath)} />
+										<Checkbox checked={isSelected(stack.composePath)} disabled={stack.unadoptable} />
 									</button>
 									<button
 										type="button"
 										class="flex-1 min-w-0 text-left"
+										disabled={stack.unadoptable}
 										onclick={() => toggleStack(stack.composePath)}
 									>
 										<div class="flex items-center gap-2 flex-wrap">
 											<p class="text-sm font-medium">{stack.name}</p>
+											{#if stack.unadoptable}
+												<Badge variant="outline" class="text-xs text-amber-600 dark:text-amber-500 border-amber-300 dark:border-amber-600 gap-1">
+													<Lock class="w-3 h-3" />
+													Not adoptable
+													<Tooltip.Root>
+														<Tooltip.Trigger>
+															<HelpCircle class="w-3 h-3 opacity-60" />
+														</Tooltip.Trigger>
+														<Tooltip.Content class="max-w-sm">
+															<p class="text-xs">A container in this stack is labelled <code class="bg-muted px-1 rounded">dockhand.adopt=false</code>, so Dockhand won't adopt it.</p>
+														</Tooltip.Content>
+													</Tooltip.Root>
+												</Badge>
+											{/if}
 											{#if stack.runningOn && stack.runningOn.length > 0}
 												<Badge variant="outline" class="text-xs text-green-600 dark:text-green-500 border-green-300 dark:border-green-600 gap-1">
 													<Play class="w-3 h-3" />

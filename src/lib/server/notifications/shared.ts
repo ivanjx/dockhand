@@ -19,6 +19,25 @@ export interface NotificationResult {
 	error?: string;
 }
 
+/**
+ * Timeout for an outbound notification request, overridable via
+ * NOTIFICATION_TIMEOUT_MS. Falls back to 10s if unset or invalid (a bad value
+ * must not silently disable the timeout).
+ */
+const NOTIFICATION_TIMEOUT_MS = (() => {
+	const parsed = Number(process.env.NOTIFICATION_TIMEOUT_MS);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : 10_000;
+})();
+
+/**
+ * fetch() with a per-request timeout. Notification destinations are
+ * user-configured (and a potential SSRF target); without a timeout a hung
+ * endpoint pins the request indefinitely and blocks the rest of the dispatch.
+ */
+export function notificationFetch(input: string | URL, init: RequestInit = {}): Promise<Response> {
+	return fetch(input, { ...init, signal: init.signal ?? AbortSignal.timeout(NOTIFICATION_TIMEOUT_MS) });
+}
+
 /** Drain a response body to release the underlying socket/TLS connection. */
 export async function drainResponse(response: Response): Promise<void> {
 	if (!response.bodyUsed) {

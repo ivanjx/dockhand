@@ -5,6 +5,7 @@ import { getVolumeArchive, releaseVolumeHelperContainer, statVolumePath } from '
 import { authorize } from '$lib/server/authorize';
 import { validateDockerIdParam } from '$lib/server/docker-validation';
 import { extractFirstFileFromTar } from '$lib/server/tar-extract';
+import { attachmentContentDisposition } from '$lib/server/content-disposition';
 
 export const GET: RequestHandler = async ({ params, url, cookies }) => {
 	const invalid = validateDockerIdParam(params.name, 'volume');
@@ -89,7 +90,7 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
 
 		const headers: Record<string, string> = {
 			'Content-Type': contentType,
-			'Content-Disposition': `attachment; filename="${filename}${extension}"`
+			'Content-Disposition': attachmentContentDisposition(`${filename}${extension}`)
 		};
 
 		// Set content length for compressed data

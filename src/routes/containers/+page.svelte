@@ -76,6 +76,7 @@
 	import ContainerInspectModal from './ContainerInspectModal.svelte';
 	import FileBrowserModal from './FileBrowserModal.svelte';
 	import BatchUpdateModal from './BatchUpdateModal.svelte';
+	import CheckUpdatesButton from '$lib/components/CheckUpdatesButton.svelte';
 	import BatchOperationModal from '$lib/components/BatchOperationModal.svelte';
 	import type { ContainerInfo } from '$lib/types';
 	import { EmptyState, NoEnvironment } from '$lib/components/ui/empty-state';
@@ -85,7 +86,6 @@
 	import { appSettings } from '$lib/stores/settings';
 	import { canAccess } from '$lib/stores/auth';
 	import { vulnerabilityCriteriaIcons } from '$lib/utils/update-steps';
-	import { watchJob } from '$lib/utils/sse-fetch';
 	import { ipToNumber } from '$lib/utils/ip';
 	import { formatHostPortUrl } from '$lib/utils/url';
 	import { parseCustomUrl } from '$lib/utils/custom-url';
@@ -199,8 +199,7 @@
 			const isEnvSwitch = envId !== null && newEnvId !== envId;
 			envId = newEnvId;
 			initialFetchDone = true;
-			// Clear update state from previous environment
-			updateCheckStatus = 'idle';
+			// (CheckUpdatesButton resets its own state when envId changes)
 			// Clear shell detection cache for new environment
 			shellDetectionCache = {};
 
@@ -213,7 +212,6 @@
 		} else if (!env) {
 			// No environment - clear data and stop loading
 			envId = null;
-			updateCheckStatus = 'idle';
 			shellDetectionCache = {};
 			containerStore.clear();
 		}
@@ -270,10 +268,7 @@
 	let confirmUpdateSelected = $state(false);
 
 	// Update check state
-	let updateCheckStatus = $state<'idle' | 'checking' | 'found' | 'none' | 'error'>('idle');
-	let updateCheckProgress = $state({ checked: 0, total: 0 });
-	let updateCheckBtnEl = $state<HTMLButtonElement | null>(null);
-	let failedUpdateChecks = $state<Array<{ containerName: string; imageName: string; error: string }>>([]);
+	let checkUpdatesBtn = $state<{ reset: () => void } | null>(null);
 	let showBatchUpdateModal = $state(false);
 	const batchUpdateContainerIds = $derived($containerStore.pendingUpdateIds);
 	const batchUpdateContainerNames = $derived($containerStore.pendingUpdateNames);
@@ -462,88 +457,18 @@
 		}, 3000));
 	}
 
-	function showFailedChecksToast(failed: typeof failedUpdateChecks, prefix: string) {
-		const details = failed.map(f => `• ${f.containerName}: ${f.error}`).join('\n');
-		toast.warning(`${prefix} (${failed.length} failed to check)`, {
-			description: details,
-			descriptionClass: 'whitespace-pre-line',
-			class: '!w-[28rem] !max-w-[28rem]',
-			duration: Infinity,
-			action: {
-				label: 'OK',
-				onClick: () => {}
-			}
-		});
-	}
 
-	async function checkForUpdates() {
-		updateCheckStatus = 'checking';
-		updateCheckProgress = { checked: 0, total: 0 };
-		failedUpdateChecks = [];
-
-		// Lock button width to prevent layout shift
-		if (updateCheckBtnEl) {
-			updateCheckBtnEl.style.minWidth = `${updateCheckBtnEl.offsetWidth}px`;
-		}
-
-		try {
-			const response = await fetch(appendEnvParam('/api/containers/check-updates', envId), {
-				method: 'POST'
-			});
-			if (!response.ok) {
-				updateCheckStatus = 'error';
-				pendingTimeouts.push(setTimeout(() => { updateCheckStatus = 'idle'; }, 3000));
-				if (updateCheckBtnEl) updateCheckBtnEl.style.minWidth = '';
-				return;
-			}
-			const { jobId } = await response.json();
-
-			const data: any = await watchJob(jobId, (line) => {
-				if (line.event === 'progress') {
-					updateCheckProgress = line.data as { checked: number; total: number };
-				}
-			});
-
-			// Unlock button width
-			if (updateCheckBtnEl) updateCheckBtnEl.style.minWidth = '';
-
-			const containersWithUpdates = data.results.filter((r: any) => r.hasUpdate && !r.systemContainer && !r.updateDisabled && !r.isLocalImage);
-			const failed = data.results.filter((r: any) => r.error && !r.hasUpdate);
-			failedUpdateChecks = failed.map((r: any) => ({
-				containerName: r.containerName,
-				imageName: r.imageName,
-				error: r.error
-			}));
-
-			if (containersWithUpdates.length === 0) {
-				containerStore.setPendingUpdates([], new Map());
-				if (failed.length > 0) {
-					updateCheckStatus = 'none';
-					showFailedChecksToast(failedUpdateChecks, 'All containers are up to date');
-					pendingTimeouts.push(setTimeout(() => { updateCheckStatus = 'idle'; }, 3000));
-				} else {
-					updateCheckStatus = 'none';
-					toast.success('All containers are up to date');
-					pendingTimeouts.push(setTimeout(() => { updateCheckStatus = 'idle'; }, 3000));
-				}
-				return;
-			}
-
+	function handleUpdateCheckComplete(result: {
+		withUpdates: Array<{ containerId: string; containerName: string }>;
+	}) {
+		if (result.withUpdates.length === 0) {
+			containerStore.setPendingUpdates([], new Map());
+		} else {
 			// Prepare data for batch update modal (but don't open it yet)
 			containerStore.setPendingUpdates(
-				containersWithUpdates.map((r: any) => r.containerId),
-				new Map(containersWithUpdates.map((r: any) => [r.containerId, r.containerName]))
+				result.withUpdates.map((r) => r.containerId),
+				new Map(result.withUpdates.map((r) => [r.containerId, r.containerName]))
 			);
-			updateCheckStatus = 'found';
-			if (failed.length > 0) {
-				showFailedChecksToast(failedUpdateChecks, `${containersWithUpdates.length} update(s) available`);
-			} else {
-				toast.info(`${containersWithUpdates.length} update(s) available`);
-			}
-		} catch (error) {
-			updateCheckStatus = 'error';
-			pendingTimeouts.push(setTimeout(() => { updateCheckStatus = 'idle'; }, 3000));
-			if (updateCheckBtnEl) updateCheckBtnEl.style.minWidth = '';
 		}
 	}
 
@@ -551,10 +476,7 @@
 	async function loadPendingUpdates() {
 		if (!envId) return;
 		await containerStore.loadPendingUpdates(envId);
-		// Update local UI status if there are pending updates
-		if ($containerStore.pendingUpdateIds.length > 0) {
-			updateCheckStatus = 'found';
-		}
+		// The "found" (green) button state is driven by hasPendingUpdates below.
 	}
 
 	function updateSelectedContainers() {
@@ -616,7 +538,7 @@
 		showBatchUpdateModal = false;
 		singleUpdateContainerId = null;
 		singleUpdateContainerName = null;
-		updateCheckStatus = 'idle';
+		checkUpdatesBtn?.reset();
 	}
 
 	function handleBatchUpdateComplete(results: { success: string[]; failed: string[]; blocked: string[] }) {
@@ -1457,37 +1379,12 @@
 					Create
 				</Button>
 				{/if}
-				<Button
-					bind:ref={updateCheckBtnEl}
-					size="sm"
-					variant="outline"
-					onclick={checkForUpdates}
-					disabled={updateCheckStatus === 'checking'}
-					title="Check for available updates"
-					class="relative overflow-hidden"
-				>
-					{#if updateCheckStatus === 'checking'}
-						<CircleArrowUp class="w-3.5 h-3.5 animate-spin" />
-						{#if updateCheckProgress.total > 0}
-							<span class="tabular-nums">Checking {String(updateCheckProgress.checked).padStart(String(updateCheckProgress.total).length, '\u2007')}/{updateCheckProgress.total}</span>
-							<div
-								class="absolute bottom-0 left-0 h-px bg-foreground transition-[width] duration-150 ease-out"
-								style="width: {(updateCheckProgress.checked / updateCheckProgress.total) * 100}%"
-							></div>
-						{:else}
-							Check for updates
-						{/if}
-					{:else if updateCheckStatus === 'none' || updateCheckStatus === 'found'}
-						<Check class="w-3.5 h-3.5 mr-1 text-green-600" />
-						Check for updates
-					{:else if updateCheckStatus === 'error'}
-						<XCircle class="w-3.5 h-3.5 mr-1 text-destructive" />
-						Check for updates
-					{:else}
-						<CircleArrowUp class="w-3.5 h-3.5" />
-						Check for updates
-					{/if}
-				</Button>
+				<CheckUpdatesButton
+					bind:this={checkUpdatesBtn}
+					{envId}
+					hasPendingUpdates={updatableContainersCount > 0}
+					onComplete={handleUpdateCheckComplete}
+				/>
 				{#if updatableContainersCount > 0}
 				<ConfirmPopover
 					open={confirmUpdateAll}

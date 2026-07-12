@@ -1035,6 +1035,8 @@ export interface ContainerInfo {
 	id: string;
 	name: string;
 	image: string;
+	/** sha256 image ID (container.ImageID) — matches vulnerability scan.imageId. */
+	imageId: string;
 	state: string;
 	status: string;
 	created: number;
@@ -1161,6 +1163,7 @@ export async function listContainers(all = true, envId?: number | null): Promise
 			id: container.Id,
 			name: container.Names[0]?.replace(/^\//, '') || 'unnamed',
 			image: container.Image,
+			imageId: container.ImageID || '',
 			state: container.State,
 			status: container.Status,
 			created: container.Created,
@@ -2611,8 +2614,8 @@ export async function listImages(envId?: number | null): Promise<ImageInfo[]> {
 
 /**
  * Diagnostic log for registry auth headers (#1105).
- * Logs lengths and boundary char codes — never the plaintext credentials.
- * Header prefix is safe to log: it encodes the start of `{"username":"...`.
+ * Logs only whether credentials were present and the target registry — no
+ * credential-derived material (lengths, byte values, or header bytes).
  */
 function logAuthDiagnostics(
 	tag: string,
@@ -2622,12 +2625,9 @@ function logAuthDiagnostics(
 	password: string,
 	authHeader: string
 ): void {
-	const userLast = username.length ? username.charCodeAt(username.length - 1).toString(16) : 'na';
-	const pwLast = password.length ? password.charCodeAt(password.length - 1).toString(16) : 'na';
 	console.log(
-		`${tag} auth: registry=${registry} user(len=${username.length},last=0x${userLast}) ` +
-		`pw(len=${password.length},last=0x${pwLast}) serveraddress=${serveraddress} ` +
-		`authHeader(len=${authHeader.length},prefix=${authHeader.slice(0, 16)})`
+		`${tag} auth: registry=${registry} serveraddress=${serveraddress} ` +
+		`hasUser=${username.length > 0} hasPassword=${password.length > 0} hasAuthHeader=${authHeader.length > 0}`
 	);
 }
 
@@ -2720,6 +2720,10 @@ export async function pullImage(imageName: string, onProgress?: (data: any) => v
 
 	const decoder = new TextDecoder();
 	let buffer = '';
+	// Docker streams pull failures as {"error":...} lines inside a 200 response.
+	// Capture the last one and throw after the stream ends so callers see the
+	// failure (and onProgress still fires for the error line).
+	let streamError: string | null = null;
 
 	while (true) {
 		const { done, value } = await reader.read();
@@ -2735,6 +2739,7 @@ export async function pullImage(imageName: string, onProgress?: (data: any) => v
 					const data = JSON.parse(line);
 					if (data.error || data.errorDetail) {
 						console.error(`[Pull] stream error: ${line}`);
+						streamError = data.errorDetail?.message || data.error || 'Image pull failed';
 					}
 					if (onProgress) onProgress(data);
 				} catch {
@@ -2742,6 +2747,10 @@ export async function pullImage(imageName: string, onProgress?: (data: any) => v
 				}
 			}
 		}
+	}
+
+	if (streamError) {
+		throw new Error(`Failed to pull image: ${streamError}`);
 	}
 }
 

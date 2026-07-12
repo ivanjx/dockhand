@@ -18,7 +18,7 @@ export { prefersJSON, sseToJSON } from '$lib/server/sse-parser';
  * can reconstruct the same event stream semantics used by the old SSE flow.
  */
 export function createJobResponse(
-	operation: (send: (event: string, data: unknown) => void) => Promise<void>,
+	operation: (send: (event: string, data: unknown) => void, isCancelled: () => boolean) => Promise<void>,
 	request?: Request
 ): Response {
 	// Backward compat: synchronous JSON path for explicit application/json callers
@@ -31,7 +31,7 @@ export function createJobResponse(
 					resultData = data;
 				};
 				try {
-					await operation(send);
+					await operation(send, () => false);
 				} catch (error) {
 					resultData = { success: false, error: String(error) };
 				}
@@ -51,7 +51,7 @@ export function createJobResponse(
 		appendLine(job, { event, data });
 	};
 
-	operation(send)
+	operation(send, () => job.cancelRequested === true)
 		.then(() => {
 			const resultLine = job.lines.findLast((l) => l.event === 'result');
 			completeJob(job, resultLine?.data ?? { success: true });

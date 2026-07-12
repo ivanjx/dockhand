@@ -9,11 +9,16 @@ const PUBLIC_PATHS = ['/login'];
 export const load: LayoutServerLoad = async ({ cookies, url }) => {
 	const authEnabled = await isAuthEnabled();
 
+	// Runtime flag to suppress the "What's New" modal (#1235). Read here (not via
+	// a build-time define) so it can be toggled by an env var at `docker run`.
+	const disableWhatsNew = process.env.DISABLE_WHATS_NEW === 'true';
+
 	// If auth is disabled, allow everything
 	if (!authEnabled) {
 		return {
 			authEnabled: false,
-			user: null
+			user: null,
+			disableWhatsNew
 		};
 	}
 
@@ -31,7 +36,8 @@ export const load: LayoutServerLoad = async ({ cookies, url }) => {
 			return {
 				authEnabled: true,
 				user: null,
-				setupMode: true
+				setupMode: true,
+				disableWhatsNew
 			};
 		}
 
@@ -50,6 +56,7 @@ export const load: LayoutServerLoad = async ({ cookies, url }) => {
 			avatar: user.avatar,
 			isAdmin: user.isAdmin,
 			provider: user.provider
-		} : null
+		} : null,
+		disableWhatsNew
 	};
 };

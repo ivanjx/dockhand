@@ -15,8 +15,7 @@ import {
 	createScheduleExecution,
 	updateScheduleExecution,
 	appendScheduleExecutionLog,
-	saveVulnerabilityScan,
-	getCombinedScanForImage
+	saveVulnerabilityScan
 } from '../../db';
 import {
 	pullImage,
@@ -38,7 +37,8 @@ import {
 import { updateStackService } from '../../stacks';
 import { getScannerSettings, scanImage, type ScanResult, type VulnerabilitySeverity } from '../../scanner';
 import { sendEventNotification } from '../../notifications';
-import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer, shouldProceedOnScanError, isPodmanInfraContainer } from './update-utils';
+import { parseImageNameAndTag, combineScanSummaries, isSystemContainer, shouldProceedOnScanError, isPodmanInfraContainer } from './update-utils';
+import { resolveBlockDecision } from './block-decision';
 import { isUpdateDisabledByLabel, isHiddenByLabel } from '../../container-labels';
 
 // =============================================================================
@@ -151,54 +151,16 @@ async function scanAndCheckBlock(ctx: ScanContext): Promise<ScanOutcome> {
 		}
 	}
 
-	// Handle 'more_than_current' criteria - need to get/scan current image
-	let currentScanSummary: VulnerabilitySeverity | undefined;
-	if (vulnerabilityCriteria === 'more_than_current') {
-		log(`Looking up cached scan for current image...`);
-		try {
-			const cachedScan = await getCombinedScanForImage(currentImageId, envId ?? null);
-			if (cachedScan) {
-				currentScanSummary = cachedScan;
-				log(`Cached scan: ${currentScanSummary.critical} critical, ${currentScanSummary.high} high`);
-			} else {
-				log(`No cached scan found, scanning current image...`);
-				const currentScanResults = await scanImage(currentImageId, envId, (progress) => {
-					const tag = progress.scanner ? `[${progress.scanner}]` : '[scan]';
-					if (progress.message) log(`${tag} ${progress.message}`);
-				});
-				if (currentScanResults.length > 0) {
-					currentScanSummary = combineScanSummaries(currentScanResults);
-					log(`Current image: ${currentScanSummary.critical} critical, ${currentScanSummary.high} high`);
-					// Save for future use
-					for (const result of currentScanResults) {
-						try {
-							await saveVulnerabilityScan({
-								environmentId: envId ?? null,
-								imageId: currentImageId,
-								imageName: result.imageName,
-								scanner: result.scanner,
-								scannedAt: result.scannedAt,
-								scanDuration: result.scanDuration,
-								criticalCount: result.summary.critical,
-								highCount: result.summary.high,
-								mediumCount: result.summary.medium,
-								lowCount: result.summary.low,
-								negligibleCount: result.summary.negligible,
-								unknownCount: result.summary.unknown,
-								vulnerabilities: result.vulnerabilities,
-								error: result.error ?? null
-							});
-						} catch { /* ignore */ }
-					}
-				}
-			}
-		} catch (cacheError: any) {
-			log(`Warning: Could not get current scan: ${cacheError.message}`);
-		}
-	}
-
-	// Check if update should be blocked
-	const { blocked, reason } = shouldBlockUpdate(vulnerabilityCriteria, scanSummary, currentScanSummary);
+	// Decide whether to block. For 'more_than_current' this re-scans the current
+	// image so the comparison uses up-to-date numbers (#1022) and works on a
+	// cold cache.
+	const { blocked, reason } = await resolveBlockDecision(
+		scanSummary,
+		currentImageId,
+		envId,
+		vulnerabilityCriteria,
+		log
+	);
 
 	if (blocked) {
 		log(`UPDATE BLOCKED: ${reason}`);
@@ -340,13 +302,9 @@ export async function runContainerUpdate(
 			return;
 		}
 
-		// Get the full container config to extract the image name (tag)
-		const inspectData = await inspectContainer(container.id, envId) as any;
-		const imageNameFromConfig = inspectData.Config?.Image;
-
-		// Podman pod-infra containers may have an empty Config.Image — silently
-		// skip them before the "Could not determine image name" failure (#1221).
-		if (isPodmanInfraContainer(imageNameFromConfig, inspectData.Config?.Labels)) {
+		// Podman pod-infra containers (#1221): silently skip before any inspect /
+		// image-resolution that would fail with "Could not determine image name".
+		if (isPodmanInfraContainer(containerName)) {
 			log(`Skipping Podman pod-infra container`);
 			await updateScheduleExecution(execution.id, {
 				status: 'skipped',
@@ -356,6 +314,10 @@ export async function runContainerUpdate(
 			});
 			return;
 		}
+
+		// Get the full container config to extract the image name (tag)
+		const inspectData = await inspectContainer(container.id, envId) as any;
+		const imageNameFromConfig = inspectData.Config?.Image;
 
 		if (!imageNameFromConfig) {
 			log(`Could not determine image name from container config`);

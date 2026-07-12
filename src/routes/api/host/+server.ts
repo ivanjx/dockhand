@@ -125,9 +125,20 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
 		}
 
 		const hostInfo: HostInfo = {
-			// For local connections, show local system info; for remote, show Docker host info
-			hostname: isLocalConnection ? os.hostname() : (dockerInfo.Name || env.host || 'unknown'),
-			ipAddress: isLocalConnection ? getLocalIpAddress() : (env.host || 'unknown'),
+			// Hostname/IP describe the Docker DAEMON's host, NOT Dockhand's own
+			// container. `os.hostname()` / getLocalIpAddress() run INSIDE this
+			// container, so on a local socket they returned the container id and the
+			// bridge IP instead of the real host (issue #1265). Docker's /info `Name`
+			// is the daemon host's hostname for every connection type (the entrypoint
+			// also derives it into DOCKHAND_HOSTNAME).
+			//
+			// The host's LAN IP is NOT reliably discoverable from inside a container
+			// over the socket — Docker's API exposes no host-IP field, and every
+			// container-visible address (bridge gateway, own interfaces) is the wrong
+			// 172.x value. So we surface DOCKHAND_HOST_IP if the operator set it, else
+			// the configured env host, else 'localhost' — never a misleading bridge IP.
+			hostname: dockerInfo?.Name || process.env.DOCKHAND_HOSTNAME || env.host || 'unknown',
+			ipAddress: isLocalConnection ? (process.env.DOCKHAND_HOST_IP || env.host || 'localhost') : (env.host || 'unknown'),
 			platform: isLocalConnection ? os.platform() : (dockerInfo.OperatingSystem || 'unknown'),
 			arch: isLocalConnection ? os.arch() : (dockerInfo.Architecture || 'unknown'),
 			cpus: isLocalConnection ? os.cpus().length : (dockerInfo.NCPU || 0),

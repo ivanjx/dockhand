@@ -17,14 +17,19 @@ import { readFileSync } from 'node:fs';
 import { WebSocketServer } from 'ws';
 import { handler } from './build/handler.js';
 
-// Patch console to prepend ISO timestamps
+// Patch console to prepend an ISO timestamp and a log level (#1166), e.g.
+//   2026-06-11T12:34:56.789Z INFO  ...
+//   2026-06-11T12:34:56.789Z WARN  ...
+//   2026-06-11T12:34:56.789Z ERROR ...
 const _log = console.log;
 const _error = console.error;
 const _warn = console.warn;
+const _info = console.info;
 const ts = () => new Date().toISOString();
-console.log = (...args) => _log(ts(), ...args);
-console.error = (...args) => _error(ts(), ...args);
-console.warn = (...args) => _warn(ts(), ...args);
+console.log = (...args) => _log(ts(), 'INFO ', ...args);
+console.info = (...args) => _info(ts(), 'INFO ', ...args);
+console.warn = (...args) => _warn(ts(), 'WARN ', ...args);
+console.error = (...args) => _error(ts(), 'ERROR', ...args);
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -408,6 +413,13 @@ async function handleTerminalConnection(ws, url, connId) {
 	ws.on('close', () => {
 		wsConnections.delete(connId);
 	});
+
+	// Without an 'error' listener, an emitted socket error (abrupt disconnect,
+	// ECONNRESET) is re-thrown as an uncaught exception and crashes the process.
+	ws.on('error', (err) => {
+		console.error('[Terminal WS] Connection error:', err.message);
+		wsConnections.delete(connId);
+	});
 }
 
 /**
@@ -476,6 +488,13 @@ function handleEdgeExec(ws, connId, containerId, shell, user, environmentId) {
 			});
 			globalThis.__hawserSendMessage(environmentId, endMsg);
 		}
+		edgeExecSessions.delete(execId);
+		wsConnections.delete(connId);
+	});
+
+	// An unhandled 'error' event would crash the process; log and clean up.
+	ws.on('error', (err) => {
+		console.error('[Edge exec WS] Connection error:', err.message);
 		edgeExecSessions.delete(execId);
 		wsConnections.delete(connId);
 	});

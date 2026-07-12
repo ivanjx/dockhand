@@ -34,6 +34,7 @@ export interface DiscoveredStack {
 	sourceDir: string;
 	serviceCount?: number; // Number of services defined in compose file
 	runningOn?: RunningStackInfo[];
+	unadoptable?: boolean; // a running container carries dockhand.adopt=false (#998)
 }
 
 export interface ScanResult {
@@ -201,6 +202,20 @@ export async function adoptStack(
 	stack: DiscoveredStack,
 	environmentId: number
 ): Promise<{ success: boolean; adoptedName?: string; error?: string }> {
+	// Defense in depth: re-check the live running stack for dockhand.adopt=false so a
+	// forged/stale request can't bypass the UI filter (#998). Only enforceable while
+	// the stack is running, since the label lives on containers.
+	try {
+		const { listComposeStacks } = await import('./stacks.js');
+		const { isStackUnadoptable } = await import('./container-labels.js');
+		const running = (await listComposeStacks(environmentId)).find((s) => s.name === stack.name);
+		if (running && isStackUnadoptable(running.containerDetails?.map((c) => c.labels) ?? [])) {
+			return { success: false, error: 'Stack is marked not adoptable (dockhand.adopt=false)' };
+		}
+	} catch {
+		// Environment offline / unreachable — fall through; nothing to enforce against.
+	}
+
 	// Get all existing stack sources to check for duplicates
 	const existingSources = await getStackSources();
 
@@ -466,6 +481,7 @@ export async function detectRunningStacks(
 	// Dynamic imports to avoid circular dependencies
 	const { listComposeStacks } = await import('./stacks.js');
 	const { getEnvironments } = await import('./db.js');
+	const { isStackUnadoptable } = await import('./container-labels.js');
 
 	// Get all environments
 	const environments = await getEnvironments();
@@ -476,6 +492,8 @@ export async function detectRunningStacks(
 
 	// Build map of stack name -> running info across all environments
 	const runningStacksMap = new Map<string, RunningStackInfo[]>();
+	// Stack names that opt out of adoption via dockhand.adopt=false on any container (#998)
+	const unadoptableStacks = new Set<string>();
 
 	// Query each environment in parallel for running stacks
 	await Promise.all(
@@ -490,6 +508,9 @@ export async function detectRunningStacks(
 						containerCount: stack.containers?.length || 0
 					});
 					runningStacksMap.set(stack.name, existing);
+					if (isStackUnadoptable(stack.containerDetails?.map((c) => c.labels) ?? [])) {
+						unadoptableStacks.add(stack.name);
+					}
 				}
 			} catch (error) {
 				if (error instanceof DockerConnectionError) {
@@ -504,6 +525,7 @@ export async function detectRunningStacks(
 	// Attach running info to discovered stacks by matching name
 	return discovered.map((stack) => ({
 		...stack,
-		runningOn: runningStacksMap.get(stack.name)
+		runningOn: runningStacksMap.get(stack.name),
+		unadoptable: unadoptableStacks.has(stack.name)
 	}));
 }

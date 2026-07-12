@@ -425,6 +425,9 @@ async function computeSyncDeletionPlan(options: {
 /**
  * Persist the manifest after a deploy and log the per-file change summary.
  * Called only after a successful deploy (locally applied or agent-confirmed).
+ * Progress popovers show the plan-based change table before the deploy
+ * instead (#1260); this summary (with real apply results) goes to the
+ * server log only.
  */
 async function finalizeDeletionSync(options: {
 	stackId: number;
@@ -434,9 +437,8 @@ async function finalizeDeletionSync(options: {
 	newFiles: Record<string, string>;
 	plan: DeletionPlan;
 	applyResult: DeletionApplyResult | undefined;
-	onLine?: (line: string) => void; // extra sink (job output)
 }): Promise<void> {
-	const { stackId, logPrefix, previousManifest, newCommitFull, newFiles, plan, applyResult, onLine } = options;
+	const { stackId, logPrefix, previousManifest, newCommitFull, newFiles, plan, applyResult } = options;
 
 	// No apply result means deletions were requested but nothing reported back
 	// (defensive — executors always return one). Logged as skips; skips are final.
@@ -454,10 +456,6 @@ async function finalizeDeletionSync(options: {
 	console.log(`${logPrefix} Sync file changes: ${tableLines[0]}`);
 	for (const line of tableLines.slice(1)) {
 		console.log(`${logPrefix}   ${line}`);
-	}
-	if (onLine) {
-		onLine(`File changes: ${tableLines[0]}`);
-		for (const line of tableLines.slice(1)) onLine(line);
 	}
 
 	const nextManifest = buildNextManifest(newCommitFull, newFiles);
@@ -1458,6 +1456,23 @@ export async function deployGitStackWithProgress(
 
 		cleanupSshKey(credential);
 
+		// Show the git file changes BEFORE the deploy starts, so the user sees
+		// what changed while the deploy runs and the deploy start/result lines
+		// stay together (#1260). Removals reflect the deletion plan here;
+		// apply-stage divergences (rare) are reported after the deploy.
+		const changeTable = formatChangeTable(
+			buildSyncChangeSummary(
+				deletionData.previousManifest.files,
+				deletionData.newFiles,
+				{ deleted: deletionData.plan.toDelete.map((f) => f.path), skipped: [] },
+				deletionData.plan.skipped
+			)
+		);
+		onProgress({ status: 'deploying', message: `File changes: ${changeTable[0]}`, step: 5, totalSteps });
+		for (const line of changeTable.slice(1)) {
+			onProgress({ status: 'deploying', message: line, step: 5, totalSteps });
+		}
+
 		// Step 5: Deploying stack
 		// Uses `docker compose up -d --remove-orphans` which only recreates changed services
 		onProgress({ status: 'deploying', message: `Deploying ${gitStack.stackName}...`, step: 5, totalSteps });
@@ -1494,7 +1509,8 @@ export async function deployGitStackWithProgress(
 
 		if (result.success) {
 			// Deletion sync: persist manifest + log per-file change summary.
-			// onLine feeds the per-file change table into the deploy progress popover.
+			// The change table was already shown before the deploy (#1260);
+			// report only apply-stage divergences from the plan here.
 			await finalizeDeletionSync({
 				stackId,
 				logPrefix,
@@ -1502,9 +1518,18 @@ export async function deployGitStackWithProgress(
 				newCommitFull: newCommit,
 				newFiles: deletionData.newFiles,
 				plan: deletionData.plan,
-				applyResult: result.deletion,
-				onLine: (line) => onProgress({ status: 'deploying', message: line, step: 5, totalSteps })
+				applyResult: result.deletion
 			});
+
+			const applySkips = (result.deletion?.skipped ?? []).filter((s) => s.reason !== 'already-absent');
+			for (const skip of applySkips) {
+				onProgress({
+					status: 'deploying',
+					message: `Kept "${skip.path}" — ${skipReasonMessage(skip.reason)}`,
+					step: 5,
+					totalSteps
+				});
+			}
 
 			// Record the stack source with resolved compose path for consistency
 			const stackDir = await getStackDir(gitStack.stackName, gitStack.environmentId);

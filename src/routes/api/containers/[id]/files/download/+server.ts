@@ -3,6 +3,7 @@ import { getContainerArchive, statContainerPath } from '$lib/server/docker';
 import { authorize } from '$lib/server/authorize';
 import { validateDockerIdParam } from '$lib/server/docker-validation';
 import { extractFirstFileFromTar } from '$lib/server/tar-extract';
+import { attachmentContentDisposition } from '$lib/server/content-disposition';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = async ({ params, url, cookies }) => {
@@ -74,7 +75,7 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
 
 		const headers: Record<string, string> = {
 			'Content-Type': contentType,
-			'Content-Disposition': `attachment; filename="${filename}${extension}"`
+			'Content-Disposition': attachmentContentDisposition(`${filename}${extension}`)
 		};
 
 		// Set content length for compressed data

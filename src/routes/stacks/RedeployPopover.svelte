@@ -10,6 +10,8 @@
 		stackName: string;
 		envId: number | null;
 		disabled?: boolean;
+		side?: 'top' | 'bottom';
+		align?: 'start' | 'center' | 'end';
 		onDeploy: (options: { pull: boolean; build: boolean; forceRecreate: boolean }) => Promise<void>;
 		children: Snippet;
 	}
@@ -18,6 +20,8 @@
 		stackName,
 		envId,
 		disabled = false,
+		side = 'top',
+		align = 'end',
 		onDeploy,
 		children
 	}: Props = $props();
@@ -61,8 +65,8 @@
 	</Popover.Trigger>
 	<Popover.Content
 		class="w-56 p-3 z-[200]"
-		side="top"
-		align="end"
+		{side}
+		{align}
 		sideOffset={8}
 	>
 		<div class="space-y-3">

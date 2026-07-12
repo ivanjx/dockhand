@@ -1183,6 +1183,10 @@ async function handleHawserWsMessage(ws: any, msg: any, connId: string, remoteIp
 				return;
 			}
 
+			// Auth succeeded — clear any prior failure cooldown for this IP so a
+			// legitimate agent (e.g. after a token rotation) isn't locked out.
+			hawserAuthFailCache.delete(rateLimitKey);
+
 			// Throttle reconnection storms (successful auth but broken Docker = rapid reconnect loop)
 			const throttle = recordReconnection(result.environmentId);
 			if (!throttle.allowed) {

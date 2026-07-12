@@ -1,5 +1,5 @@
 /** Discord webhook notifications. discord:// or discords://. */
-import { drainResponse, type NotificationPayload, type NotificationResult } from './shared';
+import { notificationFetch, drainResponse, type NotificationPayload, type NotificationResult } from './shared';
 
 export async function sendDiscord(appriseUrl: string, payload: NotificationPayload): Promise<NotificationResult> {
 	// discord://webhook_id/webhook_token or discords://...
@@ -7,7 +7,7 @@ export async function sendDiscord(appriseUrl: string, payload: NotificationPaylo
 	const titleWithEnv = payload.environmentName ? `${payload.title} [${payload.environmentName}]` : payload.title;
 
 	try {
-		const response = await fetch(url, {
+		const response = await notificationFetch(url, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({

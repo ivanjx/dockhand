@@ -26,6 +26,7 @@
 	let showExposedPorts = $derived($appSettings.showExposedPorts);
 	let honorProxyLabels = $derived($appSettings.honorProxyLabels);
 	let showImageChangelogLinks = $derived($appSettings.showImageChangelogLinks);
+	let showWhatsNew = $derived($appSettings.showWhatsNew);
 	let timeFormat = $derived($appSettings.timeFormat);
 	let dateFormat = $derived($appSettings.dateFormat);
 	let downloadFormat = $derived($appSettings.downloadFormat);
@@ -350,6 +351,20 @@ services:
 									/>
 								</div>
 								<p class="text-xs text-muted-foreground">Show a release-notes icon next to images with updates available</p>
+							</div>
+							<div class="space-y-1">
+								<div class="flex items-center gap-3">
+									<Label>Show "What's New"</Label>
+									<TogglePill
+										checked={showWhatsNew}
+										onchange={(checked) => {
+											appSettings.setShowWhatsNew(checked);
+											toast.success(checked ? "What's New popup enabled" : "What's New popup disabled");
+										}}
+										disabled={!$canAccess('settings', 'edit')}
+									/>
+								</div>
+								<p class="text-xs text-muted-foreground">Show the "What's New" popup after upgrading to a new version</p>
 							</div>
 							<div class="space-y-1">
 								<div class="flex items-center gap-3">

@@ -308,8 +308,9 @@ export const handle: Handle = async ({ event, resolve }) => {
 		let user = await validateSession(event.cookies);
 		let authMethod: 'cookie' | 'bearer' | 'none' = user ? 'cookie' : 'none';
 
-		// If no session, try Bearer token on API routes
-		if (!user && event.url.pathname.startsWith('/api/')) {
+		// If no session, try Bearer token on API routes (and /metrics, which
+		// Prometheus scrapes with a Bearer token when app auth is enabled).
+		if (!user && (event.url.pathname.startsWith('/api/') || event.url.pathname === '/metrics')) {
 			const authHeader = event.request.headers.get('authorization');
 			if (authHeader && authHeader.startsWith('Bearer dh_') && authHeader.length <= 207) {
 				const clientIp = getClientIp(event);
@@ -350,6 +351,14 @@ export const handle: Handle = async ({ event, resolve }) => {
 			const noAdminSetupMode = !(await hasAdminUser());
 			if (noAdminSetupMode && event.url.pathname === '/api/users' && event.request.method === 'POST') {
 				return requestContext.run(ctx, async () => compressResponse(event.request, await resolve(event)));
+			}
+
+			// /metrics returns a plain 401 (Prometheus scrape) — never a login redirect.
+			if (event.url.pathname === '/metrics') {
+				return new Response('Unauthorized', {
+					status: 401,
+					headers: { 'WWW-Authenticate': 'Bearer' }
+				});
 			}
 
 			// API routes return 401

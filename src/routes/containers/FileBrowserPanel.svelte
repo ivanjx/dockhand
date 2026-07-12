@@ -147,6 +147,10 @@
 	let viewingFile = $state<{ name: string; path: string; content: string } | null>(null);
 	let editorContent = $state('');
 	let loadingFile = $state(false);
+	// True when the editor buffer differs from the loaded file (unsaved changes).
+	let editorDirty = $derived(!!editingFile && editorContent !== editingFile.content);
+	// Shown when the user tries to close the editor with unsaved changes (#1264).
+	let showCloseConfirm = $state(false);
 	let savingFile = $state(false);
 	let editorTheme = $state<'light' | 'dark'>('dark');
 
@@ -234,7 +238,12 @@
 	// the key. When no file is open, ESC bubbles normally and closes the dialog.
 	function handleEscape(e: KeyboardEvent) {
 		if (e.key !== 'Escape') return;
-		if (editingFile) {
+		if (showCloseConfirm) {
+			// Esc on the unsaved-changes prompt = Cancel (keep editing), never discard.
+			e.stopPropagation();
+			e.preventDefault();
+			showCloseConfirm = false;
+		} else if (editingFile) {
 			e.stopPropagation();
 			e.preventDefault();
 			closeEditor();
@@ -444,7 +453,7 @@
 			}
 
 			toast.success('File saved');
-			closeEditor();
+			forceCloseEditor(); // saved → close without re-prompting the dirty guard
 		} catch (err: any) {
 			toast.error(err.message || 'Failed to save file');
 		} finally {
@@ -452,7 +461,17 @@
 		}
 	}
 
+	// Guarded close: if the buffer has unsaved edits, ask first (#1264).
 	function closeEditor() {
+		if (editorDirty) {
+			showCloseConfirm = true;
+			return;
+		}
+		forceCloseEditor();
+	}
+
+	function forceCloseEditor() {
+		showCloseConfirm = false;
 		editingFile = null;
 		editorContent = '';
 	}
@@ -1155,6 +1174,25 @@
 			</div>
 		</div>
 	{/if}
+
+	<!-- Unsaved-changes confirmation on editor close (#1264) -->
+	<Dialog.Root open={showCloseConfirm} onOpenChange={(o) => { if (!o) showCloseConfirm = false; }}>
+		<Dialog.Content class="sm:max-w-md">
+			<Dialog.Header>
+				<Dialog.Title>Unsaved changes</Dialog.Title>
+				<Dialog.Description>
+					{editingFile?.name ?? 'This file'} has unsaved changes. Save them before closing?
+				</Dialog.Description>
+			</Dialog.Header>
+			<Dialog.Footer class="gap-2 sm:justify-between">
+				<Button variant="outline" onclick={() => showCloseConfirm = false}>Cancel</Button>
+				<div class="flex gap-2">
+					<Button variant="destructive" onclick={forceCloseEditor}>Discard</Button>
+					<Button onclick={saveFile} disabled={savingFile}>Save</Button>
+				</div>
+			</Dialog.Footer>
+		</Dialog.Content>
+	</Dialog.Root>
 
 	<!-- File Viewer Overlay -->
 	{#if viewingFile}

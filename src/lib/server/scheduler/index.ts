@@ -187,6 +187,11 @@ export async function startScheduler(): Promise<void> {
 /**
  * Stop the scheduler service and cleanup all jobs.
  */
+/** Scheduler state — for the metrics endpoint. */
+export function getSchedulerStats(): { running: boolean; activeJobs: number } {
+	return { running: isRunning, activeJobs: activeJobs.size };
+}
+
 export function stopScheduler(): void {
 	if (!isRunning) return;
 
@@ -396,8 +401,11 @@ export async function registerSchedule(
 		// Get timezone for this environment
 		const timezone = environmentId ? await getEnvironmentTimezone(environmentId) : 'UTC';
 
-		// Create new Cron instance with timezone
-		const job = new Cron(cronExpression, { timezone, legacyMode: false }, async () => {
+		// Create new Cron instance with timezone.
+		// protect: skip a scheduled tick if the previous run is still in progress
+		// (prevents a slow update/sync from overlapping itself — duplicate
+		// container recreation, concurrent git pull on the same stack dir).
+		const job = new Cron(cronExpression, { timezone, legacyMode: false, protect: true }, async () => {
 			// Defensive check: verify schedule still exists and is enabled
 			if (type === 'container_update') {
 				const setting = await getAutoUpdateSettingById(scheduleId);

@@ -115,13 +115,19 @@ async function withScannerLock<T>(scannerType: string, fn: () => Promise<T>): Pr
 // Key: "{scannerType}:{imageName}", Value: Promise that resolves to the scan result
 const inProgressScans = new Map<string, Promise<string>>();
 
+/** Scanner queue depth — for the metrics endpoint. `inProgress` = distinct
+ *  image scans running/deduped; `locked` = scanner types holding the serial lock. */
+export function getScannerStats(): { inProgress: number; locked: number } {
+	return { inProgress: inProgressScans.size, locked: scannerLocks.size };
+}
+
 // Default CLI arguments for scanners (image name is substituted for {image})
 export const DEFAULT_GRYPE_ARGS = '-o json -v {image}';
 export const DEFAULT_TRIVY_ARGS = 'image --format json {image}';
 
 // Pinned scanner images — avoid :latest after the March 2026 Trivy supply chain attack
-export const DEFAULT_GRYPE_IMAGE = 'anchore/grype:v0.110.0';
-export const DEFAULT_TRIVY_IMAGE = 'aquasec/trivy:0.69.3';
+export const DEFAULT_GRYPE_IMAGE = 'anchore/grype:v0.115.0';
+export const DEFAULT_TRIVY_IMAGE = 'aquasec/trivy:0.71.2';
 
 export interface VulnerabilitySeverity {
 	critical: number;
@@ -152,6 +158,31 @@ export interface ScanResult {
 	summary: VulnerabilitySeverity;
 	scanDuration: number;
 	error?: string;
+}
+
+/**
+ * Convert a ScanResult into the row shape expected by saveVulnerabilityScan().
+ * Note: `vulnerabilities` is passed as the raw array — saveVulnerabilityScan()
+ * does the JSON.stringify. (The previous inline copy of this helper stringified
+ * here too, which double-encoded the column; readers must tolerate both.)
+ */
+export function scanResultToDbFormat(result: ScanResult, envId?: number | null) {
+	return {
+		environmentId: envId ?? null,
+		imageId: result.imageId || result.imageName, // Fallback to imageName if imageId is undefined
+		imageName: result.imageName,
+		scanner: result.scanner,
+		scannedAt: result.scannedAt,
+		scanDuration: result.scanDuration,
+		criticalCount: result.summary.critical,
+		highCount: result.summary.high,
+		mediumCount: result.summary.medium,
+		lowCount: result.summary.low,
+		negligibleCount: result.summary.negligible,
+		unknownCount: result.summary.unknown,
+		vulnerabilities: result.vulnerabilities,
+		error: result.error ?? null
+	};
 }
 
 export interface ScanProgress {

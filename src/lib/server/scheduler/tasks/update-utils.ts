@@ -137,19 +137,15 @@ export function isSystemContainer(imageName: string): SystemContainerType | null
 }
 
 /**
- * Podman creates a hidden "pod-infra" container for every pod it runs (#1221).
- * The image (`localhost/podman-pause`) is generated locally and never published
- * to any registry, so update checks always fail noisily. The label is the
- * authoritative signal — but Podman may set Config.Image empty for these
- * containers, so the name fallback catches that too.
+ * Podman creates a hidden "pod-infra" container per pod, always named
+ * `<pod-id-or-name>-infra` (#1221). The infra image is locally generated
+ * and can be overridden via --infra-image, so neither image nor label is
+ * universal — the name suffix is the only reliable signal.
+ *
+ * Anchored to the end so user containers like "my-infrastructure" don't match.
  */
-export function isPodmanInfraContainer(
-	imageName: string | undefined,
-	labels: Record<string, string> | undefined
-): boolean {
-	if (labels?.['io.podman.annotations.infra'] === 'true') return true;
-	if (imageName && /podman-pause/i.test(imageName)) return true;
-	return false;
+export function isPodmanInfraContainer(containerName: string | undefined): boolean {
+	return !!containerName && /[-_]infra$/i.test(containerName);
 }
 
 /**

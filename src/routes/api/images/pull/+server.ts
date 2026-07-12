@@ -113,6 +113,7 @@ export const POST: RequestHandler = async (event) => {
 						});
 					}
 
+
 					const totalVulns = results.reduce((sum, r) => sum + r.vulnerabilities.length, 0);
 					sendData({
 						status: 'scan-complete',

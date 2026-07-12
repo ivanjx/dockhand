@@ -248,6 +248,22 @@ export async function listUserTokens(userId: number) {
 }
 
 /**
+ * Fleet-wide API token stats for the metrics endpoint (no secrets returned):
+ * total configured, how many are expired, and how many have never been used.
+ */
+export async function getApiTokenStats(): Promise<{ total: number; expired: number; neverUsed: number }> {
+	const table = await getApiTokensTable();
+	const rows = await db.select({ lastUsed: table.lastUsed, expiresAt: table.expiresAt }).from(table);
+	const now = Date.now();
+	let expired = 0, neverUsed = 0;
+	for (const r of rows) {
+		if (r.expiresAt && new Date(r.expiresAt).getTime() < now) expired++;
+		if (!r.lastUsed) neverUsed++;
+	}
+	return { total: rows.length, expired, neverUsed };
+}
+
+/**
  * Revoke (delete) a token. Owner or admin can revoke.
  */
 export async function revokeApiToken(tokenId: number, requestingUserId: number, isAdmin: boolean): Promise<boolean> {

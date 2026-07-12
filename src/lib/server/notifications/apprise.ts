@@ -14,7 +14,7 @@
  *
  * Setup docs: https://github.com/caronc/apprise-api
  */
-import { drainResponse, type NotificationPayload, type NotificationResult } from './shared';
+import { notificationFetch, drainResponse, type NotificationPayload, type NotificationResult } from './shared';
 
 export async function sendApprise(appriseUrl: string, payload: NotificationPayload): Promise<NotificationResult> {
 	const isSecure = appriseUrl.startsWith('apprises');
@@ -65,7 +65,7 @@ export async function sendApprise(appriseUrl: string, payload: NotificationPaylo
 	if (format) body.format = format; // text | markdown | html
 
 	try {
-		const response = await fetch(`${baseUrl}/notify/${encodeURIComponent(key)}`, {
+		const response = await notificationFetch(`${baseUrl}/notify/${encodeURIComponent(key)}`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(body)

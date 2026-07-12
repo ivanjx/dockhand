@@ -131,8 +131,42 @@ type environment struct {
 	baseURL        string
 	cancel         context.CancelFunc
 	ctx            context.Context
+	statusMu       sync.Mutex // guards online + statusReported (written from metrics + events goroutines)
 	online         bool
 	statusReported bool // true after first env_status message sent
+}
+
+// markOnline records the env as online and reports whether this is a transition
+// that should be sent as an env_status message. Atomic under statusMu so the
+// metrics and events goroutines can't race on the bool pair.
+func (e *environment) markOnline() bool {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	if !e.online || !e.statusReported {
+		e.online = true
+		e.statusReported = true
+		return true
+	}
+	return false
+}
+
+// markOffline is the offline counterpart of markOnline.
+func (e *environment) markOffline() bool {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	if e.online || !e.statusReported {
+		e.online = false
+		e.statusReported = true
+		return true
+	}
+	return false
+}
+
+// forceOffline unconditionally marks the env offline (caller always reports).
+func (e *environment) forceOffline() {
+	e.statusMu.Lock()
+	defer e.statusMu.Unlock()
+	e.online = false
 }
 
 // closeTransports releases idle connections held by the environment's HTTP transports.
@@ -277,6 +311,9 @@ func buildClients(cfg *EnvConfig) (client *http.Client, streamClient *http.Clien
 }
 
 func buildTLSConfig(cfg *EnvConfig) (*tls.Config, error) {
+	if cfg.SkipVerify {
+		fmt.Fprintf(os.Stderr, "[collector] WARNING: TLS verification disabled for %s — this is insecure\n", cfg.Host)
+	}
 	tlsCfg := &tls.Config{
 		InsecureSkipVerify: cfg.SkipVerify,
 		ServerName:         cfg.Host, // Explicit SNI for IP-based hosts
@@ -385,17 +422,13 @@ func (m *manager) runMetrics(env *environment) {
 
 func (m *manager) collectMetrics(env *environment) {
 	if err := env.ping(env.ctx); err != nil {
-		if env.online || !env.statusReported {
-			env.online = false
-			env.statusReported = true
+		if env.markOffline() {
 			m.send(OutMessage{Type: "env_status", EnvID: env.id, Online: boolPtr(false), Error: "Docker not reachable: " + err.Error()})
 		}
 		return
 	}
 
-	if !env.online || !env.statusReported {
-		env.online = true
-		env.statusReported = true
+	if env.markOnline() {
 		m.send(OutMessage{Type: "env_status", EnvID: env.id, Online: boolPtr(true)})
 	}
 
@@ -585,9 +618,7 @@ func (m *manager) runEvents(env *environment) {
 
 		// Stream mode
 		if err := env.ping(env.ctx); err != nil {
-			if env.online || !env.statusReported {
-				env.online = false
-				env.statusReported = true
+			if env.markOffline() {
 				m.send(OutMessage{Type: "env_status", EnvID: env.id, Online: boolPtr(false), Error: "Docker not reachable: " + err.Error()})
 			}
 			if !waitOrCancel(reconnectDelay) {
@@ -597,9 +628,7 @@ func (m *manager) runEvents(env *environment) {
 			continue
 		}
 
-		if !env.online || !env.statusReported {
-			env.online = true
-			env.statusReported = true
+		if env.markOnline() {
 			m.send(OutMessage{Type: "env_status", EnvID: env.id, Online: boolPtr(true)})
 		}
 		reconnectDelay = 5 * time.Second
@@ -610,7 +639,7 @@ func (m *manager) runEvents(env *environment) {
 			if env.ctx.Err() != nil {
 				return
 			}
-			env.online = false
+			env.forceOffline()
 			m.send(OutMessage{Type: "env_status", EnvID: env.id, Online: boolPtr(false), Error: err.Error()})
 			if !waitOrCancel(reconnectDelay) {
 				return
@@ -700,17 +729,13 @@ func (m *manager) runEvents(env *environment) {
 
 func (m *manager) pollEvents(env *environment) {
 	if err := env.ping(env.ctx); err != nil {
-		if env.online || !env.statusReported {
-			env.online = false
-			env.statusReported = true
+		if env.markOffline() {
 			m.send(OutMessage{Type: "env_status", EnvID: env.id, Online: boolPtr(false), Error: "Docker not reachable: " + err.Error()})
 		}
 		return
 	}
 
-	if !env.online || !env.statusReported {
-		env.online = true
-		env.statusReported = true
+	if env.markOnline() {
 		m.send(OutMessage{Type: "env_status", EnvID: env.id, Online: boolPtr(true)})
 	}
 

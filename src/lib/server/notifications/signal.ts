@@ -11,7 +11,7 @@
  * numbers (numeric, '+' gets added) or group IDs (signal-cli's "group.<base64>"
  * form, passed through untouched).
  */
-import { drainResponse, type NotificationPayload, type NotificationResult } from './shared';
+import { notificationFetch, drainResponse, type NotificationPayload, type NotificationResult } from './shared';
 
 export async function sendSignal(appriseUrl: string, payload: NotificationPayload): Promise<NotificationResult> {
 	const isSecure = appriseUrl.startsWith('signals');
@@ -49,7 +49,7 @@ export async function sendSignal(appriseUrl: string, payload: NotificationPayloa
 
 	const baseUrl = `${isSecure ? 'https' : 'http'}://${hostPort}`;
 	try {
-		const response = await fetch(`${baseUrl}/v2/send`, {
+		const response = await notificationFetch(`${baseUrl}/v2/send`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({

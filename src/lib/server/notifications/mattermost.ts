@@ -1,5 +1,5 @@
 /** Mattermost incoming webhook. mmost:// or mmosts:// (HTTPS). */
-import { drainResponse, type NotificationPayload, type NotificationResult } from './shared';
+import { notificationFetch, drainResponse, type NotificationPayload, type NotificationResult } from './shared';
 
 export async function sendMattermost(appriseUrl: string, payload: NotificationPayload): Promise<NotificationResult> {
 	// mmost://[botname@]hostname[:port][/path]/token or mmosts://...
@@ -37,7 +37,7 @@ export async function sendMattermost(appriseUrl: string, payload: NotificationPa
 	}
 
 	try {
-		const response = await fetch(url, {
+		const response = await notificationFetch(url, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(body)

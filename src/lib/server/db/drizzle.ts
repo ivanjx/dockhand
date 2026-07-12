@@ -1044,3 +1044,87 @@ export function getPostgresConnectionInfo(): { host: string; port: string } | nu
 		return null;
 	}
 }
+
+/** High-churn tables worth exposing a row count for (they grow and affect tuning). */
+const METRICS_TABLES = [
+	'container_events', 'vulnerability_scans', 'audit_logs', 'sessions',
+	'host_metrics', 'schedule_executions', 'pending_container_updates'
+];
+
+export interface DatabaseStats {
+	type: 'postgres' | 'sqlite';
+	/** Engine version string, e.g. "3.45.1" (sqlite) or "16.2" (postgres). */
+	version: string;
+	/** On-disk size in bytes (sqlite: page_count*page_size; postgres: pg_database_size). 0 if unknown. */
+	sizeBytes: number;
+	/** Row counts for the high-churn tables (missing tables omitted). */
+	rowCounts: Record<string, number>;
+	/**
+	 * Engine-specific extra numeric gauges, keyed by name:
+	 *  - sqlite: wal_bytes (WAL file size), freelist_bytes (reclaimable), cache_size_pages
+	 *  - postgres: connections (current backends), max_connections
+	 */
+	extra: Record<string, number>;
+}
+
+/**
+ * Cheap DB stats for the metrics endpoint: engine + version, on-disk size, row
+ * counts of the tables that actually grow, plus engine-specific tuning gauges.
+ * Never throws — returns best-effort data so a scrape can't fail on a DB hiccup.
+ */
+export async function getDatabaseStats(): Promise<DatabaseStats> {
+	const type = isPostgres ? 'postgres' : 'sqlite';
+	let sizeBytes = 0;
+	let version = 'unknown';
+	const rowCounts: Record<string, number> = {};
+	const extra: Record<string, number> = {};
+
+	try {
+		if (isPostgres) {
+			const size = await rawClient`SELECT pg_database_size(current_database()) AS bytes`;
+			sizeBytes = Number(size[0]?.bytes ?? 0);
+			try {
+				const v = await rawClient`SHOW server_version`;
+				version = String(v[0]?.server_version ?? 'unknown').split(' ')[0];
+			} catch { /* ignore */ }
+			try {
+				const c = await rawClient`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database()`;
+				extra.connections = Number(c[0]?.n ?? 0);
+				const mc = await rawClient`SELECT setting::int AS n FROM pg_settings WHERE name = 'max_connections'`;
+				extra.max_connections = Number(mc[0]?.n ?? 0);
+			} catch { /* ignore */ }
+			for (const table of METRICS_TABLES) {
+				try {
+					// Identifiers can't be parameterized; table names are a fixed const list.
+					const r = await rawClient.unsafe(`SELECT count(*)::int AS n FROM ${table}`);
+					rowCounts[table] = Number(r[0]?.n ?? 0);
+				} catch { /* table may not exist on older schemas */ }
+			}
+		} else {
+			const pc = rawClient.prepare('PRAGMA page_count').get() as { page_count?: number };
+			const ps = rawClient.prepare('PRAGMA page_size').get() as { page_size?: number };
+			const pageSize = ps?.page_size ?? 0;
+			sizeBytes = (pc?.page_count ?? 0) * pageSize;
+			try {
+				version = String((rawClient.prepare('SELECT sqlite_version() AS v').get() as { v?: string })?.v ?? 'unknown');
+			} catch { /* ignore */ }
+			try {
+				// freelist_count is a read-only header read (reclaimable space). NB: do
+				// NOT read WAL size via `PRAGMA wal_checkpoint` — that pragma actively
+				// CHECKPOINTS the WAL (a write), which would contend on every scrape.
+				const fl = rawClient.prepare('PRAGMA freelist_count').get() as { freelist_count?: number };
+				if (fl?.freelist_count != null) extra.freelist_bytes = fl.freelist_count * pageSize;
+			} catch { /* ignore */ }
+			for (const table of METRICS_TABLES) {
+				try {
+					const r = rawClient.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n?: number };
+					rowCounts[table] = Number(r?.n ?? 0);
+				} catch { /* table may not exist */ }
+			}
+		}
+	} catch {
+		/* best-effort */
+	}
+
+	return { type, version, sizeBytes, rowCounts, extra };
+}

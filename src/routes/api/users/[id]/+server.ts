@@ -90,6 +90,14 @@ export const PUT: RequestHandler = async (event) => {
 		// Check if user is currently an admin (via role)
 		const existingUserIsAdmin = await userHasAdminRole(userId);
 
+		// A non-admin may hold `users:edit` (e.g. a help-desk role) but must not be
+		// able to modify an Admin account — resetting an admin's password here would
+		// be a privilege escalation to superadmin. Self-edits and real admins are
+		// unaffected. Mirrors the isAdmin gate on the MFA-disable endpoint.
+		if (existingUserIsAdmin && auth.user && auth.user.id !== userId && !auth.isAdmin) {
+			return json({ error: 'Cannot modify an admin account' }, { status: 403 });
+		}
+
 		// Build update object
 		const updateData: any = {};
 

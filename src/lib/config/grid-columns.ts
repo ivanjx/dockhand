@@ -136,6 +136,21 @@ export const environmentColumns: ColumnConfig[] = [
 	{ id: 'labels', label: 'Labels', width: 150, minWidth: 80 }
 ];
 
+// Vulnerabilities dashboard grid columns
+export const vulnerabilityColumns: ColumnConfig[] = [
+	{ id: 'cve', label: 'CVE', sortable: true, sortField: 'cve', width: 160, minWidth: 110 },
+	{ id: 'package', label: 'Package', sortable: true, sortField: 'package', width: 160, minWidth: 100 },
+	{ id: 'severity', label: 'Severity', sortable: true, sortField: 'severity', width: 110, minWidth: 90, noTruncate: true },
+	{ id: 'installed', label: 'Installed version', sortable: true, sortField: 'installed', width: 150, minWidth: 100 },
+	{ id: 'fixed', label: 'Fixed version', sortable: true, sortField: 'fixed', width: 150, minWidth: 100 },
+	{ id: 'image', label: 'Image', sortable: true, sortField: 'image', width: 220, minWidth: 120, grow: true },
+	{ id: 'container', label: 'Container', sortable: true, sortField: 'container', width: 180, minWidth: 120 },
+	{ id: 'stack', label: 'Stack', sortable: true, sortField: 'stack', width: 150, minWidth: 100 },
+	{ id: 'scannedAt', label: 'Scanned', sortable: true, sortField: 'scannedAt', width: 170, minWidth: 130, noTruncate: true },
+	// Empty fixed-end column: hosts the column-settings (customize columns) control in its header.
+	{ id: 'actions', label: '', fixed: 'end', width: 44, resizable: false }
+];
+
 // Map of grid ID to column definitions
 export const gridColumnConfigs: Record<GridId, ColumnConfig[]> = {
 	containers: containerColumns,
@@ -147,7 +162,8 @@ export const gridColumnConfigs: Record<GridId, ColumnConfig[]> = {
 	activity: activityColumns,
 	schedules: scheduleColumns,
 	audit: auditColumns,
-	environments: environmentColumns
+	environments: environmentColumns,
+	vulnerabilities: vulnerabilityColumns
 };
 
 // Get configurable columns (not fixed)

@@ -33,6 +33,7 @@ import {
 	getStackSources,
 	deleteStackEnvVars,
 	removePendingContainerUpdate,
+	getPendingContainerUpdates,
 	deleteAutoUpdateSchedule,
 	getAutoUpdateSetting,
 	deleteContainerStartSchedule,
@@ -1765,6 +1766,18 @@ export async function listComposeStacks(envId?: number | null): Promise<ComposeS
 	const containers = await listContainers(true, envId);
 	const stacks = new Map<string, Set<string>>();
 
+	// Container IDs with pending image updates (populated by manual/scheduled update checks).
+	// Used to flag stacks that contain at least one outdated container.
+	const pendingUpdateIds = new Set<string>();
+	if (typeof envId === 'number') {
+		try {
+			const pending = await getPendingContainerUpdates(envId);
+			pending.forEach((p) => pendingUpdateIds.add(p.containerId));
+		} catch {
+			// Non-fatal: stacks just won't show update markers
+		}
+	}
+
 	containers.forEach((container) => {
 		const projectLabel = container.labels['com.docker.compose.project'];
 		if (projectLabel) {
@@ -1821,7 +1834,8 @@ export async function listComposeStacks(envId?: number | null): Promise<ComposeS
 					restartCount: c.restartCount || 0,
 					exitCode: c.exitCode,
 					created: c.created,
-					labels: c.labels || {}
+					labels: c.labels || {},
+					updateAvailable: pendingUpdateIds.has(c.id)
 				};
 			})
 			.sort((a, b) => {
@@ -1835,6 +1849,8 @@ export async function listComposeStacks(envId?: number | null): Promise<ComposeS
 			name,
 			containers: Array.from(containerIds),
 			containerDetails,
+			updatesAvailable: stackContainers.some((c) => pendingUpdateIds.has(c.id)),
+			updateCount: stackContainers.filter((c) => pendingUpdateIds.has(c.id)).length,
 			status:
 				activeTotal === 0
 					? 'stopped'
