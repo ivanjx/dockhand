@@ -81,6 +81,10 @@ Behavior to preserve:
 
 - Vulnerability scan failures only fail or block an update when vulnerability
   criteria requires blocking. If criteria is `never`, updates continue.
+- Reuse upstream's `resolveBlockDecision()` logic for vulnerability decisions,
+  including fresh current-image scans for `more_than_current`. Keep the fork's
+  scan-failure handling in the surrounding update flows so `never` continues
+  while blocking criteria still fail safely.
 - This applies to scheduled container update, environment update check, and
   batch update stream flows.
 - Hidden containers are excluded from update checks.
@@ -93,6 +97,7 @@ Behavior to preserve:
 Key files:
 
 - `src/lib/server/scheduler/tasks/update-utils.ts`
+- `src/lib/server/scheduler/tasks/block-decision.ts`
 - `src/lib/server/scheduler/tasks/container-update.ts`
 - `src/lib/server/scheduler/tasks/env-update-check.ts`
 - `src/routes/api/containers/batch-update-stream/+server.ts`
