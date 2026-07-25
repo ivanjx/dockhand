@@ -111,7 +111,6 @@ export async function auditContainer(
 		details
 	});
 }
-
 /**
  * Helper for image actions
  */
@@ -277,6 +276,24 @@ export async function auditRegistry(
 		entityId: String(registryId),
 		entityName: registryName,
 		description: `Registry ${registryName} ${action}`,
+		details
+	});
+}
+
+/**
+ * Helper for backup destination actions
+ */
+export async function auditBackupDestination(
+	event: RequestEvent,
+	action: AuditAction,
+	destinationId: number,
+	destinationName: string,
+	details?: any
+): Promise<void> {
+	await audit(event, action, 'backup_destination', {
+		entityId: String(destinationId),
+		entityName: destinationName,
+		description: `Backup destination ${destinationName} ${action}`,
 		details
 	});
 }
@@ -454,4 +471,39 @@ export async function auditAuth(
 		const errorMsg = error instanceof Error ? error.message : String(error);
 		console.error('[Audit] Failed to log event:', errorMsg);
 	}
+}
+
+/**
+ * Helper for backup actions (backup run, cancel, config create/update/delete)
+ */
+export async function auditBackup(
+	event: RequestEvent,
+	action: AuditAction,
+	targetName: string,
+	environmentId?: number | null,
+	details?: any
+): Promise<void> {
+	await audit(event, action, 'backup_config', {
+		entityName: targetName,
+		environmentId,
+		description: `Backup ${targetName} ${action}`,
+		details
+	});
+}
+
+/**
+ * Helper for restore actions
+ */
+export async function auditRestore(
+	event: RequestEvent,
+	targetName: string,
+	environmentId?: number | null,
+	details?: any
+): Promise<void> {
+	await audit(event, 'restore', 'backup_config', {
+		entityName: targetName,
+		environmentId,
+		description: `Restore ${targetName}`,
+		details
+	});
 }

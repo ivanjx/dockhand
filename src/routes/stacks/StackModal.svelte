@@ -7,7 +7,10 @@
 	import CodeEditor, { type VariableMarker } from '$lib/components/CodeEditor.svelte';
 	import StackEnvVarsPanel from '$lib/components/StackEnvVarsPanel.svelte';
 	import { type EnvVar, type ValidationResult } from '$lib/components/StackEnvVarsEditor.svelte';
-	import { Layers, Save, Play, Code, GitGraph, Loader2, AlertCircle, X, Sun, Moon, TriangleAlert, GripVertical, FolderOpen, Copy, Check, XCircle, MapPin, ArrowRight, ArrowDown, Info, Box, FolderSync } from 'lucide-svelte';
+	import { Layers, Save, Play, Code, GitGraph, GitBranch, Loader2, AlertCircle, X, Sun, Moon, TriangleAlert, GripVertical, FolderOpen, Copy, Check, XCircle, MapPin, ArrowRight, ArrowDown, Info, Box, FolderSync, Archive } from 'lucide-svelte';
+	import BackupPanel from '../containers/BackupPanel.svelte';
+	import { volumesForStack, type VolumeInfo } from '$lib/utils/mounts';
+	import { fetchBackupExecutions } from '$lib/utils/backup';
 	import type { Component } from 'svelte';
 	import FilesystemBrowser from './FilesystemBrowser.svelte';
 	import PathBarItem from './PathBarItem.svelte';
@@ -16,6 +19,7 @@
 	import { Badge } from '$lib/components/ui/badge';
 	import { currentEnvironment, appendEnvParam } from '$lib/stores/environment';
 	import { appSettings } from '$lib/stores/settings';
+	import { page } from '$app/stores'; // BETA GATE: backups feature flag
 	import { focusFirstInput } from '$lib/utils';
 	import { copyToClipboard } from '$lib/utils/clipboard';
 	import * as Alert from '$lib/components/ui/alert';
@@ -37,11 +41,12 @@
 		stackName?: string; // Required for edit mode, optional for create
 		initialCompose?: string; // Pre-fill compose content (for library deploy)
 		initialStackName?: string; // Pre-fill stack name (for library deploy)
+		readonly?: boolean; // View compose content without allowing local changes
 		onClose: () => void;
 		onSuccess: () => void; // Called after create or save
 	}
 
-	let { open = $bindable(), mode: propMode, stackName: propStackName = '', initialCompose, initialStackName, onClose, onSuccess }: Props = $props();
+	let { open = $bindable(), mode: propMode, stackName: propStackName = '', initialCompose, initialStackName, readonly = false, onClose, onSuccess }: Props = $props();
 
 	// Local effective state - can transition from create → edit after failed deploy
 	let mode = $state(propMode);
@@ -56,9 +61,13 @@
 	let loadError = $state<string | null>(null);
 	let errors = $state<{ stackName?: string; compose?: string }>({});
 	let composeContent = $state('');
-	let activeTab = $state<'editor' | 'graph'>('editor');
+	let activeTab = $state<'editor' | 'graph' | 'backups'>('editor');
+	let backupCount = $state(0);
+	let backupTally = $state<{ ok: number; failed: number }>({ ok: 0, failed: 0 });
 	let showConfirmClose = $state(false);
 	let editorTheme = $state<'light' | 'dark'>('dark');
+	// Ref to the embedded backup panel so close can check its inline form for unsaved edits.
+	let backupPanelRef = $state<BackupPanel | undefined>(undefined);
 
 	// Environment variables state
 	let envVars = $state<EnvVar[]>([]);
@@ -105,6 +114,8 @@
 
 	// Container info for untracked stacks
 	let stackContainers = $state<{ name: string; state: string; image: string }[]>([]);
+	// Volumes/binds of this stack's containers, for the backup panel picker.
+	let stackVolumes = $state<VolumeInfo[]>([]);
 
 	// Derived: has user customized the compose path from auto-computed default?
 	const isComposePathCustom = $derived(
@@ -711,6 +722,16 @@
 		}
 	}
 
+	// Populate the backup picker's volume/bind list from this stack's containers'
+	// mounts. Runs for BOTH the managed (internal) load path and the
+	// needs-file-location path, so an internal stack's backup panel is never empty.
+	async function loadStackVolumes(envId: number | null) {
+		const contRes = await fetch(appendEnvParam('/api/containers', envId));
+		if (contRes.ok) {
+			stackVolumes = volumesForStack(await contRes.json(), stackName);
+		}
+	}
+
 	async function loadComposeFile() {
 		if (mode !== 'edit' || !stackName) return;
 
@@ -739,6 +760,22 @@
 					loadError = null;
 					loading = false; // Important: stop loading spinner
 
+					// Fetch backup schedule count (BETA GATE: only when backups enabled)
+					if ($page.data.backupsEnabled) try {
+						const bp = new URLSearchParams({ target: stackName, type: 'stack' });
+						if (envId) bp.set('env', String(envId));
+						const bRes = await fetch(`/api/backup/configs?${bp}`);
+						if (bRes.ok) {
+							const bData = await bRes.json();
+							const cfgs = Array.isArray(bData) ? bData : bData?.id ? [bData] : [];
+							backupCount = cfgs.length;
+							if (cfgs.length > 0) {
+								const t = await fetchBackupExecutions(cfgs.map((c: any) => c.id));
+								backupTally = { ok: t.ok, failed: t.failed };
+							}
+						}
+					} catch {}
+
 					// Fetch containers for this stack to show what's running
 					try {
 						const stacksRes = await fetch(appendEnvParam('/api/stacks', envId));
@@ -753,6 +790,10 @@
 								}));
 							}
 						}
+
+						// Volumes/binds for the backup picker — derived from this stack's
+						// containers' mounts (same normalizer used by the other backup surfaces).
+						await loadStackVolumes(envId);
 					} catch (e) {
 						console.error('Failed to fetch stack containers:', e);
 					}
@@ -768,6 +809,13 @@
 			// Track original paths for detecting changes
 			originalComposePath = data.composePath || null;
 			originalEnvPath = data.envPath || null;
+
+			// Volumes/binds for the backup picker (managed/internal stack path).
+			try {
+				await loadStackVolumes(envId);
+			} catch (e) {
+				console.error('Failed to load stack volumes:', e);
+			}
 
 			// Load both env endpoints in parallel, then process results together
 			const [envResponse, rawEnvResponse] = await Promise.all([
@@ -1150,7 +1198,7 @@
 	}
 
 	function tryClose() {
-		if (isDirty) {
+		if (isDirty || backupPanelRef?.isDirty()) {
 			showConfirmClose = true;
 		} else {
 			handleClose();
@@ -1326,8 +1374,9 @@
 		if (isOpen) {
 			focusFirstInput();
 		} else {
-			// Prevent closing if there are unsaved changes - show confirmation instead
-			if (isDirty) {
+			// Prevent closing if there are unsaved changes (stack edits OR a half-edited
+			// backup schedule in the embedded panel) - show confirmation instead
+			if (isDirty || backupPanelRef?.isDirty()) {
 				// Re-open the dialog and show confirmation
 				open = true;
 				showConfirmClose = true;
@@ -1357,12 +1406,14 @@
 									{stackName}
 								{/if}
 								{#if $currentEnvironment}
-									<span class="font-medium">on <span class="text-amber-600 dark:text-amber-400">{$currentEnvironment.name}</span></span>
+									<span class="font-semibold">on <span class="text-amber-600 dark:text-amber-400">{$currentEnvironment.name}</span></span>
 								{/if}
 							</Dialog.Title>
 							<Dialog.Description class="text-xs text-zinc-500 dark:text-zinc-400">
 								{#if mode === 'create'}
 									Create a new Docker Compose stack
+								{:else if readonly}
+									View compose file and dependency graph
 								{:else}
 									Edit compose file and environment variables
 								{/if}
@@ -1371,50 +1422,50 @@
 					</div>
 				</div>
 
-				<div class="flex items-center gap-2">
-					<!-- View toggle -->
-					<div class="flex items-center gap-0.5 bg-zinc-200 dark:bg-zinc-700 rounded-md p-0.5">
-						<button
-							class="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs transition-colors {activeTab === 'editor' ? 'bg-white dark:bg-zinc-900 text-zinc-800 dark:text-zinc-100 shadow-sm' : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200'}"
-							onclick={() => activeTab = 'editor'}
-						>
-							<Code class="w-3.5 h-3.5" />
-							Editor
-						</button>
-						<button
-							class="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs transition-colors {activeTab === 'graph' ? 'bg-white dark:bg-zinc-900 text-zinc-800 dark:text-zinc-100 shadow-sm' : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200'}"
-							onclick={() => activeTab = 'graph'}
-						>
-							<GitGraph class="w-3.5 h-3.5" />
-							Graph
-						</button>
-					</div>
-
-					<!-- Theme toggle (only in editor mode) -->
-					{#if activeTab === 'editor'}
-						<button
-							onclick={toggleEditorTheme}
-							class="p-1.5 rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors"
-							title={editorTheme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
-						>
-							{#if editorTheme === 'light'}
-								<Moon class="w-4 h-4" />
-							{:else}
-								<Sun class="w-4 h-4" />
-							{/if}
-						</button>
-					{/if}
-
-					<!-- Close button -->
-					<button
-						onclick={tryClose}
-						class="p-1.5 rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors"
-					>
-						<X class="w-4 h-4" />
-					</button>
-				</div>
+				<!-- Close button -->
+				<button
+					onclick={tryClose}
+					class="p-1.5 rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors"
+				>
+					<X class="w-4 h-4" />
+				</button>
 			</div>
 		</Dialog.Header>
+
+		<!-- View tabs — left-aligned underline bar under the header, matched to
+		     GitStackModal for a consistent look across the stack modals. -->
+		<div class="flex items-center gap-1 border-b border-zinc-200 px-5 dark:border-zinc-700 flex-shrink-0">
+			<button
+				type="button"
+				class="relative -mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm transition-colors {activeTab === 'editor' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}"
+				onclick={() => activeTab = 'editor'}
+			>
+				<Code class="h-3.5 w-3.5" /> Editor
+			</button>
+			<button
+				type="button"
+				class="relative -mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm transition-colors {activeTab === 'graph' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}"
+				onclick={() => activeTab = 'graph'}
+			>
+				<GitGraph class="h-3.5 w-3.5" /> Graph
+			</button>
+			<!-- BETA GATE: Backups tab hidden unless FEAT_BACKUPS_ENABLED (see features.ts).
+			     Also hidden for UNTRACKED stacks: with no known compose file the backup
+			     would be incomplete (can't redeploy at restore), so the backend refuses
+			     it (assertStackBackupable) — don't offer it in the UI either. -->
+			{#if mode === 'edit' && $page.data.backupsEnabled && !needsFileLocation}
+				<button
+					type="button"
+					class="relative -mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm transition-colors {activeTab === 'backups' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}"
+					onclick={() => activeTab = 'backups'}
+				>
+					<Archive class="h-3.5 w-3.5" /> Backups
+					{#if backupCount > 0}<span class="bg-primary/15 text-primary text-[10px] px-1.5 rounded-full font-medium">{backupCount}</span>{/if}
+					{#if backupTally.ok > 0}<span class="inline-flex items-center gap-0.5 rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-medium text-emerald-500"><Check class="w-2.5 h-2.5" />{backupTally.ok}</span>{/if}
+					{#if backupTally.failed > 0}<span class="inline-flex items-center gap-0.5 rounded-full bg-red-500/15 px-1.5 text-[10px] font-semibold text-red-500"><X class="w-2.5 h-2.5" />{backupTally.failed}</span>{/if}
+				</button>
+			{/if}
+		</div>
 
 		<div class="flex-1 overflow-hidden flex flex-col min-h-0">
 			{#if errors.compose}
@@ -1454,7 +1505,7 @@
 				{/if}
 
 				<!-- File location needed banner -->
-				{#if mode === 'edit' && needsFileLocation}
+				{#if mode === 'edit' && needsFileLocation && !readonly}
 					<div class="px-4 py-3 border-b border-zinc-200 dark:border-zinc-700 bg-amber-50/50 dark:bg-amber-950/20">
 						<div class="flex items-start gap-3">
 							<AlertCircle class="w-4 h-4 shrink-0 text-amber-500 mt-0.5" />
@@ -1484,7 +1535,12 @@
 				<div bind:this={containerRef} class="flex-1 min-h-0 flex flex-col {isDraggingSplit ? 'select-none' : ''}">
 					{#if activeTab === 'editor'}
 						<!-- Path bars row -->
-						<div class="flex border-b border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/30">
+						<div class="flex items-center border-b border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/30">
+							{#if readonly}
+								<span class="ml-4 flex shrink-0 items-center gap-1 rounded-full border border-purple-500/30 bg-purple-500/10 px-2 py-0.5 text-2xs font-medium text-purple-600 dark:text-purple-400" title="This is a Git-managed stack — Dockhand shows its compose read-only; edit it in the repository.">
+									<GitBranch class="h-3 w-3" /> Git · read-only
+								</span>
+							{/if}
 							<!-- Compose path -->
 							<div class="flex-shrink-0 px-4 py-2" style="width: {splitRatio}%">
 								<PathBarItem
@@ -1493,8 +1549,8 @@
 									placeholder="/path/to/compose.yaml"
 									copied={composePathCopied}
 									onCopy={() => copyText(workingComposePath, (v) => composePathCopied = v)}
-									onBrowse={openComposeBrowser}
-									onChangeLocation={mode === 'edit' && !needsFileLocation ? openChangeLocationBrowser : undefined}
+									onBrowse={readonly ? undefined : openComposeBrowser}
+									onChangeLocation={mode === 'edit' && !needsFileLocation && !readonly ? openChangeLocationBrowser : undefined}
 									defaultText={mode === 'create' ? 'Enter stack name above' : 'Not specified'}
 									sourceHint={pathSourceHint}
 								/>
@@ -1510,8 +1566,8 @@
 									placeholder="/path/to/.env (optional)"
 									copied={envPathCopied}
 									onCopy={() => copyText(displayEnvPath, (v) => envPathCopied = v)}
-									onBrowse={openEnvBrowser}
-									isEditable={true}
+									onBrowse={readonly ? undefined : openEnvBrowser}
+									isEditable={!readonly}
 									isCustom={!!workingEnvPath}
 									defaultText={mode === 'create' ? 'Enter stack name above' : 'Not specified'}
 									isSuggested={isEnvPathSuggested}
@@ -1521,6 +1577,20 @@
 									}}
 								/>
 							</div>
+							<!-- Theme toggle -->
+							<div class="flex items-center px-2 shrink-0">
+								<button
+									onclick={toggleEditorTheme}
+									class="p-1 rounded text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors"
+									title={editorTheme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
+								>
+									{#if editorTheme === 'light'}
+										<Moon class="w-3.5 h-3.5" />
+									{:else}
+										<Sun class="w-3.5 h-3.5" />
+									{/if}
+								</button>
+							</div>
 						</div>
 						<!-- Editor panels row -->
 						<div class="flex-1 min-h-0 flex">
@@ -1528,7 +1598,15 @@
 							<div class="flex-shrink-0 flex flex-col min-w-0" style="width: {splitRatio}%">
 								{#if open}
 									<div class="flex-1 p-3 min-h-0">
-										{#if needsFileLocation && !composeContent}
+										{#if readonly && needsFileLocation && !composeContent}
+											<div class="h-full rounded-md border border-dashed border-zinc-300 dark:border-zinc-600 bg-zinc-50 dark:bg-zinc-800/30 flex flex-col items-center justify-center text-center px-8">
+												<GitGraph class="w-12 h-12 text-zinc-300 dark:text-zinc-600 mb-4" />
+												<h3 class="text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Compose file not available</h3>
+												<p class="text-xs text-zinc-500 dark:text-zinc-400 max-w-sm">
+													Deploy or sync this Git stack first so Dockhand has a local copy of its compose file.
+												</p>
+											</div>
+										{:else if needsFileLocation && !composeContent}
 											<!-- Empty state for untracked stacks -->
 											<div class="h-full rounded-md border border-dashed border-zinc-300 dark:border-zinc-600 bg-zinc-50 dark:bg-zinc-800/30 flex flex-col items-center justify-center text-center px-8">
 												<FolderOpen class="w-12 h-12 text-zinc-300 dark:text-zinc-600 mb-4" />
@@ -1578,8 +1656,9 @@
 													bind:this={codeEditorRef}
 													value={composeContent}
 													language="yaml"
+													{readonly}
 													theme={editorTheme}
-													onchange={handleComposeChange}
+													onchange={readonly ? undefined : handleComposeChange}
 													variableMarkers={variableMarkers}
 													class="flex-1 rounded-md overflow-hidden border border-zinc-200 dark:border-zinc-700"
 												/>
@@ -1608,6 +1687,7 @@
 									bind:rawContent={rawEnvContent}
 									validation={envValidation}
 									existingSecretKeys={mode === 'edit' ? existingSecretKeys : new Set()}
+									{readonly}
 									onchange={() => { markDirty(); debouncedValidate(); }}
 									theme={editorTheme}
 									infoText="These variables will be written to a .env file in the stack directory and passed to the compose command."
@@ -1618,10 +1698,22 @@
 						<!-- Graph tab: Full width -->
 						<ComposeGraphViewer
 							bind:this={graphViewerRef}
-							composeContent={composeContent || defaultCompose}
+							composeContent={composeContent || (mode === 'create' ? defaultCompose : '')}
 							class="h-full flex-1"
-							onContentChange={handleGraphContentChange}
+							onContentChange={readonly ? undefined : handleGraphContentChange}
+							{readonly}
 						/>
+					{:else if activeTab === 'backups' && !needsFileLocation}
+						<!-- Backups tab (never for untracked stacks — see the tab gate above) -->
+						<div class="h-full flex-1 overflow-auto p-4">
+							<BackupPanel
+								bind:this={backupPanelRef}
+								containerName={stackName}
+								volumes={stackVolumes}
+								type="stack"
+								onTally={(t) => (backupTally = t)}
+							/>
+						</div>
 					{/if}
 				</div>
 			{/if}
@@ -1630,7 +1722,9 @@
 		<!-- Footer -->
 		<div class="px-5 py-2.5 border-t border-zinc-200 dark:border-zinc-700 flex items-center justify-between flex-shrink-0">
 			<div class="text-xs text-zinc-500 dark:text-zinc-400">
-				{#if isDirty}
+				{#if readonly}
+					Read-only
+				{:else if isDirty}
 					<span class="text-amber-600 dark:text-amber-500">Unsaved changes</span>
 				{:else}
 					No changes
@@ -1638,11 +1732,15 @@
 			</div>
 
 			<div class="flex items-center gap-2">
-				<Button variant="outline" onclick={tryClose} disabled={saving}>
-					Cancel
-				</Button>
+				{#if readonly}
+					<Button onclick={tryClose}>Close</Button>
+				{:else}
+					<Button variant="outline" onclick={tryClose} disabled={saving}>
+						Cancel
+					</Button>
+				{/if}
 
-				{#if mode === 'create'}
+				{#if !readonly && mode === 'create'}
 					<!-- Create mode buttons -->
 					<Button variant="outline" onclick={() => handleCreate(false)} disabled={saving}>
 						{#if saving}
@@ -1662,7 +1760,7 @@
 							Create & Start
 						{/if}
 					</Button>
-				{:else}
+				{:else if !readonly}
 					<!-- Edit mode buttons -->
 					<Button variant="outline" class="w-24" onclick={() => handleSave(false)} disabled={saving || loading || (needsFileLocation && !workingComposePath.trim())}>
 						{#if saving && !savingWithRestart}

@@ -71,6 +71,13 @@
       "when": 1781620376161,
       "tag": "0009_add_template_sources",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1785001163724,
+      "tag": "0010_upstream_1_0_38_sqlite",
+      "breakpoints": true
     }
   ]
 }
