@@ -23,7 +23,7 @@ RUN apk add --no-cache curl unzip \
        | tar -xz --strip-components=1 -C /usr/local/bin \
     && chmod +x /usr/local/bin/apko
 
-# Generate apko.yaml — Node.js binary comes from node:24-slim, not Wolfi
+# Generate apko.yaml — Node.js binary comes from node:22-slim, not Wolfi
 RUN APKO_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") \
     && printf '%s\n' \
     "contents:" \
@@ -66,7 +66,7 @@ RUN apko build apko.yaml dockhand-base:latest output.tar \
 # -----------------------------------------------------------------------------
 # Stage 2: Application Builder (pure Node.js)
 # -----------------------------------------------------------------------------
-FROM --platform=$TARGETPLATFORM node:24-slim AS app-builder
+FROM --platform=$TARGETPLATFORM node:22-slim AS app-builder
 
 WORKDIR /app
 
@@ -86,7 +86,7 @@ COPY . .
 RUN NODE_OPTIONS=--max-old-space-size=4096 npm run build
 
 # Production dependencies only
-# Preserve better-sqlite3 native addon (no prebuilds exist for Node 24 ABI 137)
+# Preserve the target-platform better-sqlite3 native addon across the production install
 RUN cp -r node_modules/better-sqlite3/build /tmp/better-sqlite3-build \
     && rm -rf node_modules \
     && npm ci --omit=dev --ignore-scripts \
@@ -108,8 +108,8 @@ FROM scratch
 # Install custom Wolfi OS with Node.js
 COPY --from=os-builder /work/rootfs/ /
 
-# Copy Node.js binary from official node:24-slim (platform-correct, conservative CPU baseline)
-# Wolfi's nodejs-24 targets ARMv8.1+ which causes SIGILL on Cortex-A53 (Raspberry Pi 3+)
+# Copy Node.js binary from official node:22-slim (platform-correct, conservative CPU baseline)
+# Wolfi's Node.js package targets newer ARM CPUs, which causes SIGILL on Cortex-A53
 COPY --from=app-builder /usr/local/bin/node /usr/local/bin/node
 
 # Copy libnss_wrapper for git SSH with arbitrary UIDs
