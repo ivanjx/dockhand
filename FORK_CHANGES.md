@@ -167,6 +167,15 @@ Key files:
 - `package-lock.json`
 - `bun.lock`
 
+After merging upstream changes to `package.json`, refresh both supported lockfile
+workflows and review the resulting lockfile diff:
+
+```bash
+npm i
+bun i
+git diff -- package-lock.json bun.lock
+```
+
 ## Database Migration Rules
 
 This fork has its own migration history. Do not copy or merge a new upstream

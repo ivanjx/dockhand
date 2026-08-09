@@ -44,8 +44,9 @@ import { unregisterSchedule } from './scheduler';
 import { sendEventNotification } from './notifications';
 import { deleteGitStackFiles, parseEnvFileContent } from './git';
 import { cleanPem } from '$lib/utils/pem';
-import { rewriteComposeVolumePaths, getHostDataDir, findRelativeBindSources } from './host-path';
+import { rewriteComposeVolumePaths, getHostDataDir } from './host-path';
 import { getOrderValue } from './container-labels';
+import { pendingRowsToClear } from './pending-updates-core';
 
 // =============================================================================
 // TYPES
@@ -480,6 +481,8 @@ export interface GetComposeFileResult {
 	composePath?: string | null;
 	envPath?: string | null;
 	suggestedEnvPath?: string;
+	/** Stack source type (internal/git/external), from the stack_sources lookup already done here */
+	sourceType?: StackSourceType;
 }
 
 /**
@@ -539,7 +542,8 @@ export async function getStackComposeFile(
 				stackDir,
 				composePath: source.composePath,
 				envPath: source.envPath,
-				suggestedEnvPath
+				suggestedEnvPath,
+				sourceType: source.sourceType
 			};
 		} catch (error) {
 			const message = error instanceof Error ? error.message : 'Unknown error';
@@ -573,7 +577,8 @@ export async function getStackComposeFile(
 					stackDir,
 					// Always return the actual resolved paths for display
 					composePath: actualComposePath,
-					envPath: envExists ? envFilePath : null
+					envPath: envExists ? envFilePath : null,
+					sourceType: source.sourceType
 				};
 			}
 		}
@@ -1041,26 +1046,6 @@ async function executeLocalCompose(
 				console.log(`${logPrefix} [HostPath] ${line}`);
 			}
 			console.log(`${logPrefix} [HostPath] ----------------------------------------`);
-		}
-	}
-
-	// Cross-env safety check: if we're targeting a remote daemon (DOCKER_HOST
-	// set) and the compose has relative bind sources (./X, ../X), refuse the
-	// 'up' deploy with an actionable error. Otherwise docker compose expands
-	// ./X against Dockhand's CWD and asks the REMOTE daemon to bind that path,
-	// which silently creates an empty directory on the remote — the service
-	// starts with no data and the deploy reports success. (Other operations
-	// like down/stop/restart don't bind anything, so they pass through.)
-	if (dockerHost && operation === 'up') {
-		const relativeBinds = findRelativeBindSources(finalComposeContent);
-		if (relativeBinds.length > 0) {
-			const message = `This stack uses relative bind mounts (${relativeBinds.join(', ')}) which cannot be deployed to a remote Docker environment. The source paths are resolved on Dockhand's filesystem, not on the target host's. To fix: convert the bind mounts to named volumes, or use absolute paths that exist on the target host.`;
-			console.log(`${logPrefix} REFUSED: ${message}`);
-			return {
-				success: false,
-				output: '',
-				error: message
-			};
 		}
 	}
 
@@ -2057,6 +2042,8 @@ export interface RequireComposeResult {
 	composePath?: string;
 	/** Full path to the env file (for --env-file flag) */
 	envPath?: string;
+	/** Stack source type (internal/git/external), plumbed through from getStackComposeFile to avoid a redundant getStackSource lookup in callers */
+	sourceType?: StackSourceType;
 }
 
 /**
@@ -2131,7 +2118,8 @@ export async function requireComposeFile(
 		nonSecretVars,
 		stackDir: composeResult.stackDir,
 		composePath: composeResult.composePath ?? undefined,
-		envPath: envFilePath ?? undefined
+		envPath: envFilePath ?? undefined,
+		sourceType: composeResult.sourceType
 	};
 }
 
@@ -2163,6 +2151,11 @@ export async function redeployStackFromDir(
 	const envPath = join(stackDir, '.env');
 	const hasEnv = existsSync(envPath);
 	const envVars = hasEnv ? parseEnvFileContent(readFileSync(envPath, 'utf-8'), stackName) : undefined;
+	// Secret env vars are stored encrypted in the DB and deliberately never written
+	// to the snapshot's .env, so the extracted dir has no copy of them. Load them
+	// from the DB and inject them like every other compose path does (#1329) —
+	// otherwise a restored stack comes up with its secrets interpolating to "".
+	const secretVars = await getSecretEnvVarsAsRecord(stackName, envId);
 	// For Hawser, ship the entire tree (compose + include:d files + sidecars + .env).
 	const stackFiles = await readDirFilesAsMap(stackDir);
 	return await executeComposeCommand(
@@ -2176,7 +2169,8 @@ export async function redeployStackFromDir(
 			stackFiles
 		},
 		composeContent,
-		envVars
+		envVars,
+		secretVars
 	);
 }
 
@@ -2216,9 +2210,10 @@ export async function startStack(
 		return fallback;
 	}
 
-	// Check if this is a git stack - git stacks need useOverrideFile to write .env.dockhand
-	const source = await getStackSource(stackName, envId);
-	const isGitStack = source?.sourceType === 'git';
+	// Git stacks need useOverrideFile to write .env.dockhand with DB overrides.
+	// sourceType is plumbed through from requireComposeFile (which already looked it up
+	// via getStackComposeFile/getStackSource) to avoid a redundant DB lookup.
+	const isGitStack = result.sourceType === 'git';
 
 	const opts: ComposeCommandOptions = { stackName, envId, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath, useOverrideFile: isGitStack };
 
@@ -2256,9 +2251,15 @@ export async function stopStack(
 		return fallback;
 	}
 
+	// Git stacks need useOverrideFile so `.env.dockhand` (the panel vars) is passed via
+	// --env-file; otherwise `docker compose stop` re-interpolates ${VAR:?} in the compose
+	// file with the panel vars missing and errors (#1313). Matches startStack/deployStack.
+	// sourceType is plumbed through from requireComposeFile to avoid a redundant DB lookup.
+	const isGitStack = result.sourceType === 'git';
+
 	const composeResult = await executeComposeCommand(
 		'stop',
-		{ stackName, envId, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath },
+		{ stackName, envId, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath, useOverrideFile: isGitStack },
 		result.content!,
 		result.nonSecretVars,
 		result.secretVars
@@ -2296,8 +2297,8 @@ export async function restartStack(
 	// Git stacks need useOverrideFile to write .env.dockhand with DB overrides.
 	// Non-git stacks still pass nonSecretVars for legacy support (stacks without
 	// .env files on disk get vars injected via shell env at executeLocalCompose).
-	const source = await getStackSource(stackName, envId);
-	const isGitStack = source?.sourceType === 'git';
+	// sourceType is plumbed through from requireComposeFile to avoid a redundant DB lookup.
+	const isGitStack = result.sourceType === 'git';
 
 	const opts: ComposeCommandOptions = { stackName, envId, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath, useOverrideFile: isGitStack };
 
@@ -2336,9 +2337,13 @@ export async function downStack(
 	// Capture current stack containers before compose down removes them.
 	const stackContainers = await getStackContainers(stackName, envId);
 
+	// useOverrideFile for git stacks — same reason as stopStack (#1313).
+	// sourceType is plumbed through from requireComposeFile to avoid a redundant DB lookup.
+	const isGitStack = result.sourceType === 'git';
+
 	const composeResult = await executeComposeCommand(
 		'down',
-		{ stackName, envId, removeVolumes, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath },
+		{ stackName, envId, removeVolumes, workingDir: result.stackDir, composePath: result.composePath, envPath: result.envPath, useOverrideFile: isGitStack },
 		result.content!,
 		result.nonSecretVars,
 		result.secretVars
@@ -2394,6 +2399,11 @@ export async function removeStack(
 		// Get compose file (may not exist for external stacks)
 		const composeResult = await getStackComposeFile(stackName, envId);
 
+		// useOverrideFile for git stacks — same reason as stopStack (#1313).
+		// sourceType is plumbed through from getStackComposeFile (which already looked it
+		// up via getStackSource) to avoid a redundant DB lookup.
+		const isGitStack = composeResult.sourceType === 'git';
+
 		// Get stack containers BEFORE removing them (for cleanup later)
 		const stackContainers = await getStackContainers(stackName, envId);
 
@@ -2428,6 +2438,7 @@ export async function removeStack(
 					workingDir: composeResult.stackDir,
 					composePath: composeResult.composePath ?? undefined,
 					envPath: composeResult.envPath ?? undefined,
+					useOverrideFile: isGitStack,
 					// Full stack removal: the Hawser agent cleans its stack dir (#1162)
 					removeFiles: true,
 					filesToDelete: removalFiles
@@ -2628,6 +2639,45 @@ async function notifyStackDeploy(name: string, envId: number | null | undefined,
 			type: result.success ? 'success' : 'error'
 		}, envId ?? undefined);
 	} catch { /* never changes the deploy outcome */ }
+}
+
+/**
+ * After a pulled stack redeploy, clear the dashboard "pending update" rows for this
+ * stack's containers now on the newest local image (#1311). Fire-and-forget: fully
+ * wrapped so nothing here can affect the already-succeeded deploy; only DELETEs rows.
+ */
+async function reconcileStackPendingUpdates(stackName: string, envId: number): Promise<void> {
+	try {
+		const pending = await getPendingContainerUpdates(envId);
+		if (!pending || pending.length === 0) return;
+
+		const { listContainers, getImageIdByTag } = await import('./docker.js');
+		const containers = await listContainers(true, envId);
+		const live = containers.map((c) => ({
+			name: c.name,
+			imageId: c.imageId,
+			project: c.labels?.['com.docker.compose.project']
+		}));
+
+		// Resolve each distinct pending tag to its newest local image id once.
+		const tagCache = new Map<string, string | null>();
+		for (const p of pending) {
+			if (!tagCache.has(p.currentImage)) {
+				try {
+					tagCache.set(p.currentImage, await getImageIdByTag(p.currentImage, envId));
+				} catch {
+					tagCache.set(p.currentImage, null); // unresolvable → keep (fail-safe)
+				}
+			}
+		}
+
+		const toClear = pendingRowsToClear(pending, live, (tag) => tagCache.get(tag) ?? null, stackName);
+		for (const id of toClear) {
+			await removePendingContainerUpdate(envId, id).catch(() => {});
+		}
+	} catch {
+		// Never let update-badge cleanup affect a deploy that already succeeded.
+	}
 }
 
 /**
@@ -2832,6 +2882,16 @@ export async function deployStack(options: DeployStackOptions): Promise<StackOpe
 		// path funnels through, so all of them notify (#1295). A git deploy suppresses the
 		// stack_* notification (deployGitStack sends git_sync_*).
 		await notifyStackDeploy(name, envId, result, isGitDeploy ?? false);
+
+		// Clear stale pending-update badges (#1311). Fire-and-forget with a timeout so a
+		// slow Docker API can't delay or affect the already-succeeded deploy.
+		if (result.success && pullPolicy && typeof envId === 'number') {
+			const envIdNum = envId;
+			void Promise.race([
+				reconcileStackPendingUpdates(name, envIdNum),
+				new Promise<void>((resolve) => setTimeout(resolve, 15000))
+			]).catch(() => {});
+		}
 		return result;
 	});
 }

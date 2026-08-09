@@ -7,7 +7,7 @@
 	import { focusFirstInput } from '$lib/utils';
 	import ContainerSettingsTab from './ContainerSettingsTab.svelte';
 	import BackupPanel from './BackupPanel.svelte';
-	import { mountTypeFromHostPath } from '$lib/utils/mounts';
+	import { volumeInfoFromBind } from '$lib/utils/mounts';
 	import { fetchBackupExecutions } from '$lib/utils/backup';
 	import type { VulnerabilityCriteria } from '$lib/components/VulnerabilityCriteriaSelector.svelte';
 	import { parseHostPort, expandPortBindings, formatHostPort } from '$lib/utils/port-parse';
@@ -1167,7 +1167,7 @@
 		}
 	}}
 >
-	<Dialog.Content class="max-w-4xl w-full h-[85vh] p-0 flex flex-col overflow-hidden">
+	<Dialog.Content class="max-w-4xl w-[calc(100%-2rem)] h-[85vh] p-0 flex flex-col overflow-hidden">
 		<Dialog.Header class="px-5 py-4 border-b bg-muted/30 shrink-0 sticky top-0 z-10">
 			<Dialog.Title class="text-base font-semibold flex items-center gap-1">
 				Edit container
@@ -1254,7 +1254,7 @@
 					<BackupPanel
 						bind:this={backupPanelRef}
 						containerName={name}
-						volumes={volumeMappings.filter(v => v.hostPath && v.containerPath).map(v => ({ name: v.containerPath, mountPoint: v.hostPath, mountType: mountTypeFromHostPath(v.hostPath) }))}
+						volumes={volumeMappings.filter(v => v.hostPath && v.containerPath).map(volumeInfoFromBind)}
 						type="container"
 						onTally={(t) => (backupTally = t)}
 					/>
