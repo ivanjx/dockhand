@@ -4,6 +4,7 @@ import {
 	buildFormatters,
 	formatDatePartWith,
 	formatTimePartWith,
+	parseTimestamp,
 	type DateTimeFormatters
 } from '$lib/utils/date-format';
 
@@ -49,6 +50,8 @@ export interface AppSettings {
 	defaultBackupImage: string;
 	honorProxyLabels: boolean;
 	showImageChangelogLinks: boolean;
+	// Fetch app logos from selfh.st for container icons (off by default; opt-in).
+	useSelfhstIcons: boolean;
 	showWhatsNew: boolean;   // show the "What's New" modal after an upgrade (#1235)
 	protectScannerImages: boolean;
 	// Scanner Advanced settings (#1219). Empty values = use auto-detection.
@@ -90,6 +93,7 @@ const DEFAULT_SETTINGS: AppSettings = {
 	labelFilterMode: 'any',
 	honorProxyLabels: true,
 	showImageChangelogLinks: true,
+	useSelfhstIcons: false,
 	showWhatsNew: true,
 	protectScannerImages: true,
 	defaultScannerNetworkMode: '',
@@ -181,6 +185,7 @@ function createSettingsStore() {
 					defaultBackupImage: settings.defaultBackupImage ?? DEFAULT_SETTINGS.defaultBackupImage,
 					honorProxyLabels: settings.honorProxyLabels ?? DEFAULT_SETTINGS.honorProxyLabels,
 					showImageChangelogLinks: settings.showImageChangelogLinks ?? DEFAULT_SETTINGS.showImageChangelogLinks,
+					useSelfhstIcons: settings.useSelfhstIcons ?? DEFAULT_SETTINGS.useSelfhstIcons,
 					showWhatsNew: settings.showWhatsNew ?? DEFAULT_SETTINGS.showWhatsNew,
 					protectScannerImages: settings.protectScannerImages ?? DEFAULT_SETTINGS.protectScannerImages,
 					defaultScannerNetworkMode: settings.defaultScannerNetworkMode ?? DEFAULT_SETTINGS.defaultScannerNetworkMode,
@@ -240,6 +245,7 @@ function createSettingsStore() {
 					defaultBackupImage: updatedSettings.defaultBackupImage ?? DEFAULT_SETTINGS.defaultBackupImage,
 					honorProxyLabels: updatedSettings.honorProxyLabels ?? DEFAULT_SETTINGS.honorProxyLabels,
 					showImageChangelogLinks: updatedSettings.showImageChangelogLinks ?? DEFAULT_SETTINGS.showImageChangelogLinks,
+					useSelfhstIcons: updatedSettings.useSelfhstIcons ?? DEFAULT_SETTINGS.useSelfhstIcons,
 					showWhatsNew: updatedSettings.showWhatsNew ?? DEFAULT_SETTINGS.showWhatsNew,
 					protectScannerImages: updatedSettings.protectScannerImages ?? DEFAULT_SETTINGS.protectScannerImages,
 					defaultScannerNetworkMode: updatedSettings.defaultScannerNetworkMode ?? DEFAULT_SETTINGS.defaultScannerNetworkMode,
@@ -288,6 +294,13 @@ function createSettingsStore() {
 			update((current) => {
 				const newSettings = { ...current, highlightUpdates: value };
 				saveSettings({ highlightUpdates: value });
+				return newSettings;
+			});
+		},
+		setUseSelfhstIcons: (value: boolean) => {
+			update((current) => {
+				const newSettings = { ...current, useSelfhstIcons: value };
+				saveSettings({ useSelfhstIcons: value });
 				return newSettings;
 			});
 		},
@@ -611,7 +624,7 @@ export function formatTime(
 	date: Date | string | number,
 	options: { includeDate?: boolean; includeSeconds?: boolean } = {}
 ): string {
-	const d = date instanceof Date ? date : new Date(date);
+	const d = parseTimestamp(date);
 	const { includeDate = false, includeSeconds = false } = options;
 
 	if (includeDate) {
@@ -633,7 +646,7 @@ export function formatDateTime(date: Date | string | number, includeSeconds = fa
  * Format just the date part according to user's preferences.
  */
 export function formatDate(date: Date | string | number): string {
-	const d = date instanceof Date ? date : new Date(date);
+	const d = parseTimestamp(date);
 	return formatDatePart(d);
 }
 

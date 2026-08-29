@@ -78,6 +78,13 @@
       "when": 1785001163724,
       "tag": "0010_upstream_1_0_38_sqlite",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1788003721717,
+      "tag": "0011_upstream_1_0_45_sqlite",
+      "breakpoints": true
     }
   ]
 }

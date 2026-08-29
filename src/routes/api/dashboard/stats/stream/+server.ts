@@ -20,6 +20,7 @@ import {
 	DockerConnectionError
 } from '$lib/server/docker';
 import { listComposeStacks } from '$lib/server/stacks';
+import { countLivePending } from '$lib/server/pending-updates-core';
 import { authorize } from '$lib/server/authorize';
 import { prefersJSON, sseToJSON } from '$lib/server/sse';
 import type { EnvironmentStats } from '../+server';
@@ -220,6 +221,8 @@ async function getEnvironmentStatsProgressive(
 			today: eventStats.today
 		};
 
+		// pendingUpdates is live-matched below once the container list is fetched (#1006);
+		// seed to the raw count so a container-list timeout still shows something.
 		envStats.containers.pendingUpdates = pendingUpdates.length;
 
 		if (recentEventsResult.events.length > 0) {
@@ -309,7 +312,11 @@ async function getEnvironmentStatsProgressive(
 				envStats.containers.paused = containers.filter((c: any) => c.state === 'paused').length;
 				envStats.containers.restarting = containers.filter((c: any) => c.state === 'restarting').length;
 				envStats.containers.unhealthy = containers.filter((c: any) => c.health === 'unhealthy').length;
-				// Note: pendingUpdates is already set from DB query, preserve it
+				// Refine the seeded raw count against the (now non-null) container list so
+				// the tile agrees with the containers page (#1006). `containers` is
+				// guaranteed real here (the null-guard above threw on a timeout), so no
+				// empty-list fallback needed - unlike the non-stream twin.
+				envStats.containers.pendingUpdates = countLivePending(pendingUpdates, containers.map((c: any) => c.id));
 				envStats.loading!.containers = false;
 
 				onPartialUpdate({
@@ -556,6 +563,13 @@ async function getEnvironmentStatsProgressive(
 	return envStats;
 }
 
+/**
+ * @openapi
+ * summary: Stream per-environment dashboard stats progressively over Server-Sent Events
+ * description: Emits environments, partial, complete, error and done events as each environment's stats resolve. When the client sends Accept application/json, the stream is collected and returned as a single JSON payload instead.
+ * resp-200: Server-Sent Events stream (text/event-stream), or a JSON payload when Accept application/json is requested
+ * resp-403: Permission denied (requires the environments:view permission)
+ */
 export const GET: RequestHandler = async ({ request, cookies }) => {
 	const auth = await authorize(cookies);
 	if (auth.authEnabled && !await auth.can('environments', 'view')) {

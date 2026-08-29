@@ -17,6 +17,7 @@ import {
 	getDiskUsage
 } from '$lib/server/docker';
 import { listComposeStacks } from '$lib/server/stacks';
+import { countLivePending } from '$lib/server/pending-updates-core';
 import { authorize } from '$lib/server/authorize';
 import { parseLabels } from '$lib/utils/label-colors';
 
@@ -116,6 +117,16 @@ export interface EnvironmentStats {
 	loading?: LoadingStates;
 }
 
+/**
+ * @openapi
+ * summary: Get aggregated dashboard statistics per environment (containers, images, volumes, stacks, metrics)
+ * description: Returns an array of per-environment stats. When env is supplied and matches, a single object is returned instead of an array. An empty array is returned on a fresh install with no environments.
+ * query: env:integer Restrict the stats to a single environment (returns one object) (from GET /api/environments)
+ * resp-200: array<{id:integer!, name:string!, online:boolean, containers:{}, images:{}, volumes:{}, networks:{}, stacks:{}, metrics:{}, events:{}}>
+ * resp-403: Permission denied (requires the environments:view permission)
+ * resp-404: Environment not found (when env is supplied)
+ * resp-500: Failed to get dashboard stats
+ */
 export const GET: RequestHandler = async ({ cookies, url }) => {
 	const auth = await authorize(cookies);
 
@@ -281,7 +292,16 @@ export const GET: RequestHandler = async ({ cookies, url }) => {
 					today: eventStats.today
 				};
 
-				envStats.containers.pendingUpdates = pendingUpdates.length;
+				// Count only pending rows that still map to a live container (#1006):
+				// an out-of-band recreate/removal leaves orphan rows nothing prunes, and
+				// the containers page already live-matches, so the raw count over-reported.
+				// GUARD: only live-match when we actually HAVE the container list. If
+				// listContainers timed out (`containers` is []) while there ARE pending
+				// rows, the list is untrustworthy — fall back to the raw count rather than
+				// hide real updates (over-count is annoying; under-count hides updates).
+				envStats.containers.pendingUpdates = containers.length > 0
+					? countLivePending(pendingUpdates, containers.map((c: any) => c.id))
+					: pendingUpdates.length;
 
 			} catch (error) {
 				// Convert technical error messages to user-friendly ones

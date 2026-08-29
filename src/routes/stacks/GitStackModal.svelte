@@ -4,7 +4,6 @@
 	import * as Dialog from '$lib/components/ui/dialog';
 	import * as Select from '$lib/components/ui/select';
 	import { Label } from '$lib/components/ui/label';
-	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
 	import { TogglePill } from '$lib/components/ui/toggle-pill';
 	import { Loader2, GitBranch, RefreshCw, Webhook, Rocket, RefreshCcw, Copy, Check, XCircle, FolderGit2, Github, Key, KeyRound, Lock, FileText, HelpCircle, GripVertical, X, Download, Hammer, ArrowDownToLine, Zap, FolderOpen, Ban, TriangleAlert, Settings2, Archive } from 'lucide-svelte';
@@ -16,6 +15,12 @@
 	import { copyToClipboard } from '$lib/utils/clipboard';
 	import CronEditor from '$lib/components/cron-editor.svelte';
 	import StackEnvVarsPanel from '$lib/components/StackEnvVarsPanel.svelte';
+	import SecretProviderPicker from '$lib/components/SecretProviderPicker.svelte';
+	import BranchCombobox from './BranchCombobox.svelte';
+	import IconPickerModal from './IconPickerModal.svelte';
+	import StackIcon from '$lib/components/StackIcon.svelte';
+	import { appendEnvParam } from '$lib/stores/environment';
+	import { persistStackIcon } from '$lib/utils/stack-icon';
 	import { type EnvVar, type ValidationResult } from '$lib/components/StackEnvVarsEditor.svelte';
 	import { toast } from 'svelte-sonner';
 	import { focusFirstInput } from '$lib/utils';
@@ -44,13 +49,14 @@
 		name: string;
 		url: string;
 		branch: string;
-		credential_id: number | null;
+		credentialId: number | null;
 	}
 
 	interface GitStack {
 		id: number;
 		stackName: string;
 		repositoryId: number;
+		branch?: string | null; // Per-stack branch override; null = use repository default
 		environmentId: number | null;
 		composePath: string;
 		envFilePath: string | null;
@@ -70,13 +76,32 @@
 		open: boolean;
 		gitStack?: GitStack | null;
 		environmentId?: number | null;
+		icon?: string | null;
 		repositories: GitRepository[];
 		credentials: GitCredential[];
 		onClose: () => void;
 		onSaved: () => void;
 	}
 
-	let { open = $bindable(), gitStack = null, environmentId = null, repositories, credentials, onClose, onSaved }: Props = $props();
+	let { open = $bindable(), gitStack = null, environmentId = null, icon = null, repositories, credentials, onClose, onSaved }: Props = $props();
+
+	// Per-stack icon override (same name-based /icon endpoint as internal stacks, #1473).
+	let formIcon = $state<string | null>(icon);
+	let showIconPicker = $state(false);
+	$effect(() => { formIcon = icon; });
+
+	// value: '' clear, 'upload:<dataUrl>' custom upload, or a lucide name / 'selfhst:<ref>'.
+	async function onIconSelect(value: string) {
+		if (!gitStack?.stackName) return;
+		const target = appendEnvParam(`/api/stacks/${encodeURIComponent(gitStack.stackName)}/icon`, effectiveEnvId);
+		try {
+			const next = await persistStackIcon(target, value);
+			if (next !== undefined) formIcon = next; // undefined = POST failed, keep current
+			onSaved();
+		} catch (e) {
+			console.error('Failed to set stack icon:', e);
+		}
+	}
 
 	// Form state - repository selection or creation
 	let formRepoMode = $state<'existing' | 'new'>('existing');
@@ -148,11 +173,31 @@
 	let showExistsWarning = $state(false);
 	let errors = $state<{ stackName?: string; repository?: string; repoName?: string; repoUrl?: string; webhookSecret?: string }>({});
 
+	// Branch selection
+	let formBranch = $state<string | null>(null);
+	let branches = $state<{ name: string; sha: string }[]>([]);
+	let branchesLoading = $state(false);
+	// Monotonic token that guards against a stale branch-enumeration response
+	// overwriting `branches` for a newer repository URL (the $effect below can
+	// fire multiple times as the repo selection changes; a slow response for
+	// repo A must not clobber the branch list belonging to repo B).
+	let branchesFetchSeq = 0;
+
+	// Sentinel select value meaning "no per-stack override — use the repository's
+	// default branch". Contains ':' which is invalid in git refs, so it can never
+	// collide with a real branch name.
+
 	// Stack name validation: Docker Compose requires lowercase; must start with a
 	// letter or number, and contain only lowercase letters, numbers, hyphens, underscores
 	const STACK_NAME_REGEX = /^[a-z0-9][a-z0-9_-]*$/;
 	let copiedWebhookUrl = $state<'ok' | 'error' | null>(null);
 	let copiedWebhookSecret = $state<'ok' | 'error' | null>(null);
+
+	// Secret providers
+	type SecretProviderOption = { id: number; name: string; type: string };
+	let secretProviders = $state<SecretProviderOption[]>([]);
+	let formSecretProviderId = $state<number | null>(null);
+	let injectedSecretKeys = $state<string[]>([]);
 
 	// Environment variables state
 	let formEnvFilePath = $state<string | null>(null);
@@ -205,7 +250,20 @@
 		// Add global mouse event listeners for split dragging
 		window.addEventListener('mousemove', handleMouseMove);
 		window.addEventListener('mouseup', handleMouseUp);
+
+		fetchSecretProviders();
 	});
+
+	async function fetchSecretProviders() {
+		try {
+			const response = await fetch('/api/secret-providers');
+			if (!response.ok) return;
+			const data = await response.json();
+			secretProviders = (data ?? []).map((p: any) => ({ id: p.id, name: p.name, type: p.type }));
+		} catch (e) {
+			console.warn('Failed to load secret providers:', e);
+		}
+	}
 
 	onDestroy(() => {
 		window.removeEventListener('mousemove', handleMouseMove);
@@ -314,6 +372,7 @@
 				);
 				// Set envVars - the panel's $effect will auto-sync rawContent for text view
 				envVars = loadedVars;
+				injectedSecretKeys = data.injectedSecretKeys ?? [];
 			}
 		} catch (e) {
 			console.error('Failed to load env var overrides:', e);
@@ -340,6 +399,8 @@
 
 			if (formRepoMode === 'existing') {
 				body.repositoryId = formRepositoryId;
+				// Send the selected branch so env files are previewed from it (per-stack override)
+				body.branch = formBranch || undefined;
 			} else {
 				body.url = formNewRepoUrl;
 				body.branch = formNewRepoBranch || 'main';
@@ -426,6 +487,12 @@
 			formRepullImages = gitStack.repullImages ?? false;
 			formForceRedeploy = gitStack.forceRedeploy ?? false;
 			formDeployNow = false;
+			formSecretProviderId = null;
+
+			// Load secret provider binding
+			loadSecretProviderBindingForStack(gitStack.stackName);
+			// Per-stack branch override; null means "use the repository default"
+			formBranch = gitStack.branch ?? null;
 
 			// Load env files and overrides SYNCHRONOUSLY to avoid race conditions
 			// Wait for all loads to complete before allowing any other effect to run
@@ -455,6 +522,55 @@
 			formRepullImages = false;
 			formForceRedeploy = false;
 			formDeployNow = false;
+			formSecretProviderId = null;
+		}
+	}
+
+	async function loadSecretProviderBindingForStack(stackName: string) {
+		try {
+			const url = environmentId ? `/api/stacks/sources?env=${environmentId}` : '/api/stacks/sources';
+			const response = await fetch(url);
+			if (!response.ok) return;
+			const sourceMap = await response.json();
+			const source = sourceMap?.[stackName];
+			formSecretProviderId = source?.secretProviderId ?? null;
+		} catch (e) {
+			console.warn('Failed to load secret provider binding for git stack:', e);
+		}
+	}
+
+	async function fetchBranches() {
+		const seq = ++branchesFetchSeq;
+		branchesLoading = true;
+		branches = [];
+		try {
+			const body: Record<string, any> = {};
+			if (formRepoMode === 'existing' && formRepositoryId) {
+				body.repositoryId = formRepositoryId;
+			} else if (formRepoMode === 'new' && formNewRepoUrl) {
+				body.url = formNewRepoUrl;
+				body.credentialId = formNewRepoCredentialId;
+			} else {
+				return;
+			}
+			const response = await fetch('/api/git/branches', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body)
+			});
+			// A newer fetch (or a repo change) superseded this one — drop the
+			// stale response so it cannot overwrite the new repo's branch list.
+			if (seq !== branchesFetchSeq) return;
+			if (response.ok) {
+				const data = await response.json();
+				if (seq !== branchesFetchSeq) return;
+				branches = data.branches || [];
+			}
+		} catch (e) {
+			if (seq !== branchesFetchSeq) return;
+			console.error('Failed to fetch branches:', e);
+		} finally {
+			if (seq === branchesFetchSeq) branchesLoading = false;
 		}
 	}
 
@@ -540,6 +656,7 @@
 				repullImages: formRepullImages,
 				forceRedeploy: formForceRedeploy,
 				deployNow: deployAfterSave,
+				secretProviderId: formSecretProviderId,
 				envVars: overrideVars.map(v => ({
 					key: v.key.trim(),
 					value: v.value,
@@ -549,6 +666,9 @@
 
 			if (formRepoMode === 'existing') {
 				body.repositoryId = formRepositoryId;
+				// Per-stack branch override — sent on both create and update so the
+				// stack payload is the single source of truth (null = inherit repo default)
+				body.branch = formBranch || null;
 			} else {
 				// Create new repo inline
 				body.repoName = formNewRepoName;
@@ -576,9 +696,10 @@
 			}
 
 			// Check if deployment failed
-			if (data.deployResult && !data.deployResult.success) {
+			const deployResult = data.deployResult as { success?: boolean; error?: string } | undefined;
+			if (deployResult && !deployResult.success) {
 				toast.error('Deployment failed', {
-					description: data.deployResult.error || 'Unknown error'
+					description: deployResult.error || 'Unknown error'
 				});
 				onSaved(); // Still refresh the list to show the new stack
 				onClose(); // Close modal, error shown as toast
@@ -593,6 +714,21 @@
 			formSaving = false;
 		}
 	}
+
+	// Fetch branches when repository selection changes
+	$effect(() => {
+		if (formRepoMode === 'existing' && formRepositoryId) {
+			void fetchBranches();
+			// A fresh stack inherits the repository's default until a branch is
+			// picked. When editing, the stored per-stack override (set in
+			// resetForm) must be preserved — null means repository default.
+			if (!gitStack) formBranch = null;
+		} else if (formRepoMode === 'new' && formNewRepoUrl) {
+			void fetchBranches();
+		} else {
+			branches = [];
+		}
+	});
 
 	// Auto-populate stack name from selected repo and compose path (only if user hasn't manually edited)
 	$effect(() => {
@@ -633,9 +769,24 @@
 		<Dialog.Header class="px-5 py-3 border-b border-zinc-200 dark:border-zinc-700 flex-shrink-0">
 			<div class="flex items-center justify-between">
 				<div class="flex items-center gap-3">
-					<div class="p-1.5 rounded-md bg-zinc-200 dark:bg-zinc-700">
-						<GitBranch class="w-4 h-4 text-zinc-600 dark:text-zinc-300" />
-					</div>
+					{#if gitStack}
+						<button
+							type="button"
+							title="Change stack icon"
+							onclick={() => (showIconPicker = true)}
+							class="p-1.5 rounded-md bg-zinc-200 dark:bg-zinc-700 hover:ring-2 hover:ring-primary transition-shadow"
+						>
+							{#if formIcon}
+								<StackIcon icon={formIcon} stackName={gitStack.stackName} envId={effectiveEnvId} class="w-4 h-4 text-zinc-600 dark:text-zinc-300" />
+							{:else}
+								<GitBranch class="w-4 h-4 text-zinc-600 dark:text-zinc-300" />
+							{/if}
+						</button>
+					{:else}
+						<div class="p-1.5 rounded-md bg-zinc-200 dark:bg-zinc-700">
+							<GitBranch class="w-4 h-4 text-zinc-600 dark:text-zinc-300" />
+						</div>
+					{/if}
 					<div>
 						<Dialog.Title class="text-sm font-semibold text-zinc-800 dark:text-zinc-100">
 							{gitStack ? 'Edit git stack' : 'Deploy from Git'}
@@ -767,6 +918,24 @@
 								No repositories configured. Click "Add new" to add one.
 							</p>
 						{/if}
+						<!-- Branch selection for existing repository -->
+						{#if formRepoMode === 'existing' && selectedRepo}
+							<div class="space-y-2">
+								<Label for="existing-repo-branch">Branch</Label>
+								<BranchCombobox
+									id="existing-repo-branch"
+									value={formBranch ?? ''}
+									branches={branches}
+									defaultBranch={selectedRepo.branch}
+									loading={branchesLoading}
+									placeholder="Repository default ({selectedRepo.branch})"
+									clearLabel="Repository default ({selectedRepo.branch})"
+									onchange={(v) => { formBranch = v; }}
+									onclear={() => { formBranch = null; }}
+								/>
+								<p class="text-xs text-muted-foreground">Branch this stack deploys from. Leave empty to follow the branch configured on the repository ({selectedRepo.branch}).</p>
+							</div>
+						{/if}
 					{:else}
 						<div class="space-y-3 p-3 border rounded-md bg-muted/30">
 							<div class="space-y-2">
@@ -795,10 +964,27 @@
 									<p class="text-xs text-destructive">{errors.repoUrl}</p>
 								{/if}
 							</div>
-							<div class="grid grid-cols-2 gap-3">
+							<div class="grid grid-cols-2 items-start gap-3">
 								<div class="space-y-2">
 									<Label for="new-repo-branch">Branch</Label>
-									<Input id="new-repo-branch" bind:value={formNewRepoBranch} placeholder="main" />
+									<!-- Free-text, searchable branch picker. Supports both discovered
+									     branches and arbitrary typed names: a new/private repository whose
+									     branch enumeration fails must not force the user onto "main" — they
+									     can type the known branch name instead. The "main" default is
+									     preserved when no branch has been chosen, and a value not returned by
+									     enumeration is never silently reset. Server-side Git ref validation
+									     remains authoritative. -->
+									<BranchCombobox
+										id="new-repo-branch"
+										class="w-full"
+										value={formNewRepoBranch}
+										branches={branches}
+										loading={branchesLoading}
+										placeholder="main"
+										onchange={(v) => { formNewRepoBranch = v; }}
+										onclear={() => { formNewRepoBranch = 'main'; }}
+									/>
+									<p class="text-xs text-muted-foreground">Type a name or pick from the list.</p>
 								</div>
 								<div class="space-y-2">
 									<Label for="new-repo-credential">Credential</Label>
@@ -846,6 +1032,7 @@
 											{/each}
 										</Select.Content>
 									</Select.Root>
+									<p class="text-xs text-muted-foreground">SSH key or token for private repositories.</p>
 								</div>
 							</div>
 						</div>
@@ -873,13 +1060,28 @@
 			{#if gitStack && selectedRepo}
 				<div class="space-y-2">
 					<Label>Repository</Label>
-					<div class="flex items-center gap-2 text-xs text-muted-foreground bg-muted/50 rounded-md px-3 py-2">
-						<FolderGit2 class="w-3.5 h-3.5 shrink-0" />
+					<div class="flex h-9 items-center gap-2 rounded-md border border-input bg-muted/50 px-3 py-1 text-sm text-muted-foreground">
+						<FolderGit2 class="w-4 h-4 shrink-0" />
 						<span class="truncate" title={selectedRepo.url}>{selectedRepo.url}</span>
-						{#if selectedRepo.branch}
-							<Badge variant="outline" class="text-2xs py-0 px-1.5 shrink-0">{selectedRepo.branch}</Badge>
-						{/if}
 					</div>
+				</div>
+			{/if}
+
+			{#if gitStack && selectedRepo}
+				<div class="space-y-2">
+					<Label for="stack-branch">Branch</Label>
+					<BranchCombobox
+						id="stack-branch"
+						value={formBranch ?? ''}
+						branches={branches}
+						defaultBranch={selectedRepo.branch}
+						loading={branchesLoading}
+						placeholder="Repository default ({selectedRepo.branch})"
+						clearLabel="Repository default ({selectedRepo.branch})"
+						onchange={(v) => { formBranch = v; }}
+						onclear={() => { formBranch = null; }}
+					/>
+					<p class="text-xs text-muted-foreground">Branch this stack deploys from. Leave empty to follow the branch configured on the repository ({selectedRepo.branch}).</p>
 				</div>
 			{/if}
 
@@ -1151,8 +1353,16 @@
 
 			<!-- Right column: Environment Variables -->
 			<div class="flex-1 min-w-0 flex flex-col overflow-hidden bg-zinc-50 dark:bg-zinc-800/50">
+				<SecretProviderPicker
+					bind:secretProviderId={formSecretProviderId}
+					bind:envVars
+					providers={secretProviders}
+				/>
 				<StackEnvVarsPanel
 					bind:variables={envVars}
+					injectedSecretKeys={gitStack !== null ? injectedSecretKeys : []}
+					providerType={secretProviders.find((p) => p.id === formSecretProviderId)?.type ?? null}
+					providerName={secretProviders.find((p) => p.id === formSecretProviderId)?.name ?? null}
 					placeholder={{ key: 'MY_VAR', value: 'value' }}
 					infoText="Override variables from your repository env files. Non-secrets are saved to <code class='bg-muted px-1 rounded'>.env.dockhand</code> in the stack directory. Secrets are stored in the database and injected via shell environment at deploy time.<br/><br/>Variables are available for <strong>compose file interpolation</strong> using <code class='bg-muted px-1 rounded'>${'{VAR_NAME}'}</code> syntax. They are not automatically injected into containers — use <code class='bg-muted px-1 rounded'>environment:</code> or reference <code class='bg-muted px-1 rounded'>.env.dockhand</code> in <code class='bg-muted px-1 rounded'>env_file:</code> to pass them through."
 					existingSecretKeys={gitStack !== null ? existingSecretKeys : new Set()}
@@ -1252,3 +1462,5 @@
 		</div>
 	</Dialog.Content>
 </Dialog.Root>
+
+<IconPickerModal bind:open={showIconPicker} value={formIcon} onselect={onIconSelect} title="Choose a stack icon" />

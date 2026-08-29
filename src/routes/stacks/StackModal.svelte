@@ -7,17 +7,24 @@
 	import CodeEditor, { type VariableMarker } from '$lib/components/CodeEditor.svelte';
 	import StackEnvVarsPanel from '$lib/components/StackEnvVarsPanel.svelte';
 	import { type EnvVar, type ValidationResult } from '$lib/components/StackEnvVarsEditor.svelte';
-	import { Layers, Save, Play, Code, GitGraph, GitBranch, GitCommitHorizontal, Github, Loader2, AlertCircle, X, Sun, Moon, TriangleAlert, GripVertical, FolderOpen, Copy, Check, XCircle, MapPin, ArrowRight, ArrowDown, Info, Box, FolderSync, Archive } from 'lucide-svelte';
+	import SecretProviderPicker from '$lib/components/SecretProviderPicker.svelte';
+	import { SELECTOR_VARS } from '$lib/utils/bulk-selector';
+	import { classifyMarker, resolvedRefVarNames } from '$lib/utils/invault-markers';
+	import { applyQuickFix, findingKey } from '$lib/utils/compose-quick-fix';
+	import { Layers, Save, Play, Code, GitGraph, GitBranch, GitCommitHorizontal, Github, Loader2, AlertCircle, X, Sun, Moon, TriangleAlert, GripVertical, FolderOpen, Copy, Check, XCircle, MapPin, ArrowRight, ArrowDown, Info, Box, FolderSync, Archive, ListChecks } from 'lucide-svelte';
+	import ComposeValidatePanel from './ComposeValidatePanel.svelte';
 	import BackupPanel from '../containers/BackupPanel.svelte';
 	import { volumesForStack, type VolumeInfo } from '$lib/utils/mounts';
 	import { fetchBackupExecutions } from '$lib/utils/backup';
 	import type { Component } from 'svelte';
 	import FilesystemBrowser from './FilesystemBrowser.svelte';
+	import IconPickerModal from './IconPickerModal.svelte';
+	import StackIcon from '$lib/components/StackIcon.svelte';
 	import PathBarItem from './PathBarItem.svelte';
 	import * as Tooltip from '$lib/components/ui/tooltip';
-	import * as Select from '$lib/components/ui/select';
 	import { Badge } from '$lib/components/ui/badge';
 	import { currentEnvironment, appendEnvParam } from '$lib/stores/environment';
+	import { persistStackIcon } from '$lib/utils/stack-icon';
 	import { appSettings } from '$lib/stores/settings';
 	import { page } from '$app/stores'; // BETA GATE: backups feature flag
 	import { focusFirstInput } from '$lib/utils';
@@ -52,6 +59,52 @@
 	// Local effective state - can transition from create → edit after failed deploy
 	let mode = $state(propMode);
 	let stackName = $state(propStackName);
+	let formIcon = $state<string | null>(null);
+	let showIconPicker = $state(false);
+	// Create mode has no stack to POST to yet - stash the pending upload data URL and
+	// send it once the stack is created (see persistPendingIcon after handleCreate).
+	let pendingUploadImage = $state<string | null>(null);
+
+	// The picker value is one of: '' (clear), 'upload:<dataUrl>' (custom upload), or a
+	// lucide name / 'selfhst:<ref>'. In edit mode it persists immediately via the /icon
+	// endpoint; in create mode it is held locally until the stack exists.
+	async function onIconSelect(value: string) {
+		if (mode !== 'edit' || !stackName) {
+			// Create mode: hold locally, persist after the stack is created.
+			if (!value) {
+				formIcon = null;
+				pendingUploadImage = null;
+			} else if (value.startsWith('upload:')) {
+				pendingUploadImage = value.slice('upload:'.length);
+				formIcon = 'custom:stack';
+			} else {
+				pendingUploadImage = null;
+				formIcon = value;
+			}
+			return;
+		}
+		const envId = $currentEnvironment?.id ?? null;
+		const target = appendEnvParam(`/api/stacks/${encodeURIComponent(stackName)}/icon`, envId);
+		try {
+			const next = await persistStackIcon(target, value);
+			if (next !== undefined) formIcon = next; // undefined = POST failed, keep current
+			onSuccess?.();
+		} catch (e) {
+			console.error('Failed to set stack icon:', e);
+		}
+	}
+
+	// After a stack is created, persist the icon picked in create mode to the new stack.
+	async function persistPendingIcon(name: string, envId: number | null) {
+		if (!formIcon) return;
+		const target = appendEnvParam(`/api/stacks/${encodeURIComponent(name)}/icon`, envId);
+		const body = pendingUploadImage ? { image: pendingUploadImage } : { icon: formIcon };
+		try {
+			await fetch(target, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+		} catch (e) {
+			console.error('Failed to set stack icon:', e);
+		}
+	}
 
 	// Form state
 	let newStackName = $state('');
@@ -70,11 +123,43 @@
 	// Ref to the embedded backup panel so close can check its inline form for unsaved edits.
 	let backupPanelRef = $state<BackupPanel | undefined>(undefined);
 
+	// Secret providers
+	type SecretProviderOption = { id: number; name: string; type: string };
+	let secretProviders = $state<SecretProviderOption[]>([]);
+	let formSecretProviderId = $state<number | null>(null);
+	// Provider-injected key NAMES from the last deploy (banner)
+	let injectedSecretKeys = $state<string[]>([]);
+	// Provider type/name for the injected-secrets banner in the env panel.
+	const selectedProviderType = $derived(
+		secretProviders.find((p) => p.id === formSecretProviderId)?.type ?? null
+	);
+	const selectedProviderName = $derived(
+		secretProviders.find((p) => p.id === formSecretProviderId)?.name ?? null
+	);
+	// Live probe of the bound provider: key NAMES currently present (bulk + resolved
+	// inline refs). Drives the editor's green IN VAULT marker. Empty when no provider
+	// is bound or the probe failed; probeError holds the reason on failure.
+	let providerKeySet = $state<Set<string>>(new Set());
+	let probeError = $state<string | null>(null);
+	let probeSeq = 0;
+
 	// Environment variables state
 	let envVars = $state<EnvVar[]>([]);
 	let rawEnvContent = $state(''); // Raw .env file content (comments preserved)
 	let envValidation = $state<ValidationResult | null>(null);
 	let validating = $state(false);
+
+	// SELECTOR_VARS (OP_ENVIRONMENT_ID / DOCKHAND_SECRET_SELECTOR) are consumed by the
+	// secret provider, not the compose file, so they only count as "used" when a
+	// provider is bound to the stack.
+	const effectiveValidation = $derived.by<ValidationResult | null>(() => {
+		if (!envValidation || formSecretProviderId === null) return envValidation;
+		if (!envValidation.unused.some((v) => SELECTOR_VARS.includes(v))) return envValidation;
+		return {
+			...envValidation,
+			unused: envValidation.unused.filter((v) => !SELECTOR_VARS.includes(v))
+		};
+	});
 	let existingSecretKeys = $state<Set<string>>(new Set());
 	let hadExistingDbVars = $state(false); // Track if DB had any vars on load (for proper cleanup)
 
@@ -111,6 +196,151 @@
 	let composePathCopied = $state<'ok' | 'error' | null>(null);
 	let envPathCopied = $state<'ok' | 'error' | null>(null);
 	let composeContentCopied = $state<'ok' | 'error' | null>(null);
+
+	// --- Compose Validate (side panel) ------------------------------------------
+	let validatePanelOpen = $state(false);
+	let validateLoading = $state(false);
+	let validateError = $state<string | null>(null);
+	let validateActiveLine = $state<number | null>(null);
+	let validateReport = $state<import('./ComposeValidatePanel.svelte').ValidateReport | null>(null);
+	// Monotonic token: only the newest validate response is allowed to write the report,
+	// so a slow silent re-validate can't overwrite a newer one (fix-spam race).
+	let validateSeq = 0;
+	// Findings mapped to editor lint markers (only those with a line).
+	const validateMarkers = $derived(
+		(validateReport?.findings ?? [])
+			.filter((f) => typeof f.line === 'number')
+			.map((f) => ({ line: f.line!, severity: f.severity, ruleId: f.ruleId, message: f.message }))
+	);
+
+	async function runComposeValidate(opts: { silent?: boolean } = {}) {
+		if (!composeContent.trim()) return;
+		// Silent re-validate (after a quick fix) keeps the current list visible so the
+		// panel doesn't collapse to a spinner and lose the scroll position.
+		if (!opts.silent) validateLoading = true;
+		validateError = null;
+		validatePanelOpen = true;
+		const seq = ++validateSeq;
+		try {
+			const envId = $currentEnvironment?.id ?? null;
+			const name = (mode === 'edit' ? stackName : newStackName) || 'stack';
+			// Send the editor's current env vars (incl. secrets) so `docker compose config`
+			// resolves ${VAR} the same way a deploy will, instead of flagging "VAR not set".
+			const validateEnvVars: Record<string, string> = {};
+			for (const v of envVars) {
+				const k = v.key.trim();
+				if (k) validateEnvVars[k] = v.value ?? '';
+			}
+			const res = await fetch(
+				appendEnvParam(`/api/stacks/${encodeURIComponent(name)}/validate`, envId),
+				{
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+							compose: composeContent,
+							envVars: validateEnvVars,
+							// Only an EDIT of an existing stack has "own" containers to exclude from
+							// collision checks. A NEW stack with a name that clashes with a running
+							// stack must still be flagged, so never self-exclude in create mode.
+							existing: mode === 'edit'
+						})
+				}
+			);
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({}));
+				throw new Error(body.error || `Validation failed (${res.status})`);
+			}
+			const fresh = await res.json();
+			// Stale response (a newer validate started meanwhile): drop it entirely.
+			if (seq !== validateSeq) return;
+			// On a silent re-validate, only swap the report if the finding set actually
+			// changed. When a fix succeeded the optimistic list already matches the fresh
+			// one, so keeping the same object avoids re-rendering (and the flash) of the
+			// surviving boxes.
+			if (opts.silent && validateReport && sameFindingSet(validateReport.findings, fresh.findings)) {
+				// no-op: current (optimistic) report is already correct
+			} else {
+				validateReport = fresh;
+			}
+		} catch (e) {
+			if (seq !== validateSeq) return; // superseded - don't clobber a newer report
+			validateError = e instanceof Error ? e.message : 'Validation failed';
+			validateReport = null;
+		} finally {
+			if (seq === validateSeq) validateLoading = false;
+		}
+	}
+
+	// Two finding lists are "the same" set (order-independent) by their stable keys.
+	function sameFindingSet(
+		a: { ruleId: string; line?: number; message: string }[],
+		b: { ruleId: string; line?: number; message: string }[]
+	): boolean {
+		if (a.length !== b.length) return false;
+		const bag = new Map<string, number>();
+		for (const f of a) bag.set(findingKey(f), (bag.get(findingKey(f)) ?? 0) + 1);
+		for (const f of b) {
+			const k = findingKey(f);
+			const n = bag.get(k);
+			if (!n) return false;
+			bag.set(k, n - 1);
+		}
+		return true;
+	}
+
+	// Remove a finding from the current report immediately (optimistic), so its box
+	// animates out without waiting for the round-trip.
+	function dropFinding(target: { ruleId: string; line?: number; message: string }) {
+		if (!validateReport) return;
+		const targetKey = findingKey(target);
+		const remaining = validateReport.findings.filter((f) => findingKey(f) !== targetKey);
+		const counts = { error: 0, warn: 0, info: 0 };
+		for (const f of remaining) counts[f.severity]++;
+		validateReport = { findings: remaining, counts };
+	}
+
+	// Closing the panel clears the findings so the editor markers disappear too
+	// (validateMarkers is derived from validateReport).
+	function closeValidatePanel() {
+		validatePanelOpen = false;
+		validateReport = null;
+		validateError = null;
+		validateActiveLine = null;
+	}
+
+	// Clicking a gutter marker opens the panel, highlights that line's finding, and
+	// scrolls the panel to it (the editor->panel direction).
+	function openValidateAtLine(line: number) {
+		if (validateReport) validatePanelOpen = true;
+		validateActiveLine = line;
+		validatePanelRef?.scrollToFinding?.(line);
+	}
+
+	// Clicking a finding in the panel jumps the editor to its line (panel stays open).
+	function jumpToComposeLine(line: number) {
+		codeEditorRef?.scrollToLine?.(line);
+		validateActiveLine = line;
+	}
+
+	// Apply a quick fix from the panel: rewrite the compose in place, drop the fixed
+	// finding's box immediately (it animates out), then re-validate silently so the list
+	// stays put - no spinner, no scroll reset.
+	function applyValidateFix(finding: {
+		ruleId: string;
+		line?: number;
+		message: string;
+		fix?: import('$lib/utils/compose-quick-fix').QuickFix;
+	}) {
+		if (!finding.fix) return;
+		const next = applyQuickFix(composeContent, finding.fix);
+		if (next === composeContent) return; // stale fix (text moved) - re-validate re-anchors
+		composeContent = next;
+		// The reactive editor sync suppresses onchange, so mark dirty ourselves.
+		isDirty = true;
+		validateActiveLine = null;
+		dropFinding(finding); // optimistic: the box animates out now
+		runComposeValidate({ silent: true }); // reconcile against the daemon without a flash
+	}
 	let needsFileLocation = $state(false);
 
 	// Container info for untracked stacks
@@ -563,6 +793,7 @@
 
 	// CodeEditor reference for explicit marker updates
 	let codeEditorRef: CodeEditor | null = $state(null);
+	let validatePanelRef: ComposeValidatePanel | null = $state(null);
 
 	// ComposeGraphViewer reference for resize on panel toggle
 	let graphViewerRef: ComposeGraphViewer | null = $state(null);
@@ -600,12 +831,14 @@
 
 		const markers: VariableMarker[] = [];
 
-		// Add missing required variables
+		// Add missing required variables - but a var the bound provider currently has
+		// (live probe) is 'invault' (green), not 'missing' (red). A failed probe forces
+		// MISSING so we never show a false green.
 		for (const name of envValidation.missing) {
 			const env = envVarMap.get(name);
 			markers.push({
 				name,
-				type: 'missing',
+				type: classifyMarker(name, true, providerKeySet, probeError !== null),
 				value: env?.value,
 				isSecret: env?.isSecret
 			});
@@ -645,12 +878,78 @@
 		debouncedValidate();
 	}
 
-	// Debounced validation to avoid too many API calls while typing
+	// Debounced validation to avoid too many API calls while typing. The live
+	// provider probe rides the same cadence so it doesn't hammer the provider.
 	function debouncedValidate() {
 		if (validateTimer) clearTimeout(validateTimer);
 		validateTimer = setTimeout(() => {
 			validateEnvVars();
+			runProbe();
 		}, 1000);
+	}
+
+	// op://... inline references in the current env vars, mapped var -> ref, so a
+	// resolved ref (the provider returns ref STRINGS) maps back to its var name.
+	function inlineRefPairs(): { varName: string; ref: string }[] {
+		const pairs: { varName: string; ref: string }[] = [];
+		for (const v of envVars) {
+			const key = v.key.trim();
+			const val = (v.value ?? '').trim();
+			if (key && val.startsWith('op://')) pairs.push({ varName: key, ref: val });
+		}
+		return pairs;
+	}
+
+	// Live-probe the bound provider for which required keys exist RIGHT NOW. Only
+	// key NAMES cross the wire. Guardrails: a provider must be selected; on any
+	// failure the key set is emptied and probeError is set (-> everything MISSING,
+	// never a false green). Guarded by probeSeq to drop stale responses.
+	async function runProbe() {
+		if (formSecretProviderId === null) {
+			providerKeySet = new Set();
+			probeError = null;
+			return;
+		}
+		const selector = (() => {
+			for (const name of SELECTOR_VARS) {
+				const hit = envVars.find((v) => v.key.trim() === name);
+				if (hit && hit.value.trim()) return hit.value.trim();
+			}
+			return undefined;
+		})();
+		const refPairs = inlineRefPairs();
+		if (!selector && refPairs.length === 0) {
+			providerKeySet = new Set();
+			probeError = null;
+			updateEditorMarkers();
+			return;
+		}
+		const seq = ++probeSeq;
+		try {
+			const response = await fetch(`/api/secret-providers/${formSecretProviderId}/probe`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ selector, refs: refPairs.map((p) => p.ref) })
+			});
+			if (seq !== probeSeq) return; // a newer probe superseded this one
+			const data = await response.json();
+			if (!response.ok || !data.ok) {
+				providerKeySet = new Set();
+				probeError = data.error || `Provider check failed (${response.status})`;
+			} else {
+				const names = [
+					...(data.bulkKeys ?? []),
+					...resolvedRefVarNames(refPairs, data.resolvedRefs ?? [])
+				];
+				providerKeySet = new Set(names);
+				probeError = null;
+			}
+		} catch (e) {
+			if (seq !== probeSeq) return;
+			providerKeySet = new Set();
+			probeError = e instanceof Error ? e.message : 'Provider check failed';
+		}
+		updateEditorMarkers();
 	}
 
 	// Explicitly push markers to the editor (immediate=true since this is called after validation)
@@ -694,7 +993,20 @@
 		// Add global mouse event listeners for split dragging
 		window.addEventListener('mousemove', handleMouseMove);
 		window.addEventListener('mouseup', handleMouseUp);
+
+		fetchSecretProviders();
 	});
+
+	async function fetchSecretProviders() {
+		try {
+			const response = await fetch('/api/secret-providers');
+			if (!response.ok) return;
+			const data = await response.json();
+			secretProviders = (data ?? []).map((p: any) => ({ id: p.id, name: p.name, type: p.type }));
+		} catch (e) {
+			console.warn('Failed to load secret providers:', e);
+		}
+	}
 
 	onDestroy(() => {
 		window.removeEventListener('mousemove', handleMouseMove);
@@ -707,11 +1019,33 @@
 		isDraggingSplit = true;
 	}
 
+	// Validate side-panel width (px), drag-resizable, persisted.
+	const STORAGE_KEY_VALIDATE_W = 'dockhand-validate-panel-width';
+	let validatePanelWidth = $state(
+		typeof localStorage !== 'undefined'
+			? Math.max(320, Number(localStorage.getItem(STORAGE_KEY_VALIDATE_W)) || 320)
+			: 320
+	);
+	let isDraggingValidate = $state(false);
+	let editorRowRef = $state<HTMLDivElement | null>(null);
+	function startValidateDrag(e: MouseEvent) {
+		e.preventDefault();
+		isDraggingValidate = true;
+	}
+
 	function handleMouseMove(e: MouseEvent) {
 		if (isDraggingSplit && containerRef) {
 			const rect = containerRef.getBoundingClientRect();
 			const newRatio = ((e.clientX - rect.left) / rect.width) * 100;
 			splitRatio = Math.max(30, Math.min(80, newRatio));
+		}
+		if (isDraggingValidate && editorRowRef) {
+			const rect = editorRowRef.getBoundingClientRect();
+			// panel is on the right: width = distance from cursor to the row's right edge.
+			const w = rect.right - e.clientX;
+			// Floor at 320px: below that the header's title + count chips + re-check button
+			// no longer fit on one line and start clipping.
+			validatePanelWidth = Math.max(320, Math.min(560, w));
 		}
 	}
 
@@ -720,6 +1054,10 @@
 			isDraggingSplit = false;
 			// Save split ratio
 			localStorage.setItem(STORAGE_KEY_SPLIT, splitRatio.toString());
+		}
+		if (isDraggingValidate) {
+			isDraggingValidate = false;
+			localStorage.setItem(STORAGE_KEY_VALIDATE_W, String(validatePanelWidth));
 		}
 	}
 
@@ -811,6 +1149,19 @@
 			originalComposePath = data.composePath || null;
 			originalEnvPath = data.envPath || null;
 
+			// Load secret provider binding
+			try {
+				const sourcesRes = await fetch(appendEnvParam('/api/stacks/sources', envId));
+				if (sourcesRes.ok) {
+					const sourceMap = await sourcesRes.json();
+					const source = sourceMap?.[stackName];
+					formSecretProviderId = source?.secretProviderId ?? null;
+					formIcon = source?.icon ?? null;
+				}
+			} catch (e) {
+				console.warn('Failed to load stack source for secret provider binding:', e);
+			}
+
 			// Volumes/binds for the backup picker (managed/internal stack path).
 			try {
 				await loadStackVolumes(envId);
@@ -833,6 +1184,8 @@
 				existingSecretKeys = new Set(
 					loadedVars.filter(v => v.isSecret && v.key.trim()).map(v => v.key.trim())
 				);
+				// Provider-injected key names from the last deploy (banner)
+				injectedSecretKeys = envData.injectedSecretKeys ?? [];
 			}
 
 			// Process raw .env file content
@@ -968,6 +1321,8 @@
 				requestBody.envPath = envPathToSave;
 			}
 
+			requestBody.secretProviderId = formSecretProviderId;
+
 			// Create the stack
 			response = await fetch(appendEnvParam('/api/stacks', envId), {
 				method: 'POST',
@@ -984,6 +1339,8 @@
 			if (data.success === false) {
 				throw new Error(data.error || 'Failed to create stack');
 			}
+
+			await persistPendingIcon(newStackName.trim(), envId);
 
 			toast.success(`Created stack "${newStackName.trim()}"`);
 			onSuccess();
@@ -1098,6 +1455,8 @@
 			if (moveFromDir) {
 				requestBody.moveFromDir = moveFromDir;
 			}
+
+			requestBody.secretProviderId = formSecretProviderId;
 
 			// Save env files BEFORE compose to ensure deploy reads fresh values
 			// Save raw content to .env file (non-secrets only, comments preserved)
@@ -1221,6 +1580,8 @@
 		loadError = null;
 		rawEnvContent = '';
 		errors = {};
+		formIcon = null;
+		pendingUploadImage = null;
 		composeContent = '';
 		envVars = [];
 		envValidation = null;
@@ -1267,10 +1628,19 @@
 			// Reset mode to prop values on each open
 			mode = propMode;
 			stackName = propStackName;
+			// Clear any compose-validate panel state from a previous open (the modal is
+			// persistently mounted, so $state survives close/reopen - even across envs).
+			validatePanelOpen = false;
+			validateReport = null;
+			validateError = null;
+			validateLoading = false;
+			validateActiveLine = null;
+			validateSeq++;
 			if (mode === 'edit' && stackName) {
 				loadComposeFile().then(() => {
 					// Auto-validate after loading
 					validateEnvVars();
+					runProbe();
 				});
 			} else if (mode === 'create') {
 				// Set default compose content for create mode (library templates override default)
@@ -1282,6 +1652,7 @@
 				loading = false;
 				// Auto-validate default compose
 				validateEnvVars();
+				runProbe();
 			}
 		} else if (!open) {
 			hasInitialized = false; // Reset when modal closes
@@ -1297,6 +1668,7 @@
 		// Debounce to avoid too many API calls while typing
 		const timeout = setTimeout(() => {
 			validateEnvVars();
+			runProbe();
 		}, 800);
 
 		return () => clearTimeout(timeout);
@@ -1396,9 +1768,26 @@
 			<div class="flex items-center justify-between">
 				<div class="flex items-center gap-3">
 					<div class="flex items-center gap-2">
-						<div class="p-1.5 rounded-md bg-zinc-200 dark:bg-zinc-700">
-							<Layers class="w-4 h-4 text-zinc-600 dark:text-zinc-300" />
-						</div>
+						{#if !readonly}
+							<button
+								type="button"
+								title="Change stack icon"
+								onclick={() => (showIconPicker = true)}
+								class="p-1.5 rounded-md bg-zinc-200 dark:bg-zinc-700 hover:ring-2 hover:ring-primary transition-shadow"
+							>
+								{#if pendingUploadImage}
+									<img src={pendingUploadImage} alt="" class="w-4 h-4 rounded object-cover" />
+								{:else if formIcon}
+									<StackIcon icon={formIcon} {stackName} envId={$currentEnvironment?.id ?? null} class="w-4 h-4 text-zinc-600 dark:text-zinc-300" />
+								{:else}
+									<Layers class="w-4 h-4 text-zinc-600 dark:text-zinc-300" />
+								{/if}
+							</button>
+						{:else}
+							<div class="p-1.5 rounded-md bg-zinc-200 dark:bg-zinc-700">
+								<Layers class="w-4 h-4 text-zinc-600 dark:text-zinc-300" />
+							</div>
+						{/if}
 						<div>
 							<Dialog.Title class="text-sm font-semibold text-zinc-800 dark:text-zinc-100">
 								{#if mode === 'create'}
@@ -1655,8 +2044,23 @@
 											</div>
 										{:else}
 											<div class="h-full flex flex-col">
-												<!-- Copy button row -->
-												<div class="flex justify-end mb-1">
+												<!-- Copy + Validate button row -->
+												<div class="flex justify-end items-center gap-1 mb-1">
+													<Button
+														variant="ghost"
+														size="sm"
+														class="h-6 px-2 text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+														onclick={runComposeValidate}
+														disabled={!composeContent}
+														title="Check this compose for problems before deploy"
+													>
+														{#if validateLoading}
+															<Loader2 class="w-3 h-3 animate-spin" />
+														{:else}
+															<ListChecks class="w-3 h-3" />
+														{/if}
+														Validate
+													</Button>
 													<Button
 														variant="ghost"
 														size="sm"
@@ -1681,16 +2085,47 @@
 														{/if}
 													</Button>
 												</div>
-												<CodeEditor
-													bind:this={codeEditorRef}
-													value={composeContent}
-													language="yaml"
-													{readonly}
-													theme={editorTheme}
-													onchange={readonly ? undefined : handleComposeChange}
-													variableMarkers={variableMarkers}
-													class="flex-1 rounded-md overflow-hidden border border-zinc-200 dark:border-zinc-700"
-												/>
+												<div bind:this={editorRowRef} class="flex-1 min-h-0 flex">
+													<CodeEditor
+														bind:this={codeEditorRef}
+														value={composeContent}
+														language="yaml"
+														{readonly}
+														theme={editorTheme}
+														onchange={readonly ? undefined : handleComposeChange}
+														variableMarkers={variableMarkers}
+														lintMarkers={validateMarkers}
+														onLintClick={openValidateAtLine}
+														class="flex-1 min-w-0 rounded-md overflow-hidden border border-zinc-200 dark:border-zinc-700"
+													/>
+													{#if validatePanelOpen}
+														<!-- Resize handle -->
+														<div
+															class="w-1 mx-1 flex-shrink-0 rounded bg-zinc-200 dark:bg-zinc-700 hover:bg-blue-400 dark:hover:bg-blue-500 cursor-col-resize transition-colors flex items-center justify-center group {isDraggingValidate ? 'bg-blue-500 dark:bg-blue-400' : ''}"
+															onmousedown={startValidateDrag}
+															role="separator"
+															aria-orientation="vertical"
+															tabindex="0"
+														>
+															<div class="w-4 h-8 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity {isDraggingValidate ? 'opacity-100' : ''}">
+																<GripVertical class="w-3 h-3 text-white" />
+															</div>
+														</div>
+														<div class="shrink-0 min-h-0" style="width: {validatePanelWidth}px">
+															<ComposeValidatePanel
+																bind:this={validatePanelRef}
+																report={validateReport}
+																loading={validateLoading}
+																error={validateError}
+																activeLine={validateActiveLine}
+																onClose={closeValidatePanel}
+																onJumpToLine={jumpToComposeLine}
+																onRevalidate={runComposeValidate}
+																onApplyFix={applyValidateFix}
+															/>
+														</div>
+													{/if}
+												</div>
 											</div>
 										{/if}
 									</div>
@@ -1710,12 +2145,23 @@
 							</div>
 							<!-- Environment variables panel -->
 							<div class="flex-1 min-w-0 flex flex-col overflow-hidden bg-zinc-50 dark:bg-zinc-800/50">
+								<SecretProviderPicker
+									bind:secretProviderId={formSecretProviderId}
+									bind:envVars
+									providers={secretProviders}
+									onchange={() => { markDirty(); debouncedValidate(); }}
+								/>
 								<StackEnvVarsPanel
 									bind:this={envVarsPanelRef}
 									bind:variables={envVars}
 									bind:rawContent={rawEnvContent}
-									validation={envValidation}
+									validation={effectiveValidation}
 									existingSecretKeys={mode === 'edit' ? existingSecretKeys : new Set()}
+									injectedSecretKeys={mode === 'edit' ? injectedSecretKeys : []}
+									providerType={selectedProviderType}
+									providerName={selectedProviderName}
+									{probeError}
+									{providerKeySet}
 									{readonly}
 									onchange={() => { markDirty(); debouncedValidate(); }}
 									theme={editorTheme}
@@ -1814,6 +2260,8 @@
 		</div>
 	</Dialog.Content>
 </Dialog.Root>
+
+<IconPickerModal bind:open={showIconPicker} value={formIcon} onselect={onIconSelect} title="Choose a stack icon" />
 
 <!-- Unsaved changes confirmation dialog -->
 <Dialog.Root bind:open={showConfirmClose}>

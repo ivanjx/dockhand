@@ -72,6 +72,43 @@ Key files:
 - `src/routes/containers/EditContainerModal.svelte`
 - `src/routes/schedules/+page.svelte`
 
+## Shell Attach Terminal
+
+The fork adds a shell-terminal attach mode alongside the existing shell
+(`exec`) mode. Attach connects to the running container's main process instead
+of creating a new Docker exec session.
+
+Behavior to preserve:
+
+- Terminal mode selection supports `exec` (launch a detected shell) and
+  `attach` (connect to the container's main process).
+- Attach uses Docker's `/containers/<id>/attach` stream with stdin, stdout, and
+  stderr enabled. It does not launch a shell and does not require shell or user
+  selection.
+- Attach is available from the full terminal page and the per-container
+  terminal action. The terminal page lists running containers only.
+- The terminal WebSocket keeps authentication and environment access checks for
+  attach sessions.
+- The `containers:exec` permission is required for terminal WebSocket sessions,
+  including attach mode.
+- Container TTY settings determine whether Docker's multiplexed output frames
+  must be decoded. Terminal resize requests use the container resize endpoint.
+- Attach works through local sockets, direct TCP/TLS, and Hawser standard
+  connections. Hawser Edge remains exec-only and rejects attach sessions.
+- Production and Vite development WebSocket handlers implement the same attach
+  stream, resize, cleanup, and output behavior.
+
+Key files:
+
+- `server.js`
+- `vite.config.ts`
+- `src/lib/server/docker.ts`
+- `src/lib/types.ts`
+- `src/routes/containers/+page.svelte`
+- `src/routes/terminal/+page.svelte`
+- `src/routes/terminal/Terminal.svelte`
+- `src/routes/terminal/TerminalPanel.svelte`
+
 ## Container Update Behavior
 
 The fork changes update handling in ways that should survive upstream conflict

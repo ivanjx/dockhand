@@ -7,6 +7,13 @@ import { auditStack } from '$lib/server/audit';
 import { createJobResponse } from '$lib/server/sse';
 import type { RequestHandler } from './$types';
 
+/**
+ * @openapi
+ * summary: List compose stacks for one environment (internal, external, and git)
+ * query: env:integer Environment id
+ * resp-403: Permission denied (needs stacks:view)
+ * resp-404: Environment not found
+ */
 export const GET: RequestHandler = async ({ url, cookies }) => {
 	const auth = await authorize(cookies);
 
@@ -36,11 +43,12 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
 		const stackSources = await getStackSources(envIdNum);
 		const existingNames = new Set(stacks.map((s) => s.name));
 
-		// Enrich Docker-discovered stacks with source type from DB
+		// Enrich Docker-discovered stacks with source type + icon from DB
 		for (const stack of stacks) {
 			const source = stackSources.find(s => s.stackName === stack.name);
 			if (source) {
 				(stack as any).sourceType = source.sourceType;
+				(stack as any).icon = source.icon;
 			}
 		}
 
@@ -53,7 +61,8 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
 					containers: [],
 					containerDetails: [],
 					status: 'created' as any,
-					sourceType: source.sourceType
+					sourceType: source.sourceType,
+					icon: source.icon
 				} as any);
 			}
 		}
@@ -72,6 +81,16 @@ export const GET: RequestHandler = async ({ url, cookies }) => {
 	}
 };
 
+/**
+ * @openapi
+ * summary: Create and (optionally) deploy a compose stack
+ * description: Writes the compose + .env to the stack dir, stores secrets in the DB, and with start deploys it. Can bind a secret provider.
+ * query: env:integer Target environment id
+ * body: {name:string!, compose:string!, composePath:string, envPath:string, envVars:array<object>, rawEnvContent:string, secretProviderId:integer, start:boolean}
+ * resp-400: Invalid request (e.g. missing name/compose, or secretProviderId wrong type)
+ * resp-403: Permission denied (needs stacks:create; binding a secret provider also needs secrets:view)
+ * resp-500: Failed to create or deploy the stack
+ */
 export const POST: RequestHandler = async (event) => {
 	const { request, url, cookies } = event;
 	const auth = await authorize(cookies);
@@ -91,7 +110,7 @@ export const POST: RequestHandler = async (event) => {
 
 	try {
 		const body = await request.json();
-		const { name, compose, start, envVars, rawEnvContent, composePath, envPath } = body;
+		const { name, compose, start, envVars, rawEnvContent, composePath, envPath, secretProviderId } = body;
 
 		if (!name || typeof name !== 'string') {
 			return json({ error: 'Stack name is required' }, { status: 400 });
@@ -99,6 +118,25 @@ export const POST: RequestHandler = async (event) => {
 
 		if (!compose || typeof compose !== 'string') {
 			return json({ error: 'Compose file content is required' }, { status: 400 });
+		}
+
+		if (
+			'secretProviderId' in body &&
+			secretProviderId !== null &&
+			typeof secretProviderId !== 'number'
+		) {
+			return json({ error: 'secretProviderId must be a number or null' }, { status: 400 });
+		}
+
+		// Binding a secret provider resolves its secrets into the container at deploy;
+		// require the secrets permission so a stacks-only user can't exfiltrate a
+		// provider's secrets by binding it and reading the container env.
+		if (
+			typeof secretProviderId === 'number' &&
+			auth.authEnabled &&
+			!(await auth.can('secrets', 'view', envIdNum))
+		) {
+			return json({ error: 'Permission denied: binding a secret provider requires the secrets permission' }, { status: 403 });
 		}
 
 		// If start is false, only create the compose file without deploying
@@ -134,7 +172,8 @@ export const POST: RequestHandler = async (event) => {
 				environmentId: envIdNum,
 				sourceType: 'internal',
 				composePath: composePath || undefined,
-				envPath: envPath || undefined
+				envPath: envPath || undefined,
+				secretProviderId,
 			});
 
 			// Audit log
@@ -175,7 +214,8 @@ export const POST: RequestHandler = async (event) => {
 			environmentId: envIdNum,
 			sourceType: 'internal',
 			composePath: composePath || undefined,
-			envPath: envPath || undefined
+			envPath: envPath || undefined,
+			secretProviderId
 		});
 
 		// Deploy via SSE to keep connection alive during long operations

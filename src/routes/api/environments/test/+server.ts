@@ -1,6 +1,7 @@
 import { json } from '@sveltejs/kit';
 import { unixSocketRequest, httpsAgentRequest } from '$lib/server/docker';
 import type { DockerClientConfig } from '$lib/server/docker';
+import { isSafeNotificationUrl } from '$lib/server/url-safety';
 import type { RequestHandler } from './$types';
 
 interface TestConnectionRequest {
@@ -41,6 +42,14 @@ function buildDockerClientConfig(config: TestConnectionRequest): DockerClientCon
 
 /**
  * Test Docker connection with provided configuration (without saving to database)
+ *
+ * @openapi
+ * summary: Test a Docker/Hawser connection configuration WITHOUT saving it as an environment
+ * body: {connectionType:string!, socketPath:string, host:string, port:integer, protocol:string, tlsCa:string, tlsCert:string, tlsKey:string, tlsSkipVerify:boolean, hawserToken:string}
+ * body-example: {"connectionType":"socket","socketPath":"/var/run/docker.sock"}
+ * resp-200: {success:boolean!, info:{serverVersion:string, containers:integer, images:integer, name:string}, hawser:{}}
+ * resp-200-desc: success:false with a human-readable error message is also returned as HTTP 200 (connection failures are not transport errors)
+ * resp-400: Host is required for direct/hawser-standard connection types
  */
 export const POST: RequestHandler = async ({ request }) => {
 	try {
@@ -69,6 +78,15 @@ export const POST: RequestHandler = async ({ request }) => {
 
 			if (!host) {
 				return json({ success: false, error: 'Host is required' }, { status: 400 });
+			}
+
+			// SSRF guard: host/port come straight from the request body. A remote
+			// Docker/Hawser daemon legitimately lives on a LAN, so allow private
+			// ranges but block loopback + cloud metadata (169.254.169.254) + reserved
+			// so this tester can't be used to probe the control plane or metadata IMDS.
+			const hostSafety = isSafeNotificationUrl(`${protocol}://${host}:${port}`);
+			if (!hostSafety.ok) {
+				return json({ success: false, error: `Host not allowed: ${hostSafety.reason}` }, { status: 200 });
 			}
 
 			const headers: Record<string, string> = {
