@@ -190,8 +190,8 @@ The fork carries local deployment/build changes.
 
 Behavior to preserve:
 
-- GitHub Actions workflow builds and pushes fork images to GHCR for amd64 and
-  arm64.
+- GitHub Actions workflow builds and pushes fork images to GHCR natively:
+  amd64 on `ubuntu-latest`, arm64 on `ubuntu-24.04-arm`, without QEMU.
 - Docker build uses a larger Node heap for `npm run build`.
 - Docker Compose examples mount the host Docker Compose CLI plugin into the app
   container.
