@@ -1523,9 +1523,7 @@ async function executeLocalCompose(
 		args.push('--profile', '*', 'create');
 		if (serviceName) args.push(serviceName);
 	} else {
-		// The fork suppresses force recreation on local/direct Compose, even when requested.
-		// Hawser still receives the caller's forceRecreate option.
-		args.push(...buildComposeOperationArgs(operation, { removeVolumes, build, noBuildCache, pullPolicy, serviceName }));
+		args.push(...buildComposeOperationArgs(operation, { forceRecreate, removeVolumes, build, noBuildCache, pullPolicy, serviceName }));
 		if (operation === 'up' && serviceName) args.push('--no-deps');
 	}
 

@@ -154,8 +154,9 @@ The fork adjusts stack operations to better support Compose workflows.
 Behavior to preserve:
 
 - `executeComposeCommand('up', ...)` runs a `create` step first.
-- Local and direct Compose `up` never pass `--force-recreate`, including explicit
-  recreate requests and restore redeploys. This fork policy overrides upstream.
+- Compose `up` passes `--force-recreate` only when explicitly requested. Honor the
+  upstream Force recreate checkbox, recreate actions, and restore redeploys on
+  local/direct environments as well as Hawser.
 - `updateStackService` accepts a no-start mode and uses Compose `create` for
   stopped services.
 - Hawser treats Compose `create` as a no-op until remote support exists.
