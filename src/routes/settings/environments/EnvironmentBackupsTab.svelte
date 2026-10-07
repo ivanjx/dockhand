@@ -4,9 +4,11 @@
 	import { Button } from '$lib/components/ui/button';
 	import * as Select from '$lib/components/ui/select';
 	import CronEditor from '$lib/components/cron-editor.svelte';
-	import { Box, Layers, Loader2, Plus, ChevronDown, ChevronRight, ArrowRight, Zap, GitBranch } from 'lucide-svelte';
+	import { Box, Layers, Loader2, Plus, ChevronDown, ChevronRight, ArrowRight, Zap, GitBranch, HelpCircle } from 'lucide-svelte';
+	import * as Tooltip from '$lib/components/ui/tooltip';
 	import { formatCron, getRepoTypeIcon } from '$lib/utils/backup';
-	import { standaloneContainers, volumesForStack, type BackupItem } from '$lib/utils/mounts';
+	import { standaloneContainers, volumesForStack, batchSkipDecision, type BackupItem } from '$lib/utils/mounts';
+	import { TogglePill } from '$lib/components/ui/toggle-pill';
 	import BackupPanel from '../../containers/BackupPanel.svelte';
 
 	interface Props {
@@ -36,6 +38,10 @@
 	let batchDestId = $state<number>(0);
 	let batchSchedule = $state('0 2 * * *');
 	let batchSaving = $state(false);
+	// One-time: created schedules prefer named volumes and skip host bind mounts.
+	// batchSkipDecision decides per item - a down stack (volumes unknown) keeps all, a
+	// bind-only container is skipped. A snapshot of the current mounts; edit later to change.
+	let batchSkipBinds = $state(false);
 	// All destinations are selectable; a local repo on a non-co-located env fails
 	// loud at run time (helper localRepoGuard), not hidden here.
 	const usableDestinations = $derived(destList);
@@ -118,26 +124,45 @@
 		if (!batchDestId) { toast.error('Select a repository'); return; }
 		batchSaving = true;
 		let created = 0;
+		let skippedBindOnly = 0;
 		for (const item of items) {
 			if (item.external) continue; // external stacks aren't backup-able
 			if (configs.some(c => c.targetName === item.name)) continue; // skip already configured
+
+			// Base body: back up all volumes (current behaviour). With "skip bind mounts"
+			// on, narrow the selection to this item's named volumes as it stands now.
+			const body: Record<string, unknown> = {
+				targetName: item.name,
+				type: item.type,
+				destinationId: batchDestId,
+				environmentId,
+				schedule: batchSchedule || null,
+				retention: { keepLast: 7, keepDaily: 7 }
+			};
+			if (batchSkipBinds) {
+				const decision = batchSkipDecision(item);
+				if (decision.action === 'skip') { skippedBindOnly++; continue; }
+				// 'all' leaves allVolumes at its default true (a down stack whose volumes we
+				// can't yet see - capture everything once it comes up rather than freezing an
+				// empty selection). 'named' narrows to the item's named volumes.
+				if (decision.action === 'named') {
+					body.allVolumes = false;
+					body.selectedVolumes = decision.selectedVolumes;
+				}
+			}
+
 			try {
 				const res = await fetch('/api/backup/configs', {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({
-						targetName: item.name,
-						type: item.type,
-						destinationId: batchDestId,
-						environmentId,
-						schedule: batchSchedule || null,
-						retention: { keepLast: 7, keepDaily: 7 }
-					})
+					body: JSON.stringify(body)
 				});
 				if (res.ok) created++;
 			} catch {}
 		}
-		toast.success(`Created ${created} backup schedule${created > 1 ? 's' : ''}`);
+		const parts = [`Created ${created} backup schedule${created === 1 ? '' : 's'}`];
+		if (skippedBindOnly > 0) parts.push(`skipped ${skippedBindOnly} with only bind mounts`);
+		toast.success(parts.join(', '));
 		showBatch = false;
 		batchSaving = false;
 		await fetchAll();
@@ -184,6 +209,20 @@
 						</Select.Content>
 					</Select.Root>
 					<CronEditor value={batchSchedule} onchange={(v) => batchSchedule = v} />
+				</div>
+				<div class="flex items-center gap-2 text-xs">
+					<TogglePill bind:checked={batchSkipBinds} onLabel="Yes" offLabel="No" />
+					<span class="whitespace-nowrap">Skip bind mounts</span>
+					<Tooltip.Root>
+						<Tooltip.Trigger>
+							<HelpCircle class="w-3.5 h-3.5 text-muted-foreground cursor-help" />
+						</Tooltip.Trigger>
+						<Tooltip.Content>
+							<div class="w-64">
+								<p class="text-xs">Prefer named volumes and skip host bind mounts (e.g. media libraries or ISOs). A stack that isn't running yet keeps all volumes until it comes up. Applied to each schedule as it's created - edit a schedule later to change it.</p>
+							</div>
+						</Tooltip.Content>
+					</Tooltip.Root>
 				</div>
 				<div class="flex items-center justify-end gap-2">
 					<Button variant="ghost" size="sm" class="text-xs" onclick={() => showBatch = false}>Cancel</Button>

@@ -6,6 +6,7 @@
 	import { goto } from '$app/navigation';
 	import { canAccess } from '$lib/stores/auth';
 	import type { EnvironmentStats } from '../api/dashboard/stats/+server';
+	import type { DiskSegmentKey } from '$lib/utils/disk-segment-path';
 	import {
 		DashboardHeader,
 		DashboardLabels,
@@ -26,10 +27,11 @@
 		width?: number;
 		height?: number;
 		oneventsclick?: () => void;
+		ondiskclick?: (key: DiskSegmentKey) => void;
 		showStacksBreakdown?: boolean;
 	}
 
-	let { stats, width = 1, height = 1, oneventsclick, showStacksBreakdown = true }: Props = $props();
+	let { stats, width = 1, height = 1, oneventsclick, ondiskclick, showStacksBreakdown = true }: Props = $props();
 
 	// Specific tile size conditionals for easy customization
 	const is1x1 = $derived(width === 1 && height === 1);
@@ -708,7 +710,7 @@
 						{#if stats.collectMetrics && stats.metrics && stats.metricsHistory}
 							<DashboardCpuMemoryCharts metricsHistory={stats.metricsHistory} metrics={stats.metrics} />
 						{/if}
-						<DashboardDiskUsage imagesSize={stats.images.totalSize} volumesSize={stats.volumes.totalSize} containersSize={stats.containersSize} buildCacheSize={stats.buildCacheSize} showPieChart={true} loading={stats.loading?.diskUsage || showConnecting} />
+						<DashboardDiskUsage imagesSize={stats.images.totalSize} volumesSize={stats.volumes.totalSize} containersSize={stats.containersSize} buildCacheSize={stats.buildCacheSize} showPieChart={true} loading={stats.loading?.diskUsage || showConnecting} onsegmentclick={ondiskclick} />
 					</div>
 				</div>
 			{/if}

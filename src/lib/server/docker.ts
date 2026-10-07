@@ -16,19 +16,39 @@ import { createHash } from 'node:crypto';
 import { pumpWebStreamToWritable } from './stream-pump';
 import { toWebReadableStream } from './node-readable-stream';
 import { buildImagePruneFilters } from './image-prune-core';
-import { computeRequestTimeoutMs } from './backups/request-timeout';
-import { helperWaitDeadline } from './helper-wait-core';
+import { demuxDockerStream } from './docker-demux-core';
+import { computeRequestTimeoutMs, isPrunePath } from './backups/request-timeout';
+import { helperWaitDeadline, helperExitFromState } from './helper-wait-core';
+import { cancelReaderOnAbort } from './reader-abort-core';
+import { configuredMacAddress, endpointWithoutGeneratedMac } from './endpoint-mac-core';
+import { rescopeForPrimarySwitch } from './primary-network-switch-core';
+import { mapContainerNetworks } from '$lib/utils/network-identity';
 import type { Environment } from './db';
 import { getSetting } from './db';
+import { releaseAgeAdvisory } from './release-age-advisory';
+import { portableImageReference, trackedImageLabels, trackedImageReference } from '../utils/tracked-image';
+import { getMinimumReleaseAgeConfig, imageReleaseAgeRemainingMs, imageReleaseAgeStatus, type ImageCreationMetadata } from './minimum-release-age';
+import { manualPullAgeWarning, verifiedImagePullPlan } from './minimum-release-age-core';
 import { getAdditionalVolumeBinds, dedupeVolumesForRecreate } from './mount-dedupe';
 import { resolveNanoCpusConflict, resolvePodmanUsernsMode } from './hostconfig-recreate';
+import { isUnknownNetworkKeyError, retryEndpointKey } from './podman-network-key';
+import { expectedEvents, EXPECTED_EVENT_TTL_MS } from './expected-events-core';
+import { decideRespawnOutcome, isExactNameMatch } from './systemd-recreate-core';
 // Import-light image parsing shared with the semver layer; re-exported below for callers.
 import { parseImageReference } from './registry/image-ref';
+import { fetchImageCreatedAt, imagePlatform } from './registry/image-age';
 export { parseImageReference } from './registry/image-ref';
 import { rebaseEnvOntoImage, rebaseLabelsOntoImage, rebaseCommand, describeEnvRebase, describeLabelRebase, type ImageEnvLabels } from './container-env-merge';
 import { encodeRegistryAuth, fetchRegistryToken, isSafeRegistryHost } from './registry-auth';
+import { describeRegistryFailure } from './registry-failure-core';
+import {
+	getRegistryBearerToken as registryBearerToken,
+	getRegistryManifestDigestDirectDetailed as manifestDigestDirect,
+	getRegistrySchemeForHost as registrySchemeForHost,
+	type RegistryPorts
+} from './registry/manifest-digest';
 import { classifyManifest, type ArtifactKind } from './semver/manifest-artifact';
-import { isSystemContainer, classifyEmptyDigestImage, localDigestIsIndexChild } from './scheduler/tasks/update-utils';
+import { isSystemContainer, classifyEmptyDigestImage, localDigestIsIndexChild, indexChildDigests } from './scheduler/tasks/update-utils';
 import { deepDiff } from '../utils/diff.js';
 import { getInstanceId } from './backups/identity';
 import { isOwnedBackupHelper } from './backups/reap-core';
@@ -96,6 +116,7 @@ export class DockerConnectionError extends Error {
  */
 export interface ContainerInspectResult {
 	Id: string;
+	Image: string;
 	Name: string;
 	RestartCount: number;
 	State: {
@@ -204,46 +225,6 @@ function detectDockerSocket(): string {
 }
 
 const socketPath = detectDockerSocket();
-
-/**
- * Demultiplex Docker stream output (strip 8-byte headers)
- * Docker streams have: 1 byte type, 3 bytes padding, 4 bytes size BE, then payload
- */
-function demuxDockerStream(buffer: Buffer, options?: { separateStreams?: boolean }): string | { stdout: string; stderr: string } {
-	const stdout: string[] = [];
-	const stderr: string[] = [];
-	let offset = 0;
-
-	while (offset < buffer.length) {
-		if (offset + 8 > buffer.length) break;
-
-		const streamType = buffer.readUInt8(offset);
-		const frameSize = buffer.readUInt32BE(offset + 4);
-
-		if (frameSize === 0 || frameSize > buffer.length - offset - 8) {
-			// Invalid frame, return raw content with control chars stripped
-			const raw = buffer.toString('utf-8').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
-			return options?.separateStreams ? { stdout: raw, stderr: '' } : raw;
-		}
-
-		const payload = buffer.slice(offset + 8, offset + 8 + frameSize).toString('utf-8');
-
-		if (streamType === 1) {
-			stdout.push(payload);
-		} else if (streamType === 2) {
-			stderr.push(payload);
-		} else {
-			stdout.push(payload); // Default to stdout for unknown types
-		}
-
-		offset += 8 + frameSize;
-	}
-
-	if (options?.separateStreams) {
-		return { stdout: stdout.join(''), stderr: stderr.join('') };
-	}
-	return [...stdout, ...stderr].join('');
-}
 
 /**
  * Process Docker stream frames incrementally from a buffer
@@ -598,6 +579,12 @@ export async function getDockerConfig(envId?: number | null): Promise<DockerClie
 interface DockerFetchOptions extends RequestInit {
 	/** Set to true for long-lived streaming connections */
 	streaming?: boolean;
+	/**
+	 * Called per output line while the request runs. Only the Hawser Edge (WebSocket) path
+	 * can deliver these: the agent sends 'stream' messages alongside a non-streaming request.
+	 * Every other transport is plain request/response and simply never calls it.
+	 */
+	onLine?: (line: string) => void;
 }
 
 /**
@@ -674,7 +661,9 @@ function buildResponse(body: Buffer | ReadableStream, status: number, statusText
 	if (NULL_BODY_STATUSES.has(status)) {
 		return new Response(null, { status, statusText, headers });
 	}
-	return new Response(body, { status, statusText, headers });
+	// A Node Buffer and a Node stream are both valid runtime bodies; the DOM lib's
+	// BodyInit does not describe either, so the cast is the narrowest way to say so.
+	return new Response(body as BodyInit, { status, statusText, headers });
 }
 
 /**
@@ -828,7 +817,7 @@ export async function dockerFetch(
 
 	const startTime = Date.now();
 	const config = await getDockerConfig(envId);
-	const { streaming, ...fetchOptions } = options;
+	const { streaming, onLine, ...fetchOptions } = options;
 	const method = (options.method || 'GET').toUpperCase();
 
 	// Hawser Edge mode - route through WebSocket connection
@@ -886,9 +875,10 @@ export async function dockerFetch(
 				body,
 				headers,
 				streaming || false,
-				(streaming || path === '/_hawser/compose' || path.endsWith('/prune')) ? 300000 : 30000, // 5 min for streaming/compose/prune, 30s for normal
+				(streaming || path === '/_hawser/compose' || isPrunePath(path)) ? 300000 : 30000, // 5 min for streaming/compose/prune, 30s for normal
 				isBinary,
-				fetchOptions.signal ?? undefined
+				fetchOptions.signal ?? undefined,
+				onLine
 			);
 			const elapsed = Date.now() - startTime;
 			// Only warn for slow requests, but skip /stats which is expected to be slow (5-10s)
@@ -962,7 +952,7 @@ export async function dockerFetch(
 		if (!streaming && !finalOptions.signal) {
 			const isComposeOperation = path === '/_hawser/compose';
 			const composeTimeoutMs = parseInt(process.env.COMPOSE_TIMEOUT || '900') * 1000;
-			const isPrune = path.endsWith('/prune');
+			const isPrune = isPrunePath(path);
 			finalOptions.signal = AbortSignal.timeout(isComposeOperation ? composeTimeoutMs : isPrune ? 300000 : 30000);
 		}
 
@@ -970,6 +960,17 @@ export async function dockerFetch(
 		// duplex:'half' under Node's fetch, else it throws before sending.
 		if (typeof (finalOptions.body as ReadableStream | undefined)?.getReader === 'function') {
 			(finalOptions as RequestInit & { duplex?: string }).duplex = 'half';
+		}
+
+		// A streaming response (logs follow, events, backup helper progress) can stay
+		// quiet longer than undici's 300s bodyTimeout, which would abort it as an
+		// unhandled UND_ERR_BODY_TIMEOUT. Route these through a dispatcher whose bodyTimeout
+		// is disabled; they are bounded by their own AbortController (fired on container
+		// exit) instead. headersTimeout stays at undici's default so a pre-header stall
+		// is still capped.
+		if (streaming) {
+			const { getStreamingDispatcher } = await import('./dns-dispatcher');
+			(finalOptions as RequestInit & { dispatcher?: unknown }).dispatcher = getStreamingDispatcher();
 		}
 
 		try {
@@ -1172,7 +1173,7 @@ export async function listContainers(all = true, envId?: number | null): Promise
 		return {
 			id: container.Id,
 			name: container.Names[0]?.replace(/^\//, '') || 'unnamed',
-			image: container.Image,
+			image: trackedImageReference(container.Image, container.Labels),
 			imageId: container.ImageID || '',
 			state: container.State,
 			status: container.Status,
@@ -1530,6 +1531,8 @@ export async function createContainer(options: CreateContainerOptions, envId?: n
 	// Backward-compat: callers (and the auto-update inspect path) may still pass
 	// the legacy "networks" array which conflated primary + extras. Normalize to
 	// the new model: anything that isn't the primary becomes an additional network.
+	// Names are all this array carries, so a Podman alias of the primary cannot be
+	// recognised here; callers that know the ids send additionalNetworks instead.
 	if (options.networks && !options.additionalNetworks) {
 		const primary = options.networkMode || '';
 		options.additionalNetworks = options.networks.filter(n => n !== primary);
@@ -1853,14 +1856,49 @@ export async function createContainer(options: CreateContainerOptions, envId?: n
 		}
 	}
 
-	const result = await dockerJsonRequest<{ Id: string }>(
-		`/containers/create?name=${encodeURIComponent(options.name)}`,
-		{
-			method: 'POST',
-			body: JSON.stringify(containerConfig)
-		},
-		envId
-	);
+	let result: { Id: string };
+	try {
+		result = await dockerJsonRequest<{ Id: string }>(
+			`/containers/create?name=${encodeURIComponent(options.name)}`,
+			{
+				method: 'POST',
+				body: JSON.stringify(containerConfig)
+			},
+			envId
+		);
+	} catch (err: any) {
+		// Podman refuses an EndpointsConfig keyed by the network NAME even though
+		// it accepts that same name in NetworkMode and lists it under that name
+		// (#1619). Its id works on both engines, so retry by id - but only here,
+		// where the name has already proven unusable, since Docker echoes the id
+		// back as the inspect key and would leave ids in the UI.
+		const key = primaryMode && !isSharedMode ? primaryMode : '';
+		const endpoints = containerConfig.NetworkingConfig?.EndpointsConfig;
+		if (!key || !endpoints?.[key] || !isUnknownNetworkKeyError(err?.message)) throw err;
+
+		// The lookup is what tells the aliased bridge apart from a name that is
+		// simply wrong: it resolves for the former and 404s for the latter, where
+		// rethrowing keeps the daemon's own "network not found" for the user.
+		const net = await inspectNetwork(key, envId).catch(() => null);
+		const retryKey = retryEndpointKey({
+			message: err?.message,
+			endpoints,
+			key,
+			networkId: (net as { Id?: string } | null)?.Id
+		});
+		if (!retryKey) throw err;
+
+		console.warn(`[create] "${key}" rejected as an endpoint key, retrying by id (Podman)`);
+		containerConfig.NetworkingConfig.EndpointsConfig = { [retryKey]: endpoints[key] };
+		result = await dockerJsonRequest<{ Id: string }>(
+			`/containers/create?name=${encodeURIComponent(options.name)}`,
+			{
+				method: 'POST',
+				body: JSON.stringify(containerConfig)
+			},
+			envId
+		);
+	}
 
 	// Attach additional networks now that the container exists. Docker only allows
 	// a single network at create time, so anything beyond the primary is connected here.
@@ -1877,6 +1915,131 @@ export async function createContainer(options: CreateContainerOptions, envId?: n
 	return { id: result.Id, start: () => startContainer(result.Id, envId) };
 }
 
+/**
+ * Recreate a Podman Quadlet / systemd-managed container by handing the lifecycle to
+ * systemd instead of doing our own stop/rename/create/start.
+ *
+ * The unit's ExecStop removes the container and its Restart= policy respawns it from
+ * `podman run --replace` on the CURRENT tag (the image already pulled), so a single stop
+ * is the whole recreate. We then poll for the respawned container to come back under the
+ * same name, RUNNING, with a new id, and return that id. Automatic updates also verify
+ * its image ID and attempt to restore the previous image if verification fails.
+ * If it never reaches running
+ * (no Restart= policy, or a crash-loop on the new image), throw an actionable error
+ * rather than the misleading rename failure - and never report a broken update as success.
+ */
+async function recreateSystemdManagedContainer(
+	opts: {
+		name: string; oldContainerId: string; wasRunning: boolean; unit: string;
+		verifiedImageId?: string;
+		rollback?: { imageId: string; repo: string; tag: string };
+	},
+	envId: number | null | undefined,
+	log?: (msg: string) => void
+): Promise<{ Id: string }> {
+	const { name, oldContainerId, wasRunning, unit } = opts;
+	log?.(`Managed by systemd unit ${unit} - handing the recreate to systemd (Quadlet)`);
+
+	// A stopped Quadlet container does not exist: the unit's ExecStop (podman rm -f)
+	// already removed it and the unit is inactive. We have only the Podman API (no
+	// systemctl), so we cannot bring the unit up - a stop would be a no-op and we would
+	// wait out the timeout for nothing. Fail fast with something the user can act on.
+	if (!wasRunning) {
+		throw new Error(
+			`Cannot update ${name}: it is managed by the systemd unit ${unit} and is not ` +
+				`running. Start the unit (systemctl start ${unit}) so it comes up on the ` +
+				`newly pulled image.`
+		);
+	}
+
+	// Stopping is what triggers the unit's ExecStop (podman rm) + Restart respawn. The
+	// stop/kill/die events are an expected part of the update, not a crash.
+	expectedEvents.markExpected(oldContainerId, Date.now(), EXPECTED_EVENT_TTL_MS);
+	log?.('Stopping container (systemd will recreate it on the new image)...');
+	try {
+		await stopContainer(oldContainerId, envId);
+	} catch {
+		// A Quadlet stop can race the unit's own teardown; the container may already be
+		// gone. Not fatal - we verify the respawn below.
+	}
+
+	// Poll for the unit to bring the container back under the same name, RUNNING, with a
+	// new id. A container that reappears but never reaches running (crash-loop on a broken
+	// new image) is a FAILURE on timeout, not a success.
+	try {
+		const deadline = Date.now() + SYSTEMD_RESPAWN_TIMEOUT_MS;
+		for (;;) {
+			await sleep(SYSTEMD_RESPAWN_POLL_MS);
+			const found = await findRunningContainerByName(name, envId).catch(() => null);
+			const outcome = decideRespawnOutcome(found, oldContainerId, Date.now() >= deadline);
+			if (!outcome.done) continue;
+			if (outcome.ok) {
+				if (opts.verifiedImageId) {
+					try {
+						const replacement = await inspectContainer(outcome.id, envId);
+						if (replacement.Image !== opts.verifiedImageId) {
+							throw new Error(`systemd unit ${unit} started ${name} with image ${replacement.Image}, instead of the approved image ${opts.verifiedImageId}`);
+						}
+					} catch (error) {
+						const reason = error instanceof Error ? error.message : String(error);
+						let recovery = 'Check the unit image and pull policy before retrying.';
+						if (opts.rollback) {
+							try {
+								log?.('Could not verify the systemd replacement; restoring the previous image...');
+								await tagImage(opts.rollback.imageId, opts.rollback.repo, opts.rollback.tag, envId);
+								await recreateSystemdManagedContainer({
+									name, oldContainerId: outcome.id, wasRunning: true, unit,
+									verifiedImageId: opts.rollback.imageId
+								}, envId, log);
+								recovery = 'The previous image was restored. Check the unit image and pull policy before retrying.';
+							} catch (rollbackError) {
+								recovery = `Rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}. Check systemd unit ${unit} immediately.`;
+							}
+						}
+						throw new Error(`Could not verify the approved image for ${name}: ${reason}. ${recovery}`);
+					}
+				}
+				log?.(`systemd recreated ${name} (new container ${outcome.id.slice(0, 12)})`);
+				return { Id: outcome.id };
+			}
+			throw new Error(
+				`systemd unit ${unit} did not bring ${name} back to a running state after the ` +
+					`update. The image was pulled; check the unit (a Restart= policy is required, ` +
+					`and verify the container is not failing to start on the new image).`
+			);
+		}
+	} finally {
+		// Clear the suppression on every exit path so a genuine later crash still alarms.
+		expectedEvents.clear(oldContainerId);
+	}
+}
+
+/** Find a container by exact name via the daemon's name filter. Returns id + state, or null. */
+async function findRunningContainerByName(
+	name: string,
+	envId?: number | null
+): Promise<{ Id: string; State: string } | null> {
+	const filters = JSON.stringify({ name: [`^/?${name}$`] });
+	const res = await dockerFetch(
+		`/containers/json?all=true&filters=${encodeURIComponent(filters)}`,
+		{},
+		envId
+	);
+	if (!res.ok) {
+		await res.text();
+		return null;
+	}
+	const list = (await res.json()) as Array<{ Id: string; Names: string[]; State: string }>;
+	// The name filter is a regex-contains on Podman/Docker; keep only an EXACT name match.
+	const match = list.find((c) => isExactNameMatch(c.Names, name));
+	return match ? { Id: match.Id, State: match.State } : null;
+}
+
+// Generous window: systemd honours RestartSec, and a heavy image can take a while to
+// become running even though it is already pulled.
+const SYSTEMD_RESPAWN_TIMEOUT_MS = 90_000;
+const SYSTEMD_RESPAWN_POLL_MS = 500;
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /**
  * Recreate a container using full Config/HostConfig passthrough from inspect data.
@@ -1906,7 +2069,9 @@ export async function recreateContainerFromInspect(
 	 * it cannot be re-fetched here. When omitted, the rebase falls back to a
 	 * best-effort inspect of the old image id and, failing that, verbatim.
 	 */
-	oldImageConfig?: ImageEnvLabels | null
+	oldImageConfig?: ImageEnvLabels | null,
+	verifiedImageId?: string,
+	verifiedImageReference?: string
 ): Promise<{ Id: string }> {
 	const config = inspectData.Config || {};
 	const hostConfig = inspectData.HostConfig || {};
@@ -1914,6 +2079,41 @@ export async function recreateContainerFromInspect(
 	const name = inspectData.Name?.replace(/^\//, '') || '';
 	const oldContainerId = inspectData.Id;
 	const wasRunning = inspectData.State?.Running;
+
+	// Podman Quadlet / systemd-managed container: the unit owns the lifecycle. Its
+	// ExecStop is `podman rm -f`, so the moment we stop the container systemd DELETES it
+	// and (Restart= policy) respawns a fresh one from the unit's `podman run --replace`,
+	// which reads the CURRENT tag - i.e. the image we just pulled. Our own
+	// stop/rename/create/start therefore cannot work: the rename step hits the
+	// already-removed id ("Failed to rename old container"), and creating our own
+	// container would collide with systemd's respawn. So hand the recreate to systemd:
+	// stop, then wait for the unit to bring the container back on the new image.
+	const systemdUnit = config.Labels?.['PODMAN_SYSTEMD_UNIT'];
+	if (verifiedImageId) {
+		// Validate before stopping anything.
+		trackedImageLabels({}, newImage, verifiedImageId, verifiedImageReference);
+	}
+	if (systemdUnit) {
+		let rollback: { imageId: string; repo: string; tag: string } | undefined;
+		if (verifiedImageId) {
+			// The unit uses a mutable tag. Detect an intervening pull before stopping
+			// the old container, then verify the actual replacement after respawn.
+			const selectedImage = await inspectImage(newImage, envId);
+			if (selectedImage.Id !== verifiedImageId) {
+				throw new Error(`Image ${newImage} changed before the systemd restart; update deferred, original container left running`);
+			}
+			const colon = newImage.lastIndexOf(':');
+			const hasTag = colon > newImage.lastIndexOf('/');
+			if (!newImage.includes('@') && /^sha256:[a-f0-9]{64}$/.test(inspectData.Image)) {
+				rollback = { imageId: inspectData.Image, repo: hasTag ? newImage.slice(0, colon) : newImage, tag: hasTag ? newImage.slice(colon + 1) : 'latest' };
+			}
+		}
+		return await recreateSystemdManagedContainer(
+			{ name, oldContainerId, wasRunning, unit: systemdUnit, verifiedImageId, rollback },
+			envId,
+			log
+		);
+	}
 
 	// Detect shared/special network modes where network manipulation must be skipped
 	const networkMode = hostConfig.NetworkMode || '';
@@ -1929,6 +2129,9 @@ export async function recreateContainerFromInspect(
 	// 1. Stop the container
 	if (wasRunning) {
 		log?.('Stopping container...');
+		// The stop/kill/die events this triggers are an EXPECTED part of the update,
+		// not a crash - mark the id so the event handler skips their notifications (#68).
+		expectedEvents.markExpected(oldContainerId, Date.now(), EXPECTED_EVENT_TTL_MS);
 		await stopContainer(oldContainerId, envId);
 	}
 
@@ -1990,6 +2193,10 @@ export async function recreateContainerFromInspect(
 			if (wasRunning) {
 				await startContainer(oldContainerId, envId).catch(() => {});
 			}
+			// The old container is alive again under its real name; its stop/kill were
+			// no longer "expected" once we chose to keep it, so a later genuine crash
+			// must alarm - drop the suppression mark (#68).
+			expectedEvents.clear(oldContainerId);
 		} catch {
 			log?.('Rollback failed');
 		}
@@ -1998,7 +2205,7 @@ export async function recreateContainerFromInspect(
 	// 4. Build create config - pass Config and HostConfig directly from inspect
 	const createConfig: any = {
 		...config,
-		Image: newImage,
+		Image: verifiedImageId ?? newImage,
 		HostConfig: hostConfig
 	};
 
@@ -2025,7 +2232,7 @@ export async function recreateContainerFromInspect(
 				Entrypoint: (oldInspect as any)?.Config?.Entrypoint ?? null,
 			};
 		}
-		const newImg = await inspectImage(newImage, envId);
+		const newImg = await inspectImage(verifiedImageId ?? newImage, envId);
 		const oldEnv = oldImg?.Env || [];
 		const newEnv = (newImg as any)?.Config?.Env || [];
 		const oldLabels = oldImg?.Labels || {};
@@ -2063,6 +2270,9 @@ export async function recreateContainerFromInspect(
 	} catch (e: any) {
 		log?.(`Rebase skipped (image inspect failed), keeping env/labels verbatim: ${e?.message || e}`);
 	}
+
+	// Keep the tracked tag separately; creation and rebasing use the verified ID.
+	if (verifiedImageId) createConfig.Labels = trackedImageLabels(createConfig.Labels, newImage, verifiedImageId, verifiedImageReference);
 
 	// Strip default MemorySwappiness — Podman + cgroupv2 rejects it.
 	// Docker returns -1, Podman returns 0 when unset.
@@ -2155,16 +2365,18 @@ export async function recreateContainerFromInspect(
 	// from the old container's settings to avoid getting a random bridge IP.
 	// Skip for shared network modes — EndpointsConfig conflicts with container:/host/none modes.
 	if (!isSharedNetwork && initialNetworkName && initialNetworkConfig) {
-		const endpointConfig = { ...initialNetworkConfig };
+		// An auto-assigned MAC must not follow the container: on daemons that derive it
+		// from the IP, the replacement gets a new address and the carried MAC then
+		// collides with whoever inherits the old one (#1618). Only a configured MAC
+		// survives; otherwise Docker derives a fresh one.
+		const endpointConfig = endpointWithoutGeneratedMac({ ...initialNetworkConfig });
 		createConfig.NetworkingConfig = {
 			EndpointsConfig: {
 				[initialNetworkName]: endpointConfig
 			}
 		};
-		// Container-level MacAddress conflicts with endpoint-level MacAddress.
-		// Docker requires them to match or the top-level one to be empty.
-		// The MAC is preserved in the endpoint config (correct location per API v1.44+),
-		// so clear the top-level one to avoid the conflict error.
+		// Container-level MacAddress conflicts with the endpoint-level one; Docker wants
+		// them equal or the top-level empty, so the endpoint config is the only carrier.
 		delete createConfig.MacAddress;
 	}
 
@@ -2196,7 +2408,9 @@ export async function recreateContainerFromInspect(
 			const nc = netConfig as any;
 			if (nc.NetworkID) {
 				try {
-					await connectContainerToNetworkRaw(nc.NetworkID, newContainerId, nc, envId);
+					// Same rule as the creation endpoint above: never carry a generated MAC.
+					const settings = endpointWithoutGeneratedMac({ ...nc });
+					await connectContainerToNetworkRaw(nc.NetworkID, newContainerId, settings, envId);
 				} catch (netError: any) {
 					log?.(`Warning: Failed to connect to network "${netName}": ${netError.message}`);
 				}
@@ -2255,8 +2469,34 @@ async function ensureImagePresent(image: string, envId?: number | null, log?: (m
 	if (res.ok) { await drainResponse(res); return; }
 	await drainResponse(res);
 	log?.(`Image ${image} not present — pulling…`);
-	await pullImage(image, undefined, envId);
+	await pullImage(image, (progress) => {
+		if (progress.status === 'warning') log?.(`[warning] ${progress.message}`);
+	}, envId);
 	log?.(`Pulled ${image}`);
+}
+
+/** Enrich older cooldown metadata while the source host still has the image.
+ * Never resolve the mutable tag: only RepoDigests of the actual image qualify. */
+export async function getPortableContainerConfig<T extends { Image?: string; Labels?: Record<string, string> | null }>(
+	config: T, envId?: number | null
+): Promise<T> {
+	const image = config.Image;
+	if (!image || trackedImageReference(image, config.Labels) === image || portableImageReference(image, config.Labels) !== image) return config;
+	try {
+		const source = trackedImageReference(image, config.Labels);
+		const { registry, repo } = parseImageReference(source);
+		const imageData = await inspectImage(image, envId) as { RepoDigests?: string[] };
+		for (const candidate of imageData.RepoDigests ?? []) {
+			const digest = candidate.slice(candidate.lastIndexOf('@') + 1);
+			if (!candidate.includes('@') || !/^sha256:[a-f0-9]{64}$/.test(digest)) continue;
+			const parsed = parseImageReference(candidate);
+			const sameRegistry = parsed.registry === registry || (DOCKER_HUB_HOSTS.has(parsed.registry) && DOCKER_HUB_HOSTS.has(registry));
+			if (!sameRegistry || parsed.repo !== repo) continue;
+			const registryReference = verifiedImagePullPlan(source, digest).reference;
+			return { ...config, Labels: trackedImageLabels(config.Labels ?? undefined, source, image, registryReference) };
+		}
+	} catch { /* An unavailable image cannot supply a missing immutable reference. */ }
+	return config;
 }
 
 /**
@@ -2277,8 +2517,8 @@ export async function createContainerFromMetadata(
 	envId?: number | null,
 	log?: (msg: string) => void
 ): Promise<{ Id: string }> {
-	const config = { ...metadata.config } || {};
-	const hostConfig = { ...metadata.hostConfig } || {};
+	const config = await getPortableContainerConfig({ ...metadata.config, Image: image }, envId);
+	const hostConfig = { ...metadata.hostConfig };
 	const networks: Record<string, any> = metadata.networkSettings?.Networks || {};
 
 	const networkMode = hostConfig.NetworkMode || '';
@@ -2359,7 +2599,15 @@ export async function createContainerFromMetadata(
 	// Pull the image first if the target env doesn't have it — a cross-env clone
 	// restore lands on a host that may never have seen this image, and create
 	// (unlike run) won't pull it.
-	await ensureImagePresent(image, envId, log);
+	const registryReference = portableImageReference(image, config.Labels);
+	await ensureImagePresent(registryReference, envId, log);
+	if (registryReference !== image) {
+		// The destination may select another platform from the approved manifest.
+		// Pin its local ID and refresh tracking so future updates still follow the tag.
+		const restoredImage = await inspectImage(registryReference, envId) as { Id: string };
+		createConfig.Labels = trackedImageLabels(config.Labels, trackedImageReference(image, config.Labels), restoredImage.Id, registryReference);
+		createConfig.Image = restoredImage.Id;
+	}
 
 	// Create container
 	log?.(`Creating container ${containerName}...`);
@@ -2481,56 +2729,18 @@ export function extractContainerOptions(inspectData: any): CreateContainerOption
 	const networkSettings = inspectData.NetworkSettings?.Networks || {};
 	const primaryNetwork = hostConfig.NetworkMode || 'bridge';
 
-	// Extract primary network aliases, static IP, and gateway priority
-	let networkAliases: string[] | undefined;
-	let networkIpv4Address: string | undefined;
-	let networkIpv6Address: string | undefined;
-	let macAddress: string | undefined;
-	let networkGwPriority: number | undefined;
-
 	const containerId = inspectData.Id || '';
-	const shortContainerId = containerId.substring(0, 12);
 
-	// Extract compose labels for alias reconstruction
-	const composeProject = config.Labels?.['com.docker.compose.project'];
-	const composeService = config.Labels?.['com.docker.compose.service'];
-
-	for (const [netName, netConfig] of Object.entries(networkSettings)) {
-		const netConf = netConfig as any;
-		const isPrimary = netName === primaryNetwork ||
-			(primaryNetwork === 'bridge' && (netName === 'bridge' || netName === 'default'));
-
-		if (isPrimary) {
-			// Filter out auto-generated container IDs
-			const allAliases = (netConf.Aliases?.length > 0 ? netConf.Aliases : netConf.DNSNames) || [];
-			networkAliases = allAliases.filter((a: string) =>
-				a !== containerId && a !== shortContainerId
-			);
-
-			// For compose containers, ensure service name and project-service aliases
-			if (composeProject && composeService) {
-				if (!networkAliases) networkAliases = [];
-				if (!networkAliases.includes(composeService)) {
-					networkAliases.push(composeService);
-				}
-				const projectService = `${composeProject}-${composeService}`;
-				if (!networkAliases.includes(projectService)) {
-					networkAliases.push(projectService);
-				}
-			}
-
-			if (!networkAliases || networkAliases.length === 0) {
-				networkAliases = undefined;
-			}
-
-			networkIpv4Address = netConf.IPAMConfig?.IPv4Address || undefined;
-			networkIpv6Address = netConf.IPAMConfig?.IPv6Address || undefined;
-			macAddress = netConf.MacAddress || undefined;
-			networkGwPriority = netConf.GwPriority !== undefined && netConf.GwPriority !== 0
-				? netConf.GwPriority : undefined;
-			break;
-		}
-	}
+	const mapped = mapContainerNetworks(networkSettings, primaryNetwork, containerId, {
+		project: config.Labels?.['com.docker.compose.project'],
+		service: config.Labels?.['com.docker.compose.service']
+	});
+	const { primaryAliases: networkAliases, primaryIpv4Address: networkIpv4Address,
+		primaryIpv6Address: networkIpv6Address, primaryGwPriority: networkGwPriority,
+		additionalNetworks, networkConfigs } = mapped;
+	// The live endpoint MAC is Docker's own, not the user's; surfacing it here would save
+	// it back as an explicit setting and pin the container to it (#1618).
+	const macAddress = configuredMacAddress(inspectData, mapped.primaryEndpoint as any) ?? undefined;
 
 	// Device requests (GPU, etc.)
 	const deviceRequests = hostConfig.DeviceRequests?.length > 0
@@ -2545,7 +2755,7 @@ export function extractContainerOptions(inspectData: any): CreateContainerOption
 
 	return {
 		name,
-		image: config.Image,
+		image: trackedImageReference(config.Image, config.Labels),
 
 		// Command and entrypoint
 		cmd: config.Cmd || undefined,
@@ -2572,6 +2782,8 @@ export function extractContainerOptions(inspectData: any): CreateContainerOption
 		networkIpv4Address,
 		networkIpv6Address,
 		networkGwPriority,
+		additionalNetworks: additionalNetworks.length > 0 ? additionalNetworks : undefined,
+		networkConfigs: Object.keys(networkConfigs).length > 0 ? networkConfigs : undefined,
 
 		// User and hostname
 		user: config.User || undefined,
@@ -2697,17 +2909,17 @@ export async function updateContainer(id: string, options: Partial<CreateContain
 	// Extract ALL existing container options
 	const existingOptions = extractContainerOptions(oldContainerInfo);
 
-	// Per-network fields (aliases, static IPs, MAC, gateway priority) are scoped to
-	// a single network. When the user switches the primary network, the values
-	// extracted from the old network must NOT follow the container — e.g. compose
-	// service aliases from "anton" applied to the default bridge fail with
-	// "invalid endpoint settings" because the default bridge doesn't accept aliases.
+	// Per-network fields (aliases, static IPs, MAC, gateway priority) are scoped to a
+	// single network, so switching the primary re-scopes them: the old network's values
+	// must not follow the container - compose service aliases from "anton" applied to the
+	// default bridge fail with "invalid endpoint settings" - while a network the container
+	// is already on brings its own settings with it, taken from the request's own
+	// networkConfigs when it has one so an edit made in the same save is not overwritten.
 	if (options.networkMode && options.networkMode !== networkMode) {
-		existingOptions.networkAliases = undefined;
-		existingOptions.networkIpv4Address = undefined;
-		existingOptions.networkIpv6Address = undefined;
-		existingOptions.networkGwPriority = undefined;
-		existingOptions.macAddress = undefined;
+		Object.assign(
+			existingOptions,
+			rescopeForPrimarySwitch(existingOptions, options.networkMode, options)
+		);
 	}
 
 	// Merge user-provided options on top of existing options.
@@ -2901,7 +3113,70 @@ export async function buildRegistryAuthHeader(imageName: string): Promise<Record
 	return headers;
 }
 
-export async function pullImage(imageName: string, onProgress?: (data: any) => void, envId?: number | null) {
+export async function verifyImageReleaseAge(imageName: string, envId?: number | null): Promise<string | null> {
+	const { hours } = await getMinimumReleaseAgeConfig(envId);
+	if (hours > 0) {
+		const digest = await getRegistryManifestDigest(imageName, envId);
+		if (!digest) throw new Error(`Cannot verify the update cooldown for ${imageName}: registry digest unavailable. Check registry access and credentials; pull deferred.`);
+		const remaining = await imageReleaseAgeRemainingMs(imageName, digest, hours, persisted => getRegistryImageCreatedAt(imageName, digest, envId, undefined, persisted), envId);
+		if (remaining > 0) {
+			throw new Error(`${imageName} is in its image update cooldown (${Math.ceil(remaining / 3600000)} hours remaining)`);
+		}
+		return digest;
+	}
+	return null;
+}
+
+/** Advisory for user-requested pulls. A failed cooldown lookup must not prevent an install. */
+export async function getImageReleaseAgeWarning(imageName: string, envId?: number | null): Promise<string | null> {
+	try {
+		return await releaseAgeAdvisory(async (signal) => {
+			const { hours } = await getMinimumReleaseAgeConfig(envId);
+			signal.throwIfAborted();
+			if (hours <= 0) return null;
+			const digest = await getRegistryManifestDigest(imageName, envId, signal);
+			signal.throwIfAborted();
+			if (!digest) return manualPullAgeWarning(imageName, hours, null);
+			return manualPullAgeWarning(imageName, hours, await imageReleaseAgeStatus(imageName, digest, hours, persisted => getRegistryImageCreatedAt(imageName, digest, envId, signal, persisted), envId));
+		});
+	} catch (error) {
+		console.warn(`[Pull] Could not determine update cooldown for ${imageName}:`, error);
+		return `Update cooldown for ${imageName} could not be determined. Pulling it anyway because this was requested manually.`;
+	}
+}
+
+/** Scheduled pulls enforce the cooldown; explicit pulls only report an advisory. */
+export async function pullImage(imageName: string, onProgress?: (data: any) => void, envId?: number | null, enforceReleaseAge = false): Promise<{ imageId: string; digest: string; reference: string } | undefined> {
+	if (!enforceReleaseAge) {
+		const warning = await getImageReleaseAgeWarning(imageName, envId);
+		if (warning) {
+			console.warn(`[Pull] ${warning}`);
+			onProgress?.({ status: 'warning', message: warning });
+		}
+		await pullImageFromRegistry(imageName, onProgress, envId);
+		return undefined;
+	}
+
+	const digest = await verifyImageReleaseAge(imageName, envId);
+	if (!digest) {
+		await pullImageFromRegistry(imageName, onProgress, envId);
+		return undefined;
+	}
+
+	const plan = verifiedImagePullPlan(imageName, digest);
+	await pullImageFromRegistry(plan.reference, onProgress, envId);
+	const image = await inspectImage(plan.reference, envId) as { Id: string };
+	if (!/^sha256:[a-f0-9]{64}$/.test(image.Id)) throw new Error('Invalid verified image ID');
+	if (plan.tag) await tagImage(image.Id, plan.tag.repo, plan.tag.tag, envId);
+	return { imageId: image.Id, digest, reference: plan.reference };
+}
+
+/** Pull an image needed by Dockhand's own scanner or backup helper. */
+export async function pullInternalImage(imageName: string, envId?: number | null) {
+	return pullImageFromRegistry(imageName, undefined, envId);
+}
+
+async function pullImageFromRegistry(imageName: string, onProgress?: (data: any) => void, envId?: number | null) {
 	// Parse image name and tag to avoid pulling all tags
 	// Docker API: if tag is empty, it pulls ALL tags for the image
 	// Format can be: repo:tag, repo@digest, or just repo (defaults to :latest)
@@ -3101,129 +3376,22 @@ export async function findRegistryCredentials(registryHost: string): Promise<{ u
 	}
 }
 
-/**
- * Get bearer token from registry using challenge-response flow.
- * This follows the Docker Registry v2 authentication spec:
- * 1. Make request to /v2/ to get WWW-Authenticate challenge
- * 2. Parse realm, service, scope from challenge
- * 3. Request token from realm URL (with credentials if available)
- */
-async function getRegistryBearerToken(registry: string, repo: string): Promise<string | null> {
-	try {
-		const hostSafety = isSafeRegistryHost(registry);
-		if (!hostSafety.ok) {
-			console.error(`[Registry] Refusing token request for ${registry}: ${hostSafety.reason}`);
-			return null;
-		}
-		const registryUrl = `https://${registry}`;
+/** What registry/manifest-digest.ts cannot work out on its own. */
+function registryPorts(): RegistryPorts {
+	return {
+		parseRegistryUrl,
+		hubHosts: DOCKER_HUB_HOSTS,
+		listRegistries: async () => (await import('./db.js')).getRegistries(),
+		findCredentials: findRegistryCredentials
+	};
+}
 
-		// Look up stored credentials for this registry
-		const credentials = await findRegistryCredentials(registry);
+async function getRegistrySchemeForHost(registryHost: string): Promise<'http' | 'https'> {
+	return registrySchemeForHost(registryHost, registryPorts());
+}
 
-		// Step 1: Challenge request to /v2/
-		// Do not follow redirects on the challenge; a 3xx is treated as a non-401 below.
-		const challengeResponse = await fetch(`${registryUrl}/v2/`, {
-			method: 'GET',
-			headers: { 'User-Agent': 'Dockhand/1.0' },
-			redirect: 'manual'
-		});
-
-		// If 200, no auth needed
-		if (challengeResponse.ok) {
-			await drainResponse(challengeResponse);
-			return null;
-		}
-
-		// If not 401, something else is wrong
-		if (challengeResponse.status !== 401) {
-			await drainResponse(challengeResponse);
-			console.error(`Registry challenge failed: ${challengeResponse.status}`);
-			return null;
-		}
-
-		// Step 2: Parse WWW-Authenticate header
-		const wwwAuth = challengeResponse.headers.get('WWW-Authenticate') || '';
-		const challenge = wwwAuth.toLowerCase();
-
-		if (challenge.startsWith('basic')) {
-			// Basic auth - use credentials if we have them
-			await drainResponse(challengeResponse);
-			if (credentials) {
-				const basicAuth = Buffer.from(`${credentials.username}:${credentials.password}`).toString('base64');
-				return `Basic ${basicAuth}`;
-			}
-			return null;
-		}
-
-		if (!challenge.startsWith('bearer')) {
-			await drainResponse(challengeResponse);
-			console.error(`Unsupported auth type: ${wwwAuth}`);
-			return null;
-		}
-
-		// Drain 401 response body before bearer token fetch (required by Node.js/Undici for connection reuse)
-		await drainResponse(challengeResponse);
-
-		// Parse bearer challenge: Bearer realm="...",service="...",scope="..."
-		const realmMatch = wwwAuth.match(/realm="([^"]+)"/i);
-		const serviceMatch = wwwAuth.match(/service="([^"]+)"/i);
-
-		if (!realmMatch) {
-			console.error('No realm in WWW-Authenticate header');
-			return null;
-		}
-
-		const realm = realmMatch[1];
-		const service = serviceMatch ? serviceMatch[1] : '';
-		const scope = `repository:${repo}:pull`;
-
-		// Step 3: Request token from realm (with credentials if available).
-		// Empty scope is allowed — means "no specific resource permission".
-		// Useful for credential validation: some registries (Docker Hub)
-		// reject privileged scopes like registry:catalog:* even for valid
-		// users, so omitting scope is the only reliable login check.
-		const tokenUrl = new URL(realm);
-		if (service) tokenUrl.searchParams.set('service', service);
-		if (scope) tokenUrl.searchParams.set('scope', scope);
-
-		const authHeader = credentials
-			? `Basic ${Buffer.from(`${credentials.username}:${credentials.password}`).toString('base64')}`
-			: null;
-		const tokenResponse = await fetchRegistryToken(tokenUrl.toString(), authHeader);
-
-		if (!tokenResponse.ok) {
-			// Surface enough to diagnose without leaking the secret: the response
-			// body (truncated), the final URL, and the identity (username only).
-			const errBody = (await tokenResponse.text()).slice(0, 300).replace(/\s+/g, ' ').trim();
-			const finalNote = tokenResponse.url && tokenResponse.url !== tokenUrl.toString()
-				? ` (final ${new URL(tokenResponse.url).origin})`
-				: '';
-			const identity = credentials
-				? ` as ${credentials.username.slice(0, 4)}...(len=${credentials.username.length})`
-				: ' anonymously';
-			console.error(
-				`[Registry] Token request failed: ${tokenResponse.status} at ${tokenUrl.origin}${finalNote}, sent${identity}` +
-					(errBody ? ` - response: ${errBody}` : '')
-			);
-			return null;
-		}
-
-		const tokenData = await tokenResponse.json() as { token?: string; access_token?: string };
-		const token = tokenData.token || tokenData.access_token || null;
-
-		return token ? `Bearer ${token}` : null;
-
-	} catch (e) {
-		const errorMsg = e instanceof Error ? e.message : String(e);
-		const cause = (e as any)?.cause;
-		const causeMsg = cause ? ` (cause: ${cause})` : '';
-		console.error('[Registry] Failed to get bearer token:', errorMsg + causeMsg);
-		const causeStr = String(cause ?? errorMsg);
-		if (causeStr.includes('EAI_AGAIN') || causeStr.includes('ENOTFOUND')) {
-			console.error('[Registry] DNS resolution failed. If you are on a NAS (Synology, uGreen, QNAP), try adding --dns=8.8.8.8 to your docker run command or set {"dns": ["8.8.8.8"]} in /etc/docker/daemon.json');
-		}
-		return null;
-	}
+async function getRegistryBearerToken(registry: string, repo: string, signal?: AbortSignal): Promise<string | null> {
+	return registryBearerToken(registry, repo, registryPorts(), signal);
 }
 
 /**
@@ -3630,49 +3798,104 @@ export async function harborSearchRepositories(
  * Simple HEAD request to get Docker-Content-Digest header.
  * Docker stores the manifest list digest in RepoDigests, so we compare that directly.
  */
-export async function getRegistryManifestDigest(imageName: string): Promise<string | null> {
+/** Direct registry request with upstream diagnostic details. */
+async function getRegistryManifestDigestDirectDetailed(
+	imageName: string, signal?: AbortSignal
+): Promise<{ digest: string | null; reason?: string }> {
+	return manifestDigestDirect(imageName, registryPorts(), signal);
+}
+
+/** The target daemon can resolve private registries that Dockhand itself cannot
+ * reach (especially through Hawser). This endpoint reads metadata, not layers. */
+async function getDockerDistributionDigest(imageName: string, envId?: number | null, signal?: AbortSignal): Promise<string | null> {
 	try {
-		const { registry, repo, tag } = parseImageReference(imageName);
-		if (!isSafeRegistryHost(registry).ok) return null;
-		const token = await getRegistryBearerToken(registry, repo);
-		const manifestUrl = `https://${registry}/v2/${repo}/manifests/${tag}`;
-
-		const headers: Record<string, string> = {
-			'User-Agent': 'Dockhand/1.0',
-			'Accept': [
-				'application/vnd.docker.distribution.manifest.list.v2+json',
-				'application/vnd.oci.image.index.v1+json',
-				'application/vnd.docker.distribution.manifest.v2+json',
-				'application/vnd.oci.image.manifest.v1+json'
-			].join(', ')
-		};
-		if (token) headers['Authorization'] = token;
-
-		const response = await fetch(manifestUrl, { method: 'HEAD', headers });
-
+		const headers = await buildRegistryAuthHeader(imageName);
+		const response = await dockerFetch(`/distribution/${encodeURIComponent(imageName)}/json`, { headers, signal }, envId);
 		if (!response.ok) {
+			console.warn(`[Registry] Docker distribution inspect for ${imageName} returned HTTP ${response.status}`);
 			await drainResponse(response);
-			if (response.status === 429) {
-				const retryAfter = response.headers.get('Retry-After');
-				console.warn(`[Registry] ${imageName}: rate limited (429)${retryAfter ? `, retry after ${retryAfter}s` : ''}`);
-			} else {
-				console.error(`[Registry] ${imageName}: ${response.status}`);
-			}
 			return null;
 		}
-
-		const digest = response.headers.get('Docker-Content-Digest');
-		await drainResponse(response);
-		return digest;
-	} catch (e) {
-		const causeStr = String((e as any)?.cause ?? e);
-		if (causeStr.includes('EAI_AGAIN') || causeStr.includes('ENOTFOUND')) {
-			console.error(`[Registry] ${imageName}: DNS resolution failed. If you are on a NAS (Synology, uGreen, QNAP), add --dns=8.8.8.8 to your docker run command.`);
-		} else {
-			console.error(`[Registry] ${imageName}: ${e}`);
-		}
+		const data = await response.json() as { Descriptor?: { digest?: unknown } };
+		const digest = data.Descriptor?.digest;
+		return typeof digest === 'string' && /^sha256:[a-f0-9]{64}$/i.test(digest) ? digest : null;
+	} catch (error) {
+		console.warn(`[Registry] Docker distribution inspect failed for ${imageName}:`, error);
 		return null;
 	}
+}
+
+/** With a cooldown enabled, resolve the digest on the target environment first.
+ * Otherwise retain the direct registry HEAD without an extra daemon request. */
+export async function getRegistryManifestDigest(imageName: string, envId?: number | null, signal?: AbortSignal): Promise<string | null> {
+	return (await getRegistryManifestDigestDetailed(imageName, envId, signal)).digest;
+}
+
+export async function getRegistryManifestDigestDetailed(imageName: string, envId?: number | null, signal?: AbortSignal): Promise<{ digest: string | null; reason?: string }> {
+	const { registry } = parseImageReference(imageName);
+	if (!isSafeRegistryHost(registry).ok) return { digest: null, reason: describeRegistryFailure({ kind: 'blocked-host', registry }) };
+	signal?.throwIfAborted();
+	if ((await getMinimumReleaseAgeConfig(envId)).hours > 0) {
+		const daemonDigest = await getDockerDistributionDigest(imageName, envId, signal);
+		signal?.throwIfAborted();
+		if (daemonDigest) return { digest: daemonDigest };
+	}
+	return getRegistryManifestDigestDirectDetailed(imageName, signal);
+}
+
+// Cache only verified creation dates, keyed by immutable digest and target platform.
+// Failed lookups are retried on the next check; the durable fallback lives in settings.
+const imageCreationTimes = new Map<string, string>();
+
+async function getRegistryImageCreatedAt(imageName: string, digest: string, envId?: number | null, parentSignal?: AbortSignal, persisted: Readonly<Record<string, string>> = {}): Promise<ImageCreationMetadata | null> {
+	try {
+		const { registry, repo } = parseImageReference(imageName);
+		if (!isSafeRegistryHost(registry).ok) return null;
+		const signal = parentSignal ?? AbortSignal.timeout(8000);
+		signal.throwIfAborted();
+		const info = await dockerJsonRequest('/info', { signal }, envId) as { OSType?: string; Architecture?: string };
+		const platform = imagePlatform(info?.OSType, info?.Architecture);
+		if (!platform) return null;
+		const key = `${registry}/${repo}@${digest}/${platform.os}/${platform.architecture}/${platform.variant ?? ''}`;
+		const platformKey = `${platform.os}/${platform.architecture}/${platform.variant ?? ''}`;
+		const cached = persisted[platformKey] ?? imageCreationTimes.get(key);
+		if (cached) return { createdAt: cached, platform: platformKey };
+		signal.throwIfAborted();
+		const [authorization, scheme] = await Promise.all([
+			getRegistryBearerToken(registry, repo, signal), getRegistrySchemeForHost(registry)
+		]);
+		const created = await fetchImageCreatedAt({ registry, repo, digest, platform, scheme, authorization, signal });
+		if (created) {
+			if (imageCreationTimes.size >= 256) imageCreationTimes.delete(imageCreationTimes.keys().next().value!);
+			imageCreationTimes.set(key, created);
+		}
+		return { createdAt: created, platform: platformKey };
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * When a candidate tag's image was built, for the semver check's stale-candidate
+ * rule. Takes the candidate's already-known manifest digest, so only the single
+ * chosen candidate is looked up - never a sweep over the tag list.
+ *
+ * `envId` selects the daemon whose os/arch decides which per-arch manifest to read;
+ * without it a remote environment would be judged by Dockhand's own platform.
+ * Dates are cached per digest+platform, so a repeat check costs nothing. The
+ * cooldown feature's persisted fallback is deliberately NOT used: it records when
+ * Dockhand first SAW a digest, which for an old tag is today - the opposite of the
+ * build date this rule needs.
+ * Returns null on any failure, which keeps the candidate (fail-open).
+ */
+export async function getRegistryTagCreatedAt(
+	registry: string,
+	repo: string,
+	digest: string,
+	envId?: number | null
+): Promise<string | null> {
+	const meta = await getRegistryImageCreatedAt(`${registry}/${repo}`, digest, envId);
+	return meta?.createdAt ?? null;
 }
 
 /**
@@ -3688,10 +3911,11 @@ export async function getTagArtifactKind(
 	registry: string,
 	repo: string,
 	tag: string
-): Promise<{ kind: ArtifactKind; digest: string | null }> {
+): Promise<{ kind: ArtifactKind; digest: string | null; childDigests?: string[] }> {
 	try {
 		if (!isSafeRegistryHost(registry).ok) return { kind: 'image', digest: null };
 		const token = await getRegistryBearerToken(registry, repo);
+		const scheme = await getRegistrySchemeForHost(registry);
 		const headers: Record<string, string> = {
 			'User-Agent': 'Dockhand/1.0',
 			'Accept': [
@@ -3703,7 +3927,7 @@ export async function getTagArtifactKind(
 		};
 		if (token) headers['Authorization'] = token;
 
-		const res = await fetch(`https://${registry}/v2/${repo}/manifests/${tag}`, {
+		const res = await fetch(`${scheme}://${registry}/v2/${repo}/manifests/${tag}`, {
 			method: 'GET',
 			headers,
 			signal: AbortSignal.timeout(8000)
@@ -3717,9 +3941,11 @@ export async function getTagArtifactKind(
 		const body = (await res.json().catch(() => null)) as
 			| { mediaType?: string; config?: { mediaType?: string }; manifests?: unknown[] }
 			| null;
-		return { kind: classifyManifest(body, topMediaType), digest };
+		// Per-arch child digests of a multi-arch index, so a same-image check can match
+		// a host that recorded the child digest in RepoDigests instead of the index (#1367).
+		return { kind: classifyManifest(body, topMediaType), digest, childDigests: indexChildDigests(body) };
 	} catch {
-		return { kind: 'image', digest: null };
+		return { kind: 'image', digest: null, childDigests: [] };
 	}
 }
 
@@ -3745,6 +3971,7 @@ async function localDigestMatchesRegistryChild(
 		const { registry, repo, tag } = parseImageReference(imageName);
 		if (!isSafeRegistryHost(registry).ok) return false;
 		const token = await getRegistryBearerToken(registry, repo);
+		const scheme = await getRegistrySchemeForHost(registry);
 		const headers: Record<string, string> = {
 			'User-Agent': 'Dockhand/1.0',
 			'Accept': [
@@ -3754,7 +3981,7 @@ async function localDigestMatchesRegistryChild(
 		};
 		if (token) headers['Authorization'] = token;
 
-		const response = await fetch(`https://${registry}/v2/${repo}/manifests/${tag}`, {
+		const response = await fetch(`${scheme}://${registry}/v2/${repo}/manifests/${tag}`, {
 			method: 'GET',
 			headers,
 			signal: AbortSignal.timeout(8000)
@@ -3774,10 +4001,15 @@ export interface ImageUpdateCheckResult {
 	hasUpdate: boolean;
 	currentDigest?: string;
 	registryDigest?: string;
+	/** An image is available but still inside the configured cooldown. */
+	releaseAgeRemainingHours?: number;
 	/** True if this is a local-only image (no registry) */
 	isLocalImage?: boolean;
 	/** Error message if check failed */
 	error?: string;
+	/** The running image's RepoDigests (sha256:...), for the semver check to suppress
+	 *  a newer-version tag that resolves to the same digest already installed (#1572). */
+	localDigests?: string[];
 }
 
 /**
@@ -3850,26 +4082,33 @@ export async function checkImageUpdateAvailable(
 		// a digest we don't have, an update is available. If the registry can't
 		// resolve it (404 / unreachable / truly local), THEN treat it as local.
 		if (localDigests.length === 0) {
-			const registryDigest = await getRegistryManifestDigest(imageName);
+			const registryDigest = await getRegistryManifestDigest(imageName, envId);
 			const { hasUpdate, isLocalImage, registryDigest: rd } = classifyEmptyDigestImage(registryDigest);
+			if (hasUpdate && rd) {
+				const remaining = await imageCooldownRemainingMs(imageName, rd, envId);
+				if (remaining > 0) return { hasUpdate: false, currentDigest: currentImageId, registryDigest: rd, releaseAgeRemainingHours: Math.ceil(remaining / 3600000) };
+			}
 			return { hasUpdate, isLocalImage, currentDigest: currentImageId, registryDigest: rd };
 		}
 
 		// Query registry for current manifest digest
-		const registryDigest = await getRegistryManifestDigest(imageName);
+		const { digest: registryDigest, reason: registryFailure } = await getRegistryManifestDigestDetailed(imageName, envId);
 
 		if (!registryDigest) {
-			// Registry unreachable or image not found - can't determine update status
+			// Registry unreachable or image not found - can't determine update status.
+			// Still return localDigests: the semver check may run on the API path
+			// regardless of this error and needs them to suppress a same-digest tag.
 			return {
 				hasUpdate: false,
 				currentDigest: currentRepoDigests[0],
-				error: 'Could not query registry'
+				localDigests,
+				error: registryFailure ?? 'Could not query registry'
 			};
 		}
 
 		// Check if registry digest matches ANY of the local digests
 		if (localDigests.includes(registryDigest)) {
-			return { hasUpdate: false, currentDigest: currentRepoDigests[0] };
+			return { hasUpdate: false, currentDigest: currentRepoDigests[0], localDigests };
 		}
 
 		// The HEAD digest (always the manifest-list/index digest) didn't match. Before
@@ -3877,17 +4116,27 @@ export async function checkImageUpdateAvailable(
 		// child digest won't equal the index digest even when the image is current
 		// (#1367). Best-effort GET of the index; on any failure hasUpdate stays true.
 		if (await localDigestMatchesRegistryChild(imageName, localDigests)) {
-			return { hasUpdate: false, currentDigest: currentRepoDigests[0] };
+			return { hasUpdate: false, currentDigest: currentRepoDigests[0], localDigests };
+		}
+		const remaining = await imageCooldownRemainingMs(imageName, registryDigest, envId);
+		if (remaining > 0) {
+			return { hasUpdate: false, currentDigest: currentRepoDigests[0], registryDigest, localDigests, releaseAgeRemainingHours: Math.ceil(remaining / 3600000) };
 		}
 
 		return {
 			hasUpdate: true,
 			currentDigest: currentRepoDigests[0],
-			registryDigest
+			registryDigest,
+			localDigests
 		};
 	} catch (e: any) {
 		return { hasUpdate: false, error: e.message };
 	}
+}
+
+async function imageCooldownRemainingMs(imageName: string, digest: string, envId?: number): Promise<number> {
+	const { hours } = await getMinimumReleaseAgeConfig(envId);
+	return hours > 0 ? imageReleaseAgeRemainingMs(imageName, digest, hours, persisted => getRegistryImageCreatedAt(imageName, digest, envId, undefined, persisted), envId) : 0;
 }
 
 export async function tagImage(id: string, repo: string, tag: string, envId?: number | null) {
@@ -4043,12 +4292,21 @@ export async function exportImage(id: string, envId?: number | null): Promise<Re
 }
 
 // System information
+/** The `/info` fields callers read; the daemon returns many more. */
+export type DockerInfo = {
+	Driver?: string;
+	DriverStatus?: [string, string][];
+	DockerRootDir?: string;
+	ServerVersion?: string;
+	[key: string]: unknown;
+};
+
 export async function getDockerInfo(envId?: number | null) {
-	return dockerJsonRequest('/info', {}, envId);
+	return dockerJsonRequest<DockerInfo>('/info', {}, envId);
 }
 
 export async function getDockerVersion(envId?: number | null) {
-	return dockerJsonRequest('/version', {}, envId);
+	return dockerJsonRequest<{ ApiVersion?: string; Version?: string }>('/version', {}, envId);
 }
 
 /**
@@ -4073,10 +4331,11 @@ export async function getNegotiatedApiVersion(envId: number): Promise<string | n
  * Used by the circuit breaker to probe offline environments.
  */
 export async function dockerPing(envId: number): Promise<boolean> {
+	// Edge connections go WebSocket -> agent -> Docker daemon, which adds latency on slow
+	// hosts. Use a longer timeout for edge to avoid false negatives on overloaded NAS/VPS
+	// devices. Declared out here so the catch below can name the host in its warning.
+	const config = await getDockerConfig(envId).catch(() => null);
 	try {
-		// Edge connections go WebSocket → agent → Docker daemon, which adds latency on slow hosts.
-		// Use a longer timeout for edge to avoid false negatives on overloaded NAS/VPS devices.
-		const config = await getDockerConfig(envId).catch(() => null);
 		const timeoutMs = config?.connectionType === 'hawser-edge' ? 20000 : 5000;
 		const response = await dockerFetch('/_ping', {
 			signal: AbortSignal.timeout(timeoutMs)
@@ -4825,6 +5084,59 @@ export async function execInContainer(
 	return output;
 }
 
+/**
+ * One-shot exec that returns the result instead of throwing on a non-zero exit -
+ * argv in, { stdout, stderr, exitCode } out. Separate from execInContainer, whose
+ * throw-on-failure contract many internal callers rely on.
+ */
+export async function runExecInContainer(
+	containerId: string,
+	cmd: string[],
+	envId?: number | null,
+	options?: { user?: string | null; workingDir?: string | null }
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+	const execBody: any = {
+		Cmd: cmd,
+		AttachStdout: true,
+		AttachStderr: true,
+		Tty: false
+	};
+	if (options?.user) execBody.User = options.user;
+	if (options?.workingDir) execBody.WorkingDir = options.workingDir;
+
+	const execCreate = await dockerJsonRequest<{ Id: string }>(
+		`/containers/${containerId}/exec`,
+		{ method: 'POST', body: JSON.stringify(execBody) },
+		envId
+	);
+
+	const response = await dockerFetch(
+		`/exec/${execCreate.Id}/start`,
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ Detach: false, Tty: false })
+		},
+		envId
+	);
+
+	if (!response.ok) await throwDockerError(response);
+
+	const buffer = Buffer.from(await response.arrayBuffer());
+	const { stdout, stderr } = demuxDockerStream(buffer, { separateStreams: true }) as {
+		stdout: string;
+		stderr: string;
+	};
+
+	const execInfo = await dockerJsonRequest<{ ExitCode: number | null }>(
+		`/exec/${execCreate.Id}/json`,
+		{},
+		envId
+	);
+
+	return { stdout, stderr, exitCode: execInfo.ExitCode ?? 0 };
+}
+
 // Get Docker events as a stream (for SSE)
 // For streaming mode: call with just filters
 // For polling mode: call with since and until to get a finite window of events
@@ -5047,9 +5359,15 @@ export async function runContainerWithStreaming(options: {
 		HostConfig: {
 			Binds: options.binds || [],
 			AutoRemove: false,
+			// No log rotation: a helper's stdout IS its result, read via /logs after it
+			// exits. An empty Config inherits the daemon's default rotation (Synology sets
+			// max-size=10m,max-file=3), and a scanner writing a large JSON report line by
+			// line blows past the window - the head rotates away and /logs returns a
+			// truncated, mid-document buffer (#1496). One big file, no rotation; the log
+			// dies with the ephemeral container so it never accumulates on disk.
 			LogConfig: {
 				Type: 'json-file',
-				Config: {}
+				Config: { 'max-file': '1', 'max-size': '1g' }
 			}
 		}
 	};
@@ -5143,14 +5461,22 @@ export async function runContainerWithStreaming(options: {
 					try {
 						const insp = await dockerFetch(`/containers/${containerId}/json`, {}, options.envId);
 						if (insp.ok) {
-							const data = await insp.json() as { State?: { Status?: string; Running?: boolean; Dead?: boolean; ExitCode?: number } };
+							const data = await insp.json() as { State?: { Status?: string; Running?: boolean; Dead?: boolean; ExitCode?: number; Error?: string } };
 							const st = data.State;
-							if (st && st.Running === false && st.Status === 'exited' && typeof st.ExitCode === 'number') {
-								exitCode = st.ExitCode;
-								console.log(`[runContainerWithStreaming] Container exited with code: ${exitCode} (poll mode)`);
+							// Resolves for a normal `exited` AND for a container the daemon left
+							// terminally `created`/`dead` after a start failure (e.g. Docker 29.x
+							// exit 128 "failed to mount overlay: device or resource busy", #1487) -
+							// otherwise the unbounded poll waits forever for an `exited` that never comes.
+							const resolved = helperExitFromState(st);
+							if (resolved !== undefined) {
+								exitCode = resolved;
+								console.log(`[runContainerWithStreaming] Container exited with code: ${exitCode} (poll mode, status=${st?.Status})`);
 								break;
 							}
-							if (st?.Dead || st?.Status === 'removing') break; // gone -> fail-closed diagnostics below
+							// A `dead`/`removing` container that helperExitFromState didn't resolve
+							// (e.g. dead with a 0 exit and no Error) is still terminal - break to the
+							// fail-closed diagnostics rather than polling it to the deadline.
+							if (st?.Dead || st?.Status === 'removing') break;
 						} else if (insp.status === 404) {
 							console.warn(`[runContainerWithStreaming] Poll: ${options.name ?? containerId.slice(0, 12)} not found (404) — container removed`);
 							break;
@@ -5202,9 +5528,10 @@ export async function runContainerWithStreaming(options: {
 								StartedAt: st?.StartedAt, FinishedAt: st?.FinishedAt, Pid: st?.Pid,
 							})}`
 						);
-						if (st && st.Running === false && st.Status === 'exited' && typeof st.ExitCode === 'number') {
-							exitCode = st.ExitCode;
-							console.log(`[runContainerWithStreaming] Resolved exit code via inspect: ${exitCode}`);
+						const resolved = helperExitFromState(st);
+						if (resolved !== undefined) {
+							exitCode = resolved;
+							console.log(`[runContainerWithStreaming] Resolved exit code via inspect: ${exitCode} (status=${st?.Status})`);
 						}
 					} else {
 						console.warn(`[runContainerWithStreaming] EXIT-CODE INDETERMINATE for ${options.name ?? containerId.slice(0, 12)}: inspect returned HTTP ${insp.status} (container may already be gone/removed)`);
@@ -5293,6 +5620,10 @@ async function streamLocalStderr(
 	onStdout?: (data: string) => void
 ): Promise<void> {
 	const wantStdout = onStdout ? 'true' : 'false';
+	// The abort signal cancels the READER on container exit (below), NOT the fetch itself:
+	// aborting the fetch surfaces as a thrown "operation aborted" that a caller without a
+	// .catch (restore redeploy) reads as a real failure. A pre-header stall is already
+	// bounded by undici's default headersTimeout, so the fetch needs no signal.
 	const response = await dockerFetch(
 		`/containers/${containerId}/logs?stdout=${wantStdout}&stderr=true&follow=true`,
 		{ streaming: true },
@@ -5305,7 +5636,7 @@ async function streamLocalStderr(
 	if (!reader) return;
 
 	// Cancel reader when abort signal fires (container exited)
-	signal?.addEventListener('abort', () => reader.cancel(), { once: true });
+	cancelReaderOnAbort(reader, signal);
 
 	try {
 		let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
@@ -5368,7 +5699,7 @@ async function streamEdgeStderr(
 }
 
 // Extract stdout from a buffer, with raw fallback if frame parsing returns nothing.
-// Mirrors demuxDockerStream's fallback (line ~202-205) for non-multiplexed Docker output.
+// Mirrors demuxDockerStream's invalid-frame fallback in docker-demux-core.ts for non-multiplexed Docker output.
 function extractStdoutFromBuffer(buffer: Buffer): string {
 	const result = processStreamFrames(buffer, undefined, undefined);
 
@@ -6027,9 +6358,26 @@ export async function chmodContainerPath(
 		throw new Error('Invalid chmod mode');
 	}
 
-	// Build command
-	const cmd = recursive ? ['chmod', '-R', mode, safePath] : ['chmod', mode, safePath];
+	// Build command. `--` stops chmod reading a path that begins with `-` as an option.
+	const cmd = recursive ? ['chmod', '-R', mode, '--', safePath] : ['chmod', mode, '--', safePath];
 	await execInContainer(containerId, cmd, envId);
+}
+
+/**
+ * chown a path in a container. `owner` must already be validated
+ * (parseChownSpec) - a `user`, `user:group`, `uid` or `uid:gid` token.
+ */
+export async function chownContainerPath(
+	containerId: string,
+	path: string,
+	owner: string,
+	recursive: boolean = false,
+	envId?: number | null
+): Promise<void> {
+	const safePath = path.replace(/[;&|`$(){}[\]<>'"\\]/g, '');
+	// `--` stops chown reading a path that begins with `-` as an option.
+	const cmd = recursive ? ['chown', '-R', owner, '--', safePath] : ['chown', owner, '--', safePath];
+	await execInContainer(containerId, cmd, envId, 'root');
 }
 
 // Volume browsing and export helpers

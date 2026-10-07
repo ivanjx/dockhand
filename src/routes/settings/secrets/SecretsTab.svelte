@@ -13,6 +13,7 @@
 		PlugZap,
 		RefreshCw,
 		Check,
+		Star,
 	} from 'lucide-svelte';
 	import { scale } from 'svelte/transition';
 	import { backOut, cubicIn } from 'svelte/easing';
@@ -30,10 +31,18 @@
 	let showModal = $state(false);
 	let editing = $state<SecretProvider | null>(null);
 	let confirmDeleteId = $state<number | null>(null);
+	// Stacks bound to the provider whose delete popover is open, so we can warn the
+	// user that deleting it unbinds them (#1522). Keyed by nothing - only one popover is
+	// open at a time.
+	let deleteAffectedStacks = $state<Array<{ stackName: string; environmentId: number | null }>>([]);
+	let loadingAffected = $state(false);
 	let testingId = $state<number | null>(null);
 	// Brief green tick on the tile's Test button right after a successful test.
 	let testOkId = $state<number | null>(null);
 	let testOkTimer: ReturnType<typeof setTimeout> | undefined;
+	// Preselected on new stacks. Null = none, so every stack picks its own (#1609).
+	let defaultProviderId = $state<number | null>(null);
+	let savingDefaultId = $state<number | null>(null);
 
 	async function fetchProviders() {
 		loading = true;
@@ -48,9 +57,64 @@
 		}
 	}
 
+	async function fetchDefaultProvider() {
+		try {
+			const response = await fetch('/api/secret-providers/default');
+			if (!response.ok) return;
+			const data = await response.json();
+			defaultProviderId = data.providerId ?? null;
+		} catch (e) {
+			console.warn('Failed to load the default secret provider:', e);
+		}
+	}
+
+	// Star the provider, or un-star it to go back to no default.
+	async function toggleDefault(provider: SecretProvider) {
+		const next = defaultProviderId === provider.id ? null : provider.id;
+		savingDefaultId = provider.id;
+		try {
+			const response = await fetch('/api/secret-providers/default', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ providerId: next }),
+			});
+			const data = await response.json();
+			if (!response.ok) {
+				toast.error(data.error || 'Failed to save the default secret provider');
+				return;
+			}
+			defaultProviderId = data.providerId ?? null;
+			toast.success(
+				next === null
+					? 'No default secret provider'
+					: `${provider.name} is now the default for new stacks`,
+			);
+		} catch {
+			toast.error('Failed to save the default secret provider');
+		} finally {
+			savingDefaultId = null;
+		}
+	}
+
 	function openModal(provider?: SecretProvider) {
 		editing = provider || null;
 		showModal = true;
+	}
+
+	async function loadAffectedStacks(id: number) {
+		loadingAffected = true;
+		deleteAffectedStacks = [];
+		try {
+			const res = await fetch(`/api/secret-providers/${id}`);
+			if (res.ok) {
+				const data = await res.json();
+				deleteAffectedStacks = data.stacksUsing ?? [];
+			}
+		} catch {
+			// Non-fatal: the confirmation still works, just without the stack list.
+		} finally {
+			loadingAffected = false;
+		}
 	}
 
 	async function deleteProvider(id: number) {
@@ -60,6 +124,9 @@
 			});
 			if (response.ok) {
 				await fetchProviders();
+				// Deleting the default leaves the stored id dangling; the API resolves
+				// it against the live list, so re-read rather than assuming.
+				if (defaultProviderId === id) await fetchDefaultProvider();
 				toast.success('Secret provider deleted');
 			} else {
 				const data = await response.json();
@@ -97,6 +164,7 @@
 
 	onMount(() => {
 		fetchProviders();
+		fetchDefaultProvider();
 	});
 </script>
 
@@ -141,6 +209,15 @@
 									<Card.Title class="text-base"
 										>{provider.name}</Card.Title
 									>
+									{#if defaultProviderId === provider.id}
+										<Badge
+											variant="outline"
+											class="text-xs gap-1 border-amber-500/50 text-amber-600 dark:text-amber-400"
+										>
+											<Star class="w-3 h-3 fill-current" />
+											Default
+										</Badge>
+									{/if}
 								</div>
 								<Badge variant="secondary" class="text-xs"
 									>{providerTypeLabel(provider.type)}</Badge
@@ -180,6 +257,23 @@
 									<Button
 										variant="outline"
 										size="sm"
+										onclick={() => toggleDefault(provider)}
+										disabled={savingDefaultId === provider.id}
+										title={defaultProviderId === provider.id
+											? 'Stop preselecting this provider on new stacks'
+											: 'Preselect this provider on new stacks'}
+										class={defaultProviderId === provider.id
+											? 'border-amber-500/50 text-amber-600 dark:text-amber-400'
+											: ''}
+									>
+										<Star
+											class="w-3 h-3 mr-1 {defaultProviderId === provider.id ? 'fill-current' : ''}"
+										/>
+										{defaultProviderId === provider.id ? 'Default' : 'Make default'}
+									</Button>
+									<Button
+										variant="outline"
+										size="sm"
 										onclick={() => openModal(provider)}
 									>
 										<Pencil class="w-3 h-3" />
@@ -193,12 +287,14 @@
 										itemName={provider.name}
 										title="Remove"
 										position="left"
+										autoHideMs={0}
 										onConfirm={() =>
 											deleteProvider(provider.id)}
-										onOpenChange={(open) =>
-											(confirmDeleteId = open
-												? provider.id
-												: null)}
+										onOpenChange={(open) => {
+											confirmDeleteId = open ? provider.id : null;
+											if (open) loadAffectedStacks(provider.id);
+											else deleteAffectedStacks = [];
+										}}
 									>
 										{#snippet children({ open })}
 											<Trash2
@@ -206,6 +302,20 @@
 													? 'text-destructive'
 													: 'text-muted-foreground hover:text-destructive'}"
 											/>
+										{/snippet}
+										{#snippet extraContent()}
+											{#if loadingAffected}
+												<p class="text-xs text-muted-foreground">Checking which stacks use this provider...</p>
+											{:else if deleteAffectedStacks.length > 0}
+												<p class="text-xs text-amber-600 dark:text-amber-500">
+													This unbinds {deleteAffectedStacks.length} stack{deleteAffectedStacks.length === 1 ? '' : 's'}; their next deploy drops the injected secrets:
+												</p>
+												<ul class="mt-1 text-xs text-muted-foreground list-disc list-inside max-h-24 overflow-y-auto">
+													{#each deleteAffectedStacks as s}
+														<li>{s.stackName}</li>
+													{/each}
+												</ul>
+											{/if}
 										{/snippet}
 									</ConfirmPopover>
 								{/if}

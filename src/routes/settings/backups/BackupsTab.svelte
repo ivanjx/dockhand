@@ -4,9 +4,10 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Input } from '$lib/components/ui/input';
+	import { SearchInput } from '$lib/components/ui/search-input';
 	import * as Select from '$lib/components/ui/select';
 	import { DataGrid } from '$lib/components/data-grid';
-	import { Plus, Trash2, Pencil, HardDrive, Server, CheckCircle, XCircle, AlertCircle, Wifi, Database, RefreshCw, Search, FolderSync, Archive, Loader2, Save, CircleHelp, Unlock, PackageCheck, Eraser, BarChart3, Wrench, FolderCheck, KeyRound } from 'lucide-svelte';
+	import { Plus, Trash2, Pencil, HardDrive, Server, CheckCircle, XCircle, AlertCircle, Wifi, Database, RefreshCw, FolderSync, Archive, Loader2, Save, CircleHelp, Unlock, PackageCheck, Eraser, BarChart3, Wrench, FolderCheck, KeyRound } from 'lucide-svelte';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import { Label } from '$lib/components/ui/label';
 	import { appSettings } from '$lib/stores/settings';
@@ -15,6 +16,10 @@
 	import { formatDateTime, formatRelativeTime } from '$lib/stores/settings';
 	import { FolderOpen, Box, Layers, FileStack, Camera, ChevronRight, ChevronDown } from 'lucide-svelte';
 	import { formatBytes } from '$lib/utils/format';
+	import { Checkbox } from '$lib/components/ui/checkbox';
+	import { bulkDeleteSnapshots, bulkDeleteToast, bulkDeleteFailure } from '$lib/utils/backup';
+	import BulkDeleteSnapshotsDialog from '$lib/components/BulkDeleteSnapshotsDialog.svelte';
+	import BulkDeleteErrorDialog from '$lib/components/BulkDeleteErrorDialog.svelte';
 	import EnvironmentIcon from '$lib/components/EnvironmentIcon.svelte';
 	import { LoadingState } from '$lib/components/ui/loading-state';
 	import { getRepoTypeIcon, getRepoTypeLabel } from '$lib/utils/backup';
@@ -85,7 +90,9 @@
 		const s = new Set(loadingStats); s.add(destId); loadingStats = s;
 		try {
 			const res = await fetch(`/api/backup/destinations/${destId}/task`, {
-				method: 'POST', headers: { 'Content-Type': 'application/json' },
+				// Accept: json makes the job endpoint run the read synchronously and return
+				// {success, stats} instead of {jobId} (which this call doesn't poll).
+				method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
 				body: JSON.stringify({ task: 'stats' })
 			});
 			const data = await res.json();
@@ -198,7 +205,8 @@
 		if (task === 'stats') {
 			try {
 				const res = await fetch(`/api/backup/destinations/${destId}/task`, {
-					method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ task })
+					// Accept: json runs the read synchronously so we get {success, stats}, not {jobId}.
+					method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ task })
 				});
 				const data = await res.json();
 				if (data.success && data.stats) {
@@ -278,6 +286,53 @@
 	let browseDestRepo = $state('');
 	let browseSnapshots = $state<any[]>([]);
 	let browseLoading = $state(false);
+
+	// Multi-select bulk delete for the repo browser (shared helper + dialog). All snapshots
+	// here belong to the one browsed destination (browseDestId).
+	let selectedSnapshots = $state<Set<string>>(new Set());
+	let bulkDialogOpen = $state(false);
+	let bulkDeleting = $state(false);
+	let bulkDeleteErrorOpen = $state(false);
+	let bulkDeleteError = $state('');
+	let bulkDeleteErrorDeleted = $state(0);
+	function toggleSnapshotSel(id: string) {
+		const next = new Set(selectedSnapshots);
+		if (next.has(id)) next.delete(id); else next.add(id);
+		selectedSnapshots = next;
+	}
+	function toggleGroupAll(snaps: any[]) {
+		const all = snaps.length > 0 && snaps.every((s) => selectedSnapshots.has(s.id));
+		const next = new Set(selectedSnapshots);
+		if (all) for (const s of snaps) next.delete(s.id);
+		else for (const s of snaps) next.add(s.id);
+		selectedSnapshots = next;
+	}
+	async function bulkDeleteBrowsed() {
+		const targets = browseSnapshots
+			.filter((s) => selectedSnapshots.has(s.id))
+			.map((s) => ({ id: s.id, _destinationId: browseDestId }));
+		if (targets.length === 0) return;
+		bulkDeleting = true;
+		try {
+			const result = await bulkDeleteSnapshots(targets);
+			const failure = bulkDeleteFailure(result);
+			if (failure) {
+				bulkDeleteError = failure.error;
+				bulkDeleteErrorDeleted = failure.deleted;
+				bulkDeleteErrorOpen = true;
+			} else {
+				const t = bulkDeleteToast(result);
+				toast[t.type](t.message);
+			}
+			selectedSnapshots = new Set();
+			const dest = destinations.find((d) => d.id === browseDestId);
+			if (dest) await browseDestination(dest);
+		} finally {
+			bulkDeleting = false;
+			bulkDialogOpen = false;
+		}
+	}
+	const browseSelectedCount = $derived(browseSnapshots.filter((s) => selectedSnapshots.has(s.id)).length);
 
 	function snapName(snap: any): string {
 		return (snap.tags || []).find((t: string) => t.startsWith('dockhand:name='))?.replace('dockhand:name=', '') || '';
@@ -367,6 +422,7 @@
 		browseDestName = dest.name;
 		browseDestRepo = dest.repository;
 		browseSnapshots = [];
+		selectedSnapshots = new Set(); // don't carry a prior destination's selection over
 		browseOpen = true;
 		browseLoading = true;
 		try {
@@ -533,14 +589,7 @@
 
 	<div class="flex justify-between items-center">
 		<div class="flex items-center gap-3">
-			<div class="relative">
-				<Search class="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-				<Input
-					bind:value={searchQuery}
-					placeholder="Filter destinations..."
-					class="pl-9 h-8 w-64 text-sm"
-				/>
-			</div>
+			<SearchInput bind:value={searchQuery} placeholder="Filter destinations..." class="h-8 w-64 text-sm" />
 			<Select.Root type="single" value={statusFilter} onValueChange={(v) => statusFilter = (v as typeof statusFilter) ?? 'all'}>
 				<Select.Trigger class="h-8 w-40 text-sm">
 					{statusFilter === 'success' ? 'Initialized' : statusFilter === 'needs_init' ? 'Needs init' : statusFilter === 'failed' ? 'Failed' : 'All statuses'}
@@ -771,9 +820,14 @@
 			</Dialog.Title>
 		</Dialog.Header>
 		{#if !browseLoading && browseSnapshots.length > 0}
-			<div class="flex gap-2 pb-3 flex-shrink-0">
+			<div class="flex items-center gap-2 pb-3 flex-shrink-0">
 				<Input bind:value={browseFilterName} placeholder="Filter by name..." class="h-8 max-w-xs" />
 				<Input bind:value={browseFilterEnv} placeholder="Filter by environment..." class="h-8 max-w-xs" />
+				{#if browseSelectedCount > 0}
+					<button type="button" class="ml-auto inline-flex items-center gap-1.5 rounded-md border border-destructive/40 px-2.5 py-1 text-xs text-destructive transition-colors hover:bg-destructive/10" onclick={() => (bulkDialogOpen = true)}>
+						<Trash2 class="h-3 w-3" /> Delete selected ({browseSelectedCount})
+					</button>
+				{/if}
 			</div>
 		{/if}
 		<div class="flex-1 min-h-0">
@@ -841,6 +895,14 @@
 								<Table.Root>
 									<Table.Header class="sticky top-0 z-10 bg-background">
 										<Table.Row>
+											<Table.Head class="w-8 py-1.5" style="padding-left:8px">
+												<Checkbox
+													checked={group.snapshots.length > 0 && group.snapshots.every((s) => selectedSnapshots.has(s.id))}
+													indeterminate={group.snapshots.some((s) => selectedSnapshots.has(s.id)) && !group.snapshots.every((s) => selectedSnapshots.has(s.id))}
+													onCheckedChange={() => toggleGroupAll(group.snapshots)}
+													aria-label="Select all snapshots"
+												/>
+											</Table.Head>
 											<Table.Head class="w-28 py-1.5 text-xs" style="padding-left:8px">ID</Table.Head>
 											<Table.Head class="py-1.5 text-xs" style="padding-left:8px">Created</Table.Head>
 											<Table.Head class="w-16 py-1.5 text-xs text-right" style="padding-right:8px">Browse</Table.Head>
@@ -848,13 +910,16 @@
 									</Table.Header>
 									<Table.Body>
 										{#each group.snapshots as snap}
-											<Table.Row class="cursor-pointer hover:bg-muted/50" onclick={() => { snapshotBrowseDestId = browseDestId; snapshotBrowseId = snap.id; snapshotBrowseName = group.name; snapshotBrowseOpen = true; }}>
-												<Table.Cell class="font-mono text-xs text-muted-foreground py-1" style="padding-left:8px">{snap.shortId}</Table.Cell>
+											<Table.Row class="hover:bg-muted/50 {selectedSnapshots.has(snap.id) ? 'bg-primary/5' : ''}">
+												<Table.Cell class="py-1" style="padding-left:8px" onclick={(e) => e.stopPropagation()}>
+													<Checkbox checked={selectedSnapshots.has(snap.id)} onCheckedChange={() => toggleSnapshotSel(snap.id)} aria-label="Select snapshot {snap.shortId}" />
+												</Table.Cell>
+												<Table.Cell class="cursor-pointer font-mono text-xs text-muted-foreground py-1" style="padding-left:8px" onclick={() => { snapshotBrowseDestId = browseDestId; snapshotBrowseId = snap.id; snapshotBrowseName = group.name; snapshotBrowseOpen = true; }}>{snap.shortId}</Table.Cell>
 												<Table.Cell class="text-xs py-1" style="padding-left:8px">{formatDateTime(snap.time)} <span class="text-muted-foreground opacity-60">({formatRelativeTime(snap.time)})</span></Table.Cell>
 												<Table.Cell class="text-right py-1">
-													<span class="inline-flex p-1 rounded hover:bg-muted transition-colors text-muted-foreground" title="Browse snapshot content">
+													<button type="button" class="inline-flex p-1 rounded hover:bg-muted transition-colors text-muted-foreground" title="Browse snapshot content" onclick={(e) => { e.stopPropagation(); snapshotBrowseDestId = browseDestId; snapshotBrowseId = snap.id; snapshotBrowseName = group.name; snapshotBrowseOpen = true; }}>
 														<FolderOpen class="w-3.5 h-3.5" />
-													</span>
+													</button>
 												</Table.Cell>
 											</Table.Row>
 										{/each}
@@ -871,6 +936,9 @@
 		</Dialog.Footer>
 	</Dialog.Content>
 </Dialog.Root>
+
+<BulkDeleteSnapshotsDialog bind:open={bulkDialogOpen} count={browseSelectedCount} busy={bulkDeleting} onConfirm={bulkDeleteBrowsed} />
+<BulkDeleteErrorDialog bind:open={bulkDeleteErrorOpen} error={bulkDeleteError} deleted={bulkDeleteErrorDeleted} />
 
 <SnapshotBrowser
 	bind:open={snapshotBrowseOpen}

@@ -10,10 +10,23 @@ type InspectMountLike = {
 	Destination?: string | null;
 };
 
-/** Destination path of a bind string ("src:/dst:ro" -> "/dst", "/dst" -> "/dst"). */
+/**
+ * Canonical form of a mount target for comparison. Docker treats "/var/log/" and
+ * "/var/log" as the SAME mount point and rejects a create carrying both ("Duplicate
+ * mount point"), but it normalizes a mount's Destination in inspect (strips the trailing
+ * slash) while leaving the user's Binds string as typed. So a user bind "vol:/var/log/"
+ * and the same volume's inspect Destination "/var/log" must compare equal here, or dedup
+ * misses the collision and recreate sends both (#583). Strip trailing slashes; keep root "/".
+ */
+export function normalizeMountTarget(target: string): string {
+	const stripped = target.replace(/\/+$/, '');
+	return stripped === '' ? '/' : stripped;
+}
+
+/** Destination path of a bind string ("src:/dst:ro" -> "/dst", "/dst" -> "/dst"), normalized. */
 function bindTarget(bind: string): string {
 	const parts = bind.split(':');
-	return parts.length >= 2 ? parts[1] : parts[0];
+	return normalizeMountTarget(parts.length >= 2 ? parts[1] : parts[0]);
 }
 
 /**
@@ -32,15 +45,15 @@ export function dedupeVolumesForRecreate(
 ): Record<string, unknown> | undefined {
 	if (!volumes) return undefined;
 	const mounted = new Set<string>();
-	for (const p of Object.keys(hostConfig.Tmpfs || {})) mounted.add(p);
+	for (const p of Object.keys(hostConfig.Tmpfs || {})) mounted.add(normalizeMountTarget(p));
 	for (const b of hostConfig.Binds || []) mounted.add(bindTarget(b));
 	for (const b of additionalBinds) mounted.add(bindTarget(b));
-	for (const m of hostConfig.Mounts || []) { if (m?.Target) mounted.add(m.Target); }
-	for (const m of mounts || []) { if (m.Destination) mounted.add(m.Destination); }
+	for (const m of hostConfig.Mounts || []) { if (m?.Target) mounted.add(normalizeMountTarget(m.Target)); }
+	for (const m of mounts || []) { if (m.Destination) mounted.add(normalizeMountTarget(m.Destination)); }
 
 	const kept: Record<string, unknown> = {};
 	for (const [path, val] of Object.entries(volumes)) {
-		if (!mounted.has(path)) kept[path] = val;
+		if (!mounted.has(normalizeMountTarget(path))) kept[path] = val;
 	}
 	return Object.keys(kept).length > 0 ? kept : undefined;
 }
@@ -50,19 +63,16 @@ export function getAdditionalVolumeBinds(
 	hostConfig: HostConfigLike,
 	mounts: InspectMountLike[]
 ): string[] {
-	const existingMountTargets = new Set((hostConfig.Binds || []).map((bind: string) => {
-		const parts = bind.split(':');
-		return parts.length >= 2 ? parts[1] : parts[0];
-	}));
+	const existingMountTargets = new Set((hostConfig.Binds || []).map(bindTarget));
 
 	for (const mount of hostConfig.Mounts || []) {
-		if (mount?.Target) existingMountTargets.add(mount.Target);
+		if (mount?.Target) existingMountTargets.add(normalizeMountTarget(mount.Target));
 	}
 
 	const additionalBinds: string[] = [];
 	for (const mount of mounts || []) {
 		if (mount.Type === 'volume' && mount.Name && mount.Destination) {
-			if (!existingMountTargets.has(mount.Destination)) {
+			if (!existingMountTargets.has(normalizeMountTarget(mount.Destination))) {
 				additionalBinds.push(`${mount.Name}:${mount.Destination}`);
 			}
 		}

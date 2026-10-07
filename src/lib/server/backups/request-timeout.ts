@@ -19,10 +19,15 @@ export interface RequestTimeoutInput {
 	composeTimeoutSecs?: number;
 }
 
+/** Prune endpoints get the long timeout; the query string (image prune filters) is ignored. #1630 */
+export function isPrunePath(path: string): boolean {
+	return path.split('?')[0].endsWith('/prune');
+}
+
 export function computeRequestTimeoutMs(input: RequestTimeoutInput): number | null {
 	// No idle timeout when either end streams: a large body upload or a long-lived response.
 	if (input.streamingBody || input.streamingResponse) return null;
 	if (input.path === '/_hawser/compose') return (input.composeTimeoutSecs ?? 900) * 1000;
-	if (input.path.endsWith('/prune')) return 300000;
+	if (isPrunePath(input.path)) return 300000;
 	return 30000;
 }

@@ -4,7 +4,7 @@
 	import { appSettings } from '$lib/stores/settings';
 	import { selfhstMatcher, ensureSelfhstMatcher } from '$lib/stores/selfhst-refs';
 	import { selfhstIcons, requestSelfhst } from '$lib/stores/selfhst-icons';
-	import { isSelfhstIcon, selfhstRef, isCustomIcon, getStackIconComponent } from '$lib/utils/icons';
+	import { isSelfhstIcon, selfhstRef, isCustomIcon, getStackIconComponent, isDockhandImage } from '$lib/utils/icons';
 
 	interface Props {
 		image: string;
@@ -62,6 +62,10 @@
 
 	// An explicit override wins over auto-matching (and the app-logo toggle).
 	const hasOverride = $derived(!!override);
+
+	// Dockhand's own container always shows the app mark (unless the user overrode it),
+	// regardless of the app-logo toggle - it is our own branding, not a selfh.st match.
+	const isSelf = $derived(!hasOverride && isDockhandImage(image));
 	const overrideSelfhst = $derived(selfhstRef(override));
 	const overrideCustom = $derived(isCustomIcon(override));
 	const customIconName = $derived(overrideKey ?? name);
@@ -100,7 +104,9 @@
 	const resolvedSelfhst = $derived(activeSelfhst ? $selfhstIcons[activeSelfhst] : undefined);
 </script>
 
-{#if activeSelfhst && resolvedSelfhst}
+{#if isSelf}
+	<img src="/dockhand-mark.svg" alt="Dockhand" class="{className} object-contain shrink-0" />
+{:else if activeSelfhst && resolvedSelfhst}
 	<img src={resolvedSelfhst} alt="" class="{className} object-contain shrink-0" />
 {:else if activeSelfhst && resolvedSelfhst === undefined}
 	<!-- batch in flight: hold the space so the row doesn't jump -->

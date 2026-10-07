@@ -7,6 +7,8 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { toast } from 'svelte-sonner';
+	import { containerMatchesSearch } from '$lib/utils/container-search-core';
+	import { containerDisplayName } from '$lib/utils/container-display-name';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import * as Popover from '$lib/components/ui/popover';
 	import * as Select from '$lib/components/ui/select';
@@ -22,6 +24,7 @@
 	import { Switch } from '$lib/components/ui/switch';
 	import { Label } from '$lib/components/ui/label';
 	import { Input } from '$lib/components/ui/input';
+	import { SearchInput } from '$lib/components/ui/search-input';
 	import {
 		Play,
 		Square,
@@ -33,12 +36,12 @@
 		NotepadText,
 		RefreshCw,
 		CircleArrowUp,
+		Clock,
 		X,
 		Terminal,
 		ArrowUpDown,
 		ArrowUp,
 		ArrowDown,
-		Search,
 		ExternalLink,
 		Globe,
 		LayoutPanelLeft,
@@ -62,14 +65,11 @@
 		Shield,
 		ShieldCheck,
 		Box,
-		Ship,
-		Cable,
 		Copy,
 		Loader2,
 		AlertCircle,
-		Unplug,
-		Tag
-	} from 'lucide-svelte';
+		Tag,
+		Unplug, Heart, HeartPulse, HeartOff } from 'lucide-svelte';
 	import { broom } from '@lucide/lab';
 	import { copyToClipboard } from '$lib/utils/clipboard';
 	import CreateContainerModal from './CreateContainerModal.svelte';
@@ -85,14 +85,25 @@
 	import VersionUpdateBadge from '$lib/components/VersionUpdateBadge.svelte';
 	import VersionUpdateModal from '$lib/components/VersionUpdateModal.svelte';
 	import type { ContainerInfo, TerminalMode } from '$lib/types';
+	import { matchesContainerHealthFilter, stateFilterValues } from '$lib/utils/grid-filters';
+	import { nextLogsSessions, panelsAfterRowClick, showsLogsIndicator } from '$lib/utils/active-logs-core';
+	import { matchesTagFilter, tagGroupDescriptor, mergeLabelTags, type Tag as UserTag, type TagColor, filterTagList, prunedTagFilter, withStackTags, stackLabelTags, mergeNamedTags } from '$lib/utils/tags-core';
+	import { isKnownIconName } from '$lib/utils/icons';
+	import { tagOrder } from '$lib/stores/tag-order';
+	import { applyOrder } from '$lib/utils/apply-order';
+	import TagChips from '$lib/components/TagChips.svelte';
+	import TagEditPopover from '$lib/components/TagEditPopover.svelte';
+	import TagFilter from '$lib/components/TagFilter.svelte';
+	import TagLucideIcon from '$lib/components/TagLucideIcon.svelte';
 	import { EmptyState, NoEnvironment } from '$lib/components/ui/empty-state';
 	import { currentEnvironment, environments, appendEnvParam, clearStaleEnvironment } from '$lib/stores/environment';
 	import { containerStore } from '$lib/stores/containers';
 	import { onDockerEvent, isContainerListChange } from '$lib/stores/events';
 	import { appSettings } from '$lib/stores/settings';
-	import { canAccess } from '$lib/stores/auth';
+	import { canAccess, isAdmin } from '$lib/stores/auth';
 	import { vulnerabilityCriteriaIcons } from '$lib/utils/update-steps';
 	import { compareIps } from '$lib/utils/ip';
+	import { formatUptime, parseUptimeToSeconds } from '$lib/utils/container-status';
 	import { formatHostPortUrl } from '$lib/utils/url';
 	import { parseCustomUrl } from '$lib/utils/custom-url';
 	import { extractTraefikUrls } from '$lib/utils/traefik-urls';
@@ -122,6 +133,203 @@
 		} catch {
 			iconOverrides = {};
 		}
+	}
+
+	// User-defined tags: assignments (name -> tagId[]) + the catalog.
+	let tagsMap = $state<Record<string, number[]>>({});
+	// Stack assignments, so a container can show what its stack carries. Inherited
+	// at read time rather than copied, so nothing has to be kept in sync.
+	let stackTagsMap = $state<Record<string, number[]>>({});
+	const INHERIT_STACK_TAGS_KEY = 'dockhand-containers-inherit-stack-tags';
+	let inheritStackTags = $state(
+		typeof window === 'undefined' || localStorage.getItem(INHERIT_STACK_TAGS_KEY) !== '0'
+	);
+	$effect(() => {
+		const v = inheritStackTags;
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(INHERIT_STACK_TAGS_KEY, v ? '1' : '0');
+	});
+	let tagCatalog = $state<UserTag[]>([]);
+	// The catalogue has actually been fetched. Until then the tag picker is only
+	// half-built, so a saved selection must not be measured against it.
+	let tagsLoaded = $state(false);
+	const tagById = $derived(new Map(tagCatalog.map((t) => [t.id, t])));
+	async function loadTags(forEnvId: number | null) {
+		try {
+			const [res, stackRes] = await Promise.all([
+				fetch(appendEnvParam('/api/container-tags', forEnvId)),
+				fetch(appendEnvParam('/api/stack-tags', forEnvId))
+			]);
+			tagsMap = res.ok ? await res.json() : {};
+			stackTagsMap = stackRes.ok ? await stackRes.json() : {};
+		} catch {
+			tagsMap = {};
+			stackTagsMap = {};
+		}
+	}
+	async function loadTagCatalog() {
+		// The catalogue is global, but the order it is shown and grouped in belongs
+		// to this user, so it is loaded alongside it - and again after a sign-in.
+		tagOrder.init();
+		// The tag catalog is global (not env-scoped); assignments load per env.
+		try {
+			const res = await fetch('/api/tags');
+			tagCatalog = res.ok ? (await res.json()).tags : [];
+		} catch {
+			tagCatalog = [];
+		}
+		tagsLoaded = true;
+		// Stale filter ids are dropped against filterTags, which knows the label
+		// tags on screen as well as the catalog.
+	}
+	// Tag filter, persisted per browser so it survives a refresh.
+	const TAG_FILTER_KEY = 'dockhand-containers-tag-filter';
+	const TAG_FILTER_MODE_KEY = 'dockhand-containers-tag-filter-mode';
+	let tagFilter = $state<number[]>(loadTagFilter());
+	let tagFilterMode = $state<'all' | 'any'>(loadTagFilterMode());
+	function loadTagFilter(): number[] {
+		if (typeof window === 'undefined') return [];
+		try { const s = localStorage.getItem(TAG_FILTER_KEY); return s ? JSON.parse(s) : []; } catch { return []; }
+	}
+	function loadTagFilterMode(): 'all' | 'any' {
+		if (typeof window === 'undefined') return 'any';
+		const s = localStorage.getItem(TAG_FILTER_MODE_KEY);
+		return s === 'all' || s === 'any' ? s : 'any';
+	}
+	$effect(() => {
+		const f = tagFilter, m = tagFilterMode;
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(TAG_FILTER_KEY, JSON.stringify(f));
+		localStorage.setItem(TAG_FILTER_MODE_KEY, m);
+	});
+	// Tags assigned in Dockhand, plus the ones the container names in its
+	// dockhand.tags label - so a container Dockhand never deployed is tagged too.
+	function tagsFor(container: { name: string; labels?: Record<string, string> }): UserTag[] {
+		const assigned = (tagsMap[container.name] ?? [])
+			.map((id) => tagById.get(id))
+			.filter((t): t is UserTag => !!t);
+		const own = mergeLabelTags(assigned, container.labels, tagCatalog, isKnownIconName);
+		if (!inheritStackTags) return own;
+		const stack = getComposeProject(container.labels);
+		if (!stack) return own;
+		const assignedToStack = (stackTagsMap[stack] ?? [])
+			.map((id) => tagById.get(id))
+			.filter((t): t is UserTag => !!t);
+		// A stack also carries whatever its services name in their labels, which is
+		// what the stacks page shows - inherit that too, or a service with no label
+		// of its own stays untagged under a stack the UI shows as tagged.
+		const fromStack = mergeNamedTags(
+			assignedToStack,
+			stackLabelTagsByProject[stack],
+			tagCatalog,
+			isKnownIconName
+		);
+		return withStackTags(own, fromStack);
+	}
+
+	// The label tags each compose project carries, unioned across its containers -
+	// the same rule listComposeStacks applies server-side, computed here from the
+	// rows already on screen rather than fetching the stacks.
+	const stackLabelTagsByProject = $derived.by(() => {
+		if (!inheritStackTags) return {} as Record<string, ReturnType<typeof stackLabelTags>>;
+		const byProject = new Map<string, Array<Record<string, string> | undefined>>();
+		for (const c of containers) {
+			const p = getComposeProject(c.labels);
+			if (!p) continue;
+			const list = byProject.get(p) ?? [];
+			list.push(c.labels);
+			byProject.set(p, list);
+		}
+		const out: Record<string, ReturnType<typeof stackLabelTags>> = {};
+		for (const [p, labels] of byProject) out[p] = stackLabelTags(labels);
+		return out;
+	});
+
+	// The filter lists the catalogue plus any tag only a label names, so a tag that
+	// lives in a label can still be filtered and grouped by.
+	const filterTags = $derived(filterTagList(tagCatalog, containers.map((c) => tagsFor(c))));
+
+	// Drop a selected tag the picker no longer offers - a deleted catalog tag, or a
+	// label tag whose last container is gone - so a filter can never empty the list
+	// with no visible cause. Waits for both the catalog and the rows: measuring a
+	// selection against a half-built picker would drop every valid id, and the
+	// result is persisted straight away.
+	$effect(() => {
+		tagFilter = prunedTagFilter(tagFilter, filterTags, tagsLoaded && containers.length > 0);
+	});
+
+	// Group-by-tag: partition rows by their unique tag COMBINATION (a container with
+	// prod+infra forms its own group, distinct from just prod). Persisted per browser.
+	const GROUP_BY_TAG_KEY = 'dockhand-containers-group-by-tag';
+	const COLLAPSED_GROUPS_KEY = 'dockhand-containers-collapsed-groups';
+	const SHOW_TAGS_KEY = 'dockhand-containers-show-tags';
+	const SHOW_BANDS_KEY = 'dockhand-containers-group-bands';
+	const INLINE_TAG_EDIT_KEY = 'dockhand-containers-inline-tag-editing';
+	const TAG_SETTINGS_EXPANDED_KEY = 'dockhand-containers-tag-settings-expanded';
+	// Show tag chips on rows (default true - only '0' hides them).
+	let showTags = $state(typeof window === 'undefined' || localStorage.getItem(SHOW_TAGS_KEY) !== '0');
+	// Coloured group bands (default true - only '0' hides them).
+	let showBands = $state(typeof window === 'undefined' || localStorage.getItem(SHOW_BANDS_KEY) !== '0');
+	// Show a tag-edit button on each row (default true - only '0' hides it).
+	let inlineTagEditing = $state(typeof window === 'undefined' || localStorage.getItem(INLINE_TAG_EDIT_KEY) !== '0');
+	// Tag-settings section open/closed (default open - only '0' collapses it).
+	let tagSettingsExpanded = $state(typeof window === 'undefined' || localStorage.getItem(TAG_SETTINGS_EXPANDED_KEY) !== '0');
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(SHOW_TAGS_KEY, showTags ? '1' : '0');
+	});
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(SHOW_BANDS_KEY, showBands ? '1' : '0');
+	});
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(INLINE_TAG_EDIT_KEY, inlineTagEditing ? '1' : '0');
+	});
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(TAG_SETTINGS_EXPANDED_KEY, tagSettingsExpanded ? '1' : '0');
+	});
+	let groupByTag = $state(typeof window !== 'undefined' && localStorage.getItem(GROUP_BY_TAG_KEY) === '1');
+	let collapsedGroups = $state<Set<string>>(loadCollapsedGroups());
+	function loadCollapsedGroups(): Set<string> {
+		if (typeof window === 'undefined') return new Set();
+		try { const s = localStorage.getItem(COLLAPSED_GROUPS_KEY); return new Set(s ? JSON.parse(s) : []); } catch { return new Set(); }
+	}
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(GROUP_BY_TAG_KEY, groupByTag ? '1' : '0');
+	});
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify([...collapsedGroups]));
+	});
+	// The order the tag lists actually show, so the groups read the same way:
+	// applyOrder decides where an unarranged tag sits, and this follows it.
+	const resolvedTagOrder = $derived(
+		applyOrder(tagCatalog, $tagOrder, (t) => t.id).map((t) => t.id)
+	);
+	const containerGroupBy = $derived(groupByTag ? (c: any) => tagGroupDescriptor(tagsFor(c), resolvedTagOrder) : undefined);
+	async function createTag(name: string, color: TagColor, icon: string | null): Promise<UserTag | null> {
+		try {
+			const res = await fetch('/api/tags', {
+				method: 'POST', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ name, color, icon })
+			});
+			if (!res.ok) return null;
+			const tag = await res.json();
+			await loadTagCatalog();
+			return tag;
+		} catch { return null; }
+	}
+	async function applyContainerTags(name: string, tagIds: number[]) {
+		tagsMap = { ...tagsMap, [name]: tagIds };
+		try {
+			await fetch(appendEnvParam(`/api/container-tags/${encodeURIComponent(name)}`, envId), {
+				method: 'PUT', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ tagIds })
+			});
+		} catch { /* optimistic; reload on next env switch */ }
 	}
 	const containerStats = $derived($containerStore.stats);
 	const autoUpdateSettings = $derived($containerStore.autoUpdateSettings);
@@ -229,12 +437,16 @@
 			// Refresh data (store handles loading state internally)
 			containerStore.refresh(newEnvId);
 			loadIconOverrides(newEnvId);
+			loadTags(newEnvId);
+			loadTagCatalog(); // global catalog; assignments come from loadTags
 		} else if (!env) {
 			// No environment - clear data and stop loading
 			envId = null;
 			shellDetectionCache = {};
 			containerStore.clear();
 			iconOverrides = {};
+			tagsMap = {};
+			tagCatalog = [];
 		}
 	});
 	let showCreateModal = $state(false);
@@ -348,13 +560,20 @@
 	const containersWithFailedCheckSet = $derived(new Set($containerStore.failedUpdateIds));
 	const failedUpdateErrors = $derived($containerStore.failedUpdateErrors);
 
+	// Hours left on a held update, keyed by container ID. Deliberately kept OUT of
+	// containersWithUpdatesSet: the cooldown is what stops the update, so offering it
+	// for a bulk update would promise something it blocks.
+	const coolingDownMap = $derived($containerStore.coolingDown);
+
 	// Any update indicator on the page - digest updates, newer-version tags, or failed
 	// checks. Drives the compact "dismiss all" (×) button.
 	const hasUpdateIndicators = $derived(
 		$containerStore.pendingUpdateIds.length > 0 ||
 		hasNewerVersions ||
+		coolingDownMap.size > 0 ||
 		$containerStore.failedUpdateIds.length > 0
 	);
+
 
 	// Newer-version-tag (semver) suggestions from the last check, keyed by container ID.
 	const newerVersionsMap = $derived($containerStore.newerVersions);
@@ -379,7 +598,12 @@
 					icon: Tag,
 					color: 'text-amber-500'
 				}]
-			: [])
+			: []),
+		// Always offered, unlike the entries above: the question "is anything
+		// unhealthy" is asked precisely when the answer is no.
+		{ value: 'health:unhealthy', label: 'Unhealthy', icon: HeartOff, color: 'text-red-500', colorLabel: true },
+		{ value: 'health:starting', label: 'Starting up', icon: Heart, color: 'text-amber-500' },
+		{ value: 'health:healthy', label: 'Healthy', icon: HeartPulse, color: 'text-emerald-500' }
 	]);
 
 	// Drop the 'update-available' filter when no pending updates remain —
@@ -526,6 +750,7 @@
 		withUpdates: Array<{ containerId: string; containerName: string }>;
 		failed?: Array<{ containerId: string; error: string }>;
 		newerVersions?: Array<{ containerId: string; newerVersion: import('$lib/server/semver/find-newer').NewerVersion }>;
+		coolingDown?: Map<string, number>;
 	}) {
 		if (result.withUpdates.length === 0) {
 			containerStore.setPendingUpdates([], new Map());
@@ -546,6 +771,9 @@
 		// Newer-version-tag (semver) suggestions — advisory badge, session-only.
 		const newer = result.newerVersions ?? [];
 		containerStore.setNewerVersions(new Map(newer.map((n) => [n.containerId, n.newerVersion])));
+		// Held updates, from the same check: without this the Clock indicators would
+		// still show whatever the previous check found.
+		containerStore.setCoolingDown(result.coolingDown ?? new Map());
 	}
 
 	// Load pending updates from database (persisted from check-updates or scheduled jobs)
@@ -586,6 +814,9 @@
 				containerStore.setFailedUpdates([], new Map());
 				// Newer-version (semver) badges are session-only too — dismiss them alongside.
 				containerStore.setNewerVersions(new Map());
+				// The DELETE removed the held rows as well, so their Clock indicators must
+				// go with them - otherwise they render against rows that no longer exist.
+				containerStore.setCoolingDown(new Map());
 			}
 		} catch {
 			toast.error('Failed to clear update indicators');
@@ -704,9 +935,10 @@
 	let activeLogs = $state<ActiveLogs[]>([]);
 	let currentLogsContainerId = $state<string | null>(null);
 
-	// Helper to check if container has active logs
+	// A row is "showing logs" when its panel is the visible one. Only one panel is
+	// rendered, so asking the session list instead would light a second row.
 	function hasActiveLogs(containerId: string): boolean {
-		return activeLogs.some(l => l.containerId === containerId);
+		return showsLogsIndicator(currentLogsContainerId, containerId);
 	}
 
 	// Helper to get active logs
@@ -787,9 +1019,10 @@
 		// Filter by status. The synthetic 'update-available' value (#1063)
 		// is split off so it ANDs with real-state selections instead of
 		// being treated like another Docker state.
-		const stateValues = statusFilter.filter(
-			(v) => v !== UPDATE_AVAILABLE_FILTER_VALUE && v !== NEWER_VERSION_FILTER_VALUE
-		);
+		const stateValues = stateFilterValues(statusFilter, [
+			UPDATE_AVAILABLE_FILTER_VALUE,
+			NEWER_VERSION_FILTER_VALUE
+		]);
 		const updatesOnly = statusFilter.includes(UPDATE_AVAILABLE_FILTER_VALUE);
 		const newerVersionOnly = statusFilter.includes(NEWER_VERSION_FILTER_VALUE);
 		if (stateValues.length > 0) {
@@ -801,15 +1034,17 @@
 		if (newerVersionOnly) {
 			result = result.filter((c) => newerVersionsMap.has(c.id));
 		}
+		result = result.filter((c) => matchesContainerHealthFilter(c.health, statusFilter));
 
-		// Filter by search query
+		// Filter by search query (name, image, any label key/value, or a
+		// `label:key`/`label:key=value` filter - see containerMatchesSearch).
 		if (searchQuery.trim()) {
-			const query = searchQuery.toLowerCase();
-			result = result.filter(c =>
-				c.name.toLowerCase().includes(query) ||
-				c.image.toLowerCase().includes(query) ||
-				(c.labels?.['com.docker.compose.project'] || '').toLowerCase().includes(query)
-			);
+			result = result.filter(c => containerMatchesSearch(c, searchQuery));
+		}
+
+		// Filter by user-defined tags.
+		if (tagFilter.length > 0) {
+			result = result.filter((c) => matchesTagFilter(tagsFor(c).map((t) => t.id), tagFilter, tagFilterMode));
 		}
 
 		// Sort
@@ -817,7 +1052,7 @@
 			let cmp = 0;
 			switch (sortField) {
 				case 'name':
-					cmp = a.name.localeCompare(b.name);
+					cmp = containerDisplayName(a).localeCompare(containerDisplayName(b)) || a.name.localeCompare(b.name);
 					break;
 				case 'image':
 					cmp = a.image.localeCompare(b.image);
@@ -881,7 +1116,7 @@
 			}
 			// Secondary sort by name for stability when primary values are equal
 			if (cmp === 0 && sortField !== 'name') {
-				cmp = a.name.localeCompare(b.name);
+				cmp = containerDisplayName(a).localeCompare(containerDisplayName(b)) || a.name.localeCompare(b.name);
 			}
 			return sortDirection === 'asc' ? cmp : -cmp;
 		});
@@ -915,8 +1150,12 @@
 		return containerStore.refreshContainers(envId);
 	}
 
-	// Check if highlightChanges is enabled for current environment
-	const highlightChangesEnabled = $derived($currentEnvironment?.highlightChanges ?? true);
+	// Check if highlightChanges is enabled for current environment. Read from the full
+	// environments list first (authoritative); the thin currentEnvironment store omits
+	// the flag on some switch paths, which otherwise reverts it to the default.
+	const highlightChangesEnabled = $derived(
+		currentEnvDetails?.highlightChanges ?? $currentEnvironment?.highlightChanges ?? true
+	);
 
 	// Helper to check if a stat field changed significantly
 	function hasFieldChanged(containerId: string, field: string, oldVal: number | undefined, newVal: number | undefined): boolean {
@@ -1129,14 +1368,15 @@
 	}
 
 	function startTerminal(container: ContainerInfo) {
-		if (terminalMode === 'exec') saveUserForContainer(container.id, terminalUser);
+		const mode: TerminalMode = terminalMode;
+		if (mode === 'exec') saveUserForContainer(container.id, terminalUser);
 		terminalCustomUsers = getCustomUsers();
 		const terminal: ActiveTerminal = {
 			containerId: container.id,
 			containerName: container.name,
 			shell: terminalShell,
 			user: terminalUser,
-			mode: terminalMode
+			mode
 		};
 		activeTerminals = [...activeTerminals, terminal];
 		currentTerminalContainerId = container.id;
@@ -1156,12 +1396,7 @@
 			// Just show the existing logs
 			currentLogsContainerId = container.id;
 		} else {
-			// Create new logs session
-			const logs: ActiveLogs = {
-				containerId: container.id,
-				containerName: container.name
-			};
-			activeLogs = [...activeLogs, logs];
+			activeLogs = nextLogsSessions(activeLogs, container);
 			currentLogsContainerId = container.id;
 		}
 	}
@@ -1174,21 +1409,13 @@
 	}
 
 	function selectContainer(container: ContainerInfo) {
-		// Handle logs - show if container has active logs, hide otherwise
-		if (hasActiveLogs(container.id)) {
-			currentLogsContainerId = container.id;
-		} else if (currentLogsContainerId) {
-			// Hide current logs but keep the session active
-			currentLogsContainerId = null;
-		}
-
-		// Handle terminal - show if container has active terminal, hide otherwise
-		if (hasActiveTerminal(container.id)) {
-			currentTerminalContainerId = container.id;
-		} else if (currentTerminalContainerId) {
-			// Hide current terminal but keep the session active
-			currentTerminalContainerId = null;
-		}
+		const next = panelsAfterRowClick(
+			{ logsId: currentLogsContainerId, terminalId: currentTerminalContainerId },
+			container.id,
+			hasActiveTerminal
+		);
+		currentLogsContainerId = next.logsId;
+		currentTerminalContainerId = next.terminalId;
 	}
 
 	function editContainer(id: string) {
@@ -1280,16 +1507,6 @@
 		return ip || '-';
 	}
 
-	function formatUptime(status: string): string {
-		// Extract uptime from status like "Up 2 hours" or "Exited (0) 3 days ago"
-		if (!status) return '-';
-		const upMatch = status.match(/Up\s+(.+?)(?:\s+\(|$)/i);
-		if (upMatch) return upMatch[1].trim();
-		const exitMatch = status.match(/Exited.+?(\d+\s+\w+)\s+ago/i);
-		if (exitMatch) return exitMatch[1] + ' ago';
-		return '-';
-	}
-
 	let copiedCommand = $state<string | null>(null);
 	let copyFailed = $state(false);
 
@@ -1302,51 +1519,6 @@
 		} else {
 			copyFailed = true;
 			setTimeout(() => { copyFailed = false; }, 2000);
-		}
-	}
-
-	function parseUptimeToSeconds(status: string): number {
-		// Parse uptime from status to seconds for sorting
-		// Running containers have positive values (higher = longer uptime)
-		// Stopped containers have negative values (sorted after running)
-		if (!status) return -Infinity;
-
-		const upMatch = status.match(/Up\s+(.+?)(?:\s+\(|$)/i);
-		if (upMatch) {
-			return parseTimeStringToSeconds(upMatch[1].trim());
-		}
-
-		// Exited containers - use negative values so they sort after running
-		const exitMatch = status.match(/Exited.+?(\d+\s+\w+)\s+ago/i);
-		if (exitMatch) {
-			return -parseTimeStringToSeconds(exitMatch[1]);
-		}
-
-		return -Infinity;
-	}
-
-	function parseTimeStringToSeconds(timeStr: string): number {
-		// Parse strings like "2 hours", "3 days", "About a minute", "Less than a second"
-		const str = timeStr.toLowerCase();
-
-		if (str.includes('second')) return 1;
-		if (str.includes('less than a minute') || str.includes('about a minute')) return 60;
-
-		const match = str.match(/(\d+)\s*(second|minute|hour|day|week|month|year)/);
-		if (!match) return 0;
-
-		const value = parseInt(match[1], 10);
-		const unit = match[2];
-
-		switch (unit) {
-			case 'second': return value;
-			case 'minute': return value * 60;
-			case 'hour': return value * 3600;
-			case 'day': return value * 86400;
-			case 'week': return value * 604800;
-			case 'month': return value * 2592000;
-			case 'year': return value * 31536000;
-			default: return 0;
 		}
 	}
 
@@ -1453,16 +1625,7 @@
 	<div class="shrink-0 flex flex-wrap justify-between items-center gap-3 min-h-8">
 		<PageHeader icon={Box} title="Containers" count={containers.length} />
 		<div class="flex flex-wrap items-center gap-2">
-			<div class="relative">
-				<Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-				<Input
-					type="text"
-					placeholder="Search containers..."
-					bind:value={searchQuery}
-					onkeydown={(e) => e.key === 'Escape' && (searchQuery = '')}
-					class="pl-8 h-8 w-48 text-sm"
-				/>
-																																																				</div>
+			<SearchInput bind:value={searchQuery} placeholder="Search name, image, label..." class="h-8 w-64 text-sm" />
 			<!-- Status filter (multi-select). The synthetic 'update-available'
 			     entry appears once at least one container has a pending update,
 			     and ANDs with selected real states (#1063). -->
@@ -1474,7 +1637,11 @@
 				width="w-44"
 				defaultIcon={Box}
 			/>
-			<div class="flex gap-2">
+			<TagFilter tags={filterTags} bind:selected={tagFilter} bind:mode={tagFilterMode} bind:groupBy={groupByTag} bind:showTags={showTags} bind:showBands={showBands} bind:inlineEditing={inlineTagEditing} bind:inheritStackTags bind:settingsExpanded={tagSettingsExpanded} />
+			<!-- Action buttons: scroll horizontally on narrow screens (mobile) instead of
+			     clipping the overflow. min-w-0 lets the row shrink below its content so
+			     overflow-x can kick in; shrink-0 keeps each button its natural size. -->
+			<div class="flex gap-2 overflow-x-auto min-w-0 max-w-full [&>*]:shrink-0">
 				{#if $canAccess('containers', 'create')}
 				<Button size="sm" variant="secondary" onclick={() => (showCreateModal = true)}>
 					<Plus class="w-3.5 h-3.5" />
@@ -1516,6 +1683,7 @@
 					show={hasUpdateIndicators}
 					digestCount={updatableContainersCount}
 					newerVersionCount={$containerStore.newerVersions.size}
+					coolingDownCount={coolingDownMap.size}
 					onDismiss={dismissPendingUpdates}
 				/>
 				{#if $canAccess('containers', 'remove')}
@@ -1736,6 +1904,10 @@
 				gridId="containers"
 				loading={loading}
 				selectable
+				groupBy={containerGroupBy}
+				bind:collapsedGroups={collapsedGroups}
+				ungroupedLabel="Untagged"
+				showGroupBands={showBands}
 				bind:selectedKeys={selectedContainers}
 				sortState={{ field: sortField, direction: sortDirection }}
 				onSortChange={(state) => { sortField = state.field as SortField; sortDirection = state.direction; }}
@@ -1754,6 +1926,12 @@
 					highlightedRowId = highlightedRowId === container.id ? null : container.id;
 				}}
 			>
+				{#snippet groupHeaderLabel(group)}
+					{#each group.icons as ic}
+						{#if ic}<TagLucideIcon name={ic} class="h-3 w-3 shrink-0" />{:else}<Tag class="h-3 w-3 shrink-0" />{/if}
+					{/each}
+					<span>{group.label}</span>
+				{/snippet}
 				{#snippet cell(column, container, rowState)}
 					{@const ports = formatPorts(container.ports)}
 					{@const stack = getComposeProject(container.labels)}
@@ -1765,67 +1943,60 @@
 								class="text-xs font-medium truncate text-left hover:text-primary hover:underline cursor-pointer"
 								title={container.name}
 								onclick={(e) => { e.stopPropagation(); inspectContainer(container); }}
-							>{container.name}</button>
-							{#if container.systemContainer}
-								{@const hasUpdate = containersWithUpdatesSet.has(container.id)}
+							>{containerDisplayName(container)}</button>
+							<!-- System containers (Dockhand, Hawser) carry no label badge; only an
+							     amber update indicator when a new version is out (they can't be
+							     self-updated from the UI, so the tooltip points to the update path). -->
+							{#if container.systemContainer && containersWithUpdatesSet.has(container.id)}
 								<Tooltip.Root>
 									<Tooltip.Trigger>
-										<Badge variant="secondary" class="text-2xs py-0 px-1 shrink-0 {hasUpdate ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20' : 'bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-500/20'} cursor-help flex items-center gap-0.5">
-											{#if container.systemContainer === 'dockhand'}
-												<Ship class="w-2.5 h-2.5" />
-											{:else}
-												<Cable class="w-2.5 h-2.5" />
-											{/if}
-											{container.systemContainer === 'dockhand' ? 'Dockhand' : 'Hawser'}
-											{#if hasUpdate}
-												<CircleArrowUp class="w-2.5 h-2.5" />
-											{/if}
+										<Badge variant="secondary" class="text-2xs py-0 px-1 shrink-0 bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 cursor-help flex items-center gap-0.5">
+											<CircleArrowUp class="w-2.5 h-2.5" />
 										</Badge>
 									</Tooltip.Trigger>
 									<Tooltip.Content side="right" class="w-auto p-3">
-										{#if container.systemContainer === 'dockhand'}
-											{#if hasUpdate}
-												<div class="space-y-2">
-													<p class="font-medium text-sm flex items-center gap-1.5 whitespace-nowrap">
-														<CircleArrowUp class="w-4 h-4 text-amber-500" />
-														Update available
-													</p>
-													<a
-														href="/settings?tab=about"
-														class="text-primary hover:underline text-xs flex items-center gap-1 whitespace-nowrap"
-														onclick={(e) => e.stopPropagation()}
-													>
-														Settings &gt; About
-													</a>
-												</div>
+										<div class="space-y-2">
+											<p class="font-medium text-sm flex items-center gap-1.5 whitespace-nowrap">
+												<CircleArrowUp class="w-4 h-4 text-amber-500" />
+												Update available
+											</p>
+											{#if container.systemContainer === 'dockhand'}
+												<a
+													href="/settings?tab=about"
+													class="text-primary hover:underline text-xs flex items-center gap-1 whitespace-nowrap"
+													onclick={(e) => e.stopPropagation()}
+												>
+													Settings &gt; About
+												</a>
 											{:else}
-												<p class="text-sm whitespace-nowrap">Dockhand management container</p>
+												<p class="text-muted-foreground text-xs whitespace-nowrap">Update on the remote host where Hawser runs.</p>
+												<a
+													href="https://github.com/Finsys/hawser"
+													target="_blank"
+													rel="noopener noreferrer"
+													class="text-primary hover:underline text-xs flex items-center gap-1 whitespace-nowrap"
+													onclick={(e) => e.stopPropagation()}
+												>
+													<ExternalLink class="w-3 h-3" />
+													Update instructions on GitHub
+												</a>
 											{/if}
-										{:else}
-											{#if hasUpdate}
-												<div class="space-y-2">
-													<p class="font-medium text-sm flex items-center gap-1.5 whitespace-nowrap">
-														<CircleArrowUp class="w-4 h-4 text-amber-500" />
-														Update available
-													</p>
-													<p class="text-muted-foreground text-xs whitespace-nowrap">Update on the remote host where Hawser runs.</p>
-													<a
-														href="https://github.com/Finsys/hawser"
-														target="_blank"
-														rel="noopener noreferrer"
-														class="text-primary hover:underline text-xs flex items-center gap-1 whitespace-nowrap"
-														onclick={(e) => e.stopPropagation()}
-													>
-														<ExternalLink class="w-3 h-3" />
-														Update instructions on GitHub
-													</a>
-												</div>
-											{:else}
-												<p class="text-sm whitespace-nowrap">Hawser remote agent</p>
-											{/if}
-										{/if}
+										</div>
 									</Tooltip.Content>
 								</Tooltip.Root>
+							{/if}
+							{#if showTags}<TagChips tags={tagsFor(container)} />{/if}
+							{#if inlineTagEditing && $canAccess('containers', 'edit')}
+								<span onclick={(e) => e.stopPropagation()} role="presentation">
+									<TagEditPopover
+										catalog={tagCatalog}
+										selected={tagsMap[container.name] ?? []}
+										inherited={tagsFor(container).filter((t) => t.inherited).map((t) => t.id)}
+										onCreate={createTag}
+										onApply={(ids) => applyContainerTags(container.name, ids)}
+										allowCreate={$isAdmin}
+									/>
+								</span>
 							{/if}
 						</div>
 					{:else if column.id === 'image'}
@@ -1869,6 +2040,12 @@
 										</a>
 									{/if}
 								{/if}
+							{:else if coolingDownMap.has(container.id)}
+								<!-- An update exists but the image is too young to apply. Muted, not
+								     amber: there is nothing for the user to act on. -->
+								<span title="Update held: {coolingDownMap.get(container.id)} hour(s) left of the minimum image age">
+									<Clock class="w-3 h-3 text-muted-foreground shrink-0" />
+								</span>
 							{:else if containersWithFailedCheckSet.has(container.id)}
 								<Tooltip.Root>
 									<Tooltip.Trigger>
@@ -1940,10 +2117,11 @@
 						<div class="{isFieldHighlighted(container.id, 'memory') ? 'stat-highlight' : ''} text-right">
 							{#if containerStats.get(container.id)}
 								{@const stats = containerStats.get(container.id)}
+								{@const memLimitLabel = stats.memoryLimit ? formatBytes(stats.memoryLimit) : 'unlimited'}
 								{@const memoryTooltip = stats.memoryCache > 0
-									? `${formatBytes(stats.memoryUsage)} / ${formatBytes(stats.memoryLimit)} (Total: ${formatBytes(stats.memoryRaw)} | Cache: ${formatBytes(stats.memoryCache)})`
-									: `${formatBytes(stats.memoryUsage)} / ${formatBytes(stats.memoryLimit)}`}
-								<span class="text-xs font-mono {stats.memoryPercent > 80 ? 'text-red-500' : stats.memoryPercent > 50 ? 'text-yellow-500' : 'text-muted-foreground'}" title={memoryTooltip}>{formatBytesCompact(stats.memoryUsage)}<span class="text-muted-foreground/50">/{formatBytesCompact(stats.memoryLimit, 0)}</span></span>
+									? `${formatBytes(stats.memoryUsage)} / ${memLimitLabel} (Total: ${formatBytes(stats.memoryRaw)} | Cache: ${formatBytes(stats.memoryCache)})`
+									: `${formatBytes(stats.memoryUsage)} / ${memLimitLabel}`}
+								<span class="text-xs font-mono {stats.memoryPercent > 80 ? 'text-red-500' : stats.memoryPercent > 50 ? 'text-yellow-500' : 'text-muted-foreground'}" title={memoryTooltip}>{formatBytesCompact(stats.memoryUsage)}<span class="text-muted-foreground/50">/{stats.memoryLimit ? formatBytesCompact(stats.memoryLimit, 0) : '∞'}</span></span>
 							{:else if container.state === 'running'}
 								<span class="text-xs text-muted-foreground/50">...</span>
 							{:else}
@@ -2115,6 +2293,12 @@
 									{/if}
 								{/if}
 							</div>
+						{:else if !$canAccess('schedules', 'view')}
+							<!-- The schedules are withheld from this account, so the cell says
+							     that rather than the "-" that claims nothing is scheduled. -->
+							<span
+								class="text-gray-400 dark:text-gray-600 text-xs text-center block cursor-default"
+								title="You do not have permission to view schedules">?</span>
 						{:else}
 							<span class="text-gray-400 dark:text-gray-600 text-xs text-center block">-</span>
 						{/if}
@@ -2188,7 +2372,15 @@
 							{:else}
 								<Popover.Root open={terminalPopoverStates[container.id] ?? false} onOpenChange={(open) => {
 									terminalPopoverStates[container.id] = open;
-									if (open && terminalMode === 'exec') detectContainerShells(container.id);
+									if (open) {
+										// Default each freshly-opened session to exec so a prior container's
+										// Attach choice (terminalMode is shared) doesn't carry over, and the
+										// picker/shell controls always render. Restore this container's saved user.
+										terminalMode = 'exec';
+										terminalUser = getSavedUser(container.id) ?? 'root';
+										terminalCustomUsers = getCustomUsers();
+										detectContainerShells(container.id);
+									}
 								}}>
 									<Popover.Trigger
 										onclick={(e: MouseEvent) => e.stopPropagation()}
@@ -2203,18 +2395,6 @@
 												<span class="text-xs font-medium truncate" title={container.name}>{container.name}</span>
 											</div>
 										</div>
-										{#if terminalMode === 'exec' && detectingShellsFor === container.id}
-											<div class="p-4 text-center">
-												<Loader2 class="w-5 h-5 mx-auto mb-2 text-muted-foreground animate-spin" />
-												<p class="text-xs text-muted-foreground">Detecting shells...</p>
-											</div>
-										{:else if terminalMode === 'exec' && !anyShellAvailableFor(container.id)}
-											<div class="p-4 text-center">
-												<AlertCircle class="w-5 h-5 mx-auto mb-2 text-amber-500" />
-												<p class="text-xs font-medium text-amber-500">No shell available</p>
-												<p class="text-xs text-muted-foreground mt-1">This container has no shell installed.</p>
-											</div>
-										{:else}
 											<div class="p-3 space-y-3">
 												<div class="space-y-1.5">
 													<Label class="text-xs">Mode</Label>
@@ -2243,6 +2423,18 @@
 														</Select.Content>
 													</Select.Root>
 													</div>
+										{#if terminalMode === 'exec' && detectingShellsFor === container.id}
+											<div class="p-4 text-center">
+												<Loader2 class="w-5 h-5 mx-auto mb-2 text-muted-foreground animate-spin" />
+												<p class="text-xs text-muted-foreground">Detecting shells...</p>
+											</div>
+										{:else if terminalMode === 'exec' && !anyShellAvailableFor(container.id)}
+											<div class="p-4 text-center">
+												<AlertCircle class="w-5 h-5 mx-auto mb-2 text-amber-500" />
+												<p class="text-xs font-medium text-amber-500">No shell available</p>
+												<p class="text-xs text-muted-foreground mt-1">This container has no shell installed.</p>
+											</div>
+										{:else}
 													{#if terminalMode === 'exec'}
 														<div class="space-y-1.5">
 															<Label class="text-xs">Shell</Label>
@@ -2319,8 +2511,8 @@
 													<Terminal class="w-3 h-3" />
 													Connect
 												</Button>
-											</div>
 										{/if}
+											</div>
 									</Popover.Content>
 								</Popover.Root>
 							{/if}
@@ -2480,25 +2672,27 @@
 						{/if}
 					{/if}
 
-					<!-- Current Terminal Panel -->
-					{#if currentTerminalContainerId}
-						{@const activeTerminal = activeTerminals.find(t => t.containerId === currentTerminalContainerId)}
-						{#if activeTerminal}
-							<div class="flex-1 min-h-0">
-								<TerminalPanel
-									containerId={activeTerminal.containerId}
-									containerName={activeTerminal.containerName}
-									shell={activeTerminal.shell}
-									user={activeTerminal.user}
-									mode={activeTerminal.mode}
-									visible={true}
-									envId={envId}
-									fillHeight={true}
-									onClose={() => closeTerminal(activeTerminal.containerId)}
-								/>
-							</div>
-						{/if}
-					{/if}
+					<!-- Terminal panels: render EVERY open session so each keeps its own
+					     live WebSocket/xterm; only the current one is visible. Switching
+					     just toggles visibility, so a running process (e.g. top) in a
+					     backgrounded session stays alive and its shell stays its own. -->
+					{#each activeTerminals as t (t.containerId)}
+						<!-- Do NOT display:none a backgrounded panel; TerminalPanel hides
+						     itself off-screen while keeping its size so xterm can fit. -->
+						<div class="min-h-0" class:flex-1={t.containerId === currentTerminalContainerId}>
+							<TerminalPanel
+								containerId={t.containerId}
+								containerName={t.containerName}
+								shell={t.shell}
+								user={t.user}
+								mode={t.mode}
+								visible={t.containerId === currentTerminalContainerId}
+								envId={envId}
+								fillHeight={true}
+								onClose={() => closeTerminal(t.containerId)}
+							/>
+						</div>
+					{/each}
 				</div>
 			{/if}
 		</div>
@@ -2519,22 +2713,22 @@
 				{/if}
 			{/if}
 
-			<!-- Show current terminal panel -->
-			{#if currentTerminalContainerId}
-				{@const activeTerminal = activeTerminals.find(t => t.containerId === currentTerminalContainerId)}
-				{#if activeTerminal}
-					<TerminalPanel
-						containerId={activeTerminal.containerId}
-						containerName={activeTerminal.containerName}
-						shell={activeTerminal.shell}
-						user={activeTerminal.user}
-						mode={activeTerminal.mode}
-						visible={true}
-						envId={envId}
-						onClose={() => closeTerminal(activeTerminal.containerId)}
-					/>
-				{/if}
-			{/if}
+			<!-- Terminal panels: render every open session (each keeps its own live
+			     WebSocket/xterm); only the current one is visible. -->
+			{#each activeTerminals as t (t.containerId)}
+				<!-- TerminalPanel hides a backgrounded session off-screen (keeps size for
+				     xterm fit); do not display:none it or a background xterm gets 0x0. -->
+				<TerminalPanel
+					containerId={t.containerId}
+					containerName={t.containerName}
+					shell={t.shell}
+					user={t.user}
+					mode={t.mode}
+					visible={t.containerId === currentTerminalContainerId}
+					envId={envId}
+					onClose={() => closeTerminal(t.containerId)}
+				/>
+			{/each}
 		{/if}
 	{/if}
 </div>
@@ -2548,7 +2742,7 @@
 <EditContainerModal
 	bind:open={showEditModal}
 	containerId={editContainerId}
-	onClose={() => (showEditModal = false)}
+	onClose={() => { showEditModal = false; loadTags(envId); }}
 	onSuccess={fetchContainers}
 	onIconChanged={() => loadIconOverrides(envId)}
 />
@@ -2568,6 +2762,9 @@
 	onRestart={$canAccess('containers', 'restart') ? (id) => restartContainer(id) : undefined}
 	onRemove={$canAccess('containers', 'remove') ? (id) => removeContainer(id) : undefined}
 	onEdit={$canAccess('containers', 'edit') ? (id) => editContainer(id) : undefined}
+	onUpdate={$canAccess('containers', 'create')
+		? (id, name) => updateSingleContainer(id, name)
+		: undefined}
 />
 
 <FileBrowserModal

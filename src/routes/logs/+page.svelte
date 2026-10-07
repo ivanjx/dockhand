@@ -7,12 +7,14 @@
 	import { page } from '$app/stores';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
+	import { SearchInput } from '$lib/components/ui/search-input';
 	import * as Select from '$lib/components/ui/select';
 	import { Checkbox } from '$lib/components/ui/checkbox';
 	import { ToggleGroup } from '$lib/components/ui/toggle-pill';
 	import { RefreshCw, Search, ChevronDown, ChevronUp, Unplug, Copy, Download, WrapText, ArrowDownToLine, X, Sun, Moon, LayoutList, Square, Box, Wifi, WifiOff, Pause, Play, ScrollText, Star, GripVertical, Layers, Check, FolderHeart, Save, Trash2, MoreHorizontal, Eraser, Filter, GripHorizontal, Terminal, ArrowDown, ArrowRight, Clock, Tag, Hash } from 'lucide-svelte';
 	import LogTimeRangeFilter from './LogTimeRangeFilter.svelte';
 	import { copyToClipboard } from '$lib/utils/clipboard';
+	import { containerDisplayName } from '$lib/utils/container-display-name';
 	import PageHeader from '$lib/components/PageHeader.svelte';
 	import TerminalPanel from '../terminal/TerminalPanel.svelte';
 	import { detectShells, getBestShell, getSavedUser } from '$lib/utils/shell-detection';
@@ -571,12 +573,31 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 		}
 	});
 
+	// React to the ?container= URL param CHANGING while the page is already mounted
+	// (e.g. a cross-host jump from the command palette): the env subscription above
+	// only runs the URL match once per page load, so a later navigation to a new
+	// container - possibly on another host, hence keyed on `containers` too - is
+	// handled here once its container list has loaded.
+	let lastHandledUrlContainer: string | null = null;
+	$effect(() => {
+		const urlContainerId = $page.url.searchParams.get('container');
+		const list = containers; // depend on the fetched list so this re-runs after an env switch
+		if (!urlContainerId || urlContainerId === lastHandledUrlContainer) return;
+		const container = list.find(c => c.id === urlContainerId || c.id.startsWith(urlContainerId));
+		if (!container) return; // list for the target host not loaded yet; re-runs when it is
+		lastHandledUrlContainer = urlContainerId;
+		if (selectedContainer?.id === container.id) return;
+		layoutMode = 'single';
+		selectContainer(container);
+	});
+
 	// Filtered containers based on search
 	let filteredContainers = $derived(() => {
 		if (!searchQuery.trim()) return containers;
 		const query = searchQuery.toLowerCase();
 		return containers.filter(c =>
 			c.name.toLowerCase().includes(query) ||
+			containerDisplayName(c).toLowerCase().includes(query) ||
 			c.image.toLowerCase().includes(query)
 		);
 	});
@@ -1620,7 +1641,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 					<Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
 					<Input
 						type="text"
-						placeholder={selectedContainer ? `${selectedContainer.name} (${selectedContainer.image})` : "Search containers..."}
+						placeholder={selectedContainer ? `${containerDisplayName(selectedContainer)} (${selectedContainer.image})` : "Search containers..."}
 						bind:value={searchQuery}
 						onfocus={handleInputFocus}
 						onblur={handleInputBlur}
@@ -1646,7 +1667,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 									class="w-full px-3 py-2 text-left text-sm hover:bg-muted transition-colors flex items-center gap-2 {isCurrentSelection ? 'bg-muted' : ''}"
 								>
 									<ContainerIcon image={container.image} name={container.name} class="w-3.5 h-3.5" fallbackClass={container.state === 'running' ? 'text-green-500' : 'text-muted-foreground'} showFallbackWhenOff />
-									<span class="font-medium truncate">{container.name}</span>
+									<span class="font-medium truncate" title={container.name}>{containerDisplayName(container)}</span>
 									<span class="text-muted-foreground text-xs truncate">({container.image})</span>
 									{#if isCurrentSelection}
 										<span class="ml-auto text-xs text-muted-foreground">current</span>
@@ -1672,15 +1693,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 		{#if layoutMode === 'multi' || layoutMode === 'grouped'}
 			<div class="w-64 shrink-0 border rounded-lg overflow-hidden flex flex-col bg-background">
 				<div class="px-3 py-2 border-b bg-muted/30">
-					<div class="relative">
-						<Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-						<Input
-							type="text"
-							placeholder="Filter containers..."
-							bind:value={searchQuery}
-							class="pl-8 h-8 text-sm"
-						/>
-					</div>
+					<SearchInput bind:value={searchQuery} placeholder="Filter containers..." class="h-8 text-sm" />
 				</div>
 				{#if layoutMode === 'grouped'}
 					<!-- Grouped mode selection controls -->
@@ -1783,7 +1796,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 										<GripVertical class="w-3 h-3 shrink-0 text-muted-foreground/50 cursor-grab active:cursor-grabbing" />
 										<ContainerIcon image={container.image} name={container.name} class="w-3 h-3" fallbackClass={container.state === 'running' ? 'text-green-500' : 'text-muted-foreground'} showFallbackWhenOff />
 										<div class="flex-1 min-w-0">
-											<div class="font-medium truncate text-xs leading-tight">{container.name}</div>
+											<div class="font-medium truncate text-xs leading-tight" title={container.name}>{containerDisplayName(container)}</div>
 											<div class="text-2xs text-muted-foreground truncate leading-tight">{container.image}</div>
 										</div>
 										<button
@@ -1826,7 +1839,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 										</div>
 										<ContainerIcon image={container.image} name={container.name} class="w-3 h-3" fallbackClass={container.state === 'running' ? 'text-green-500' : 'text-muted-foreground'} showFallbackWhenOff />
 										<div class="flex-1 min-w-0">
-											<div class="font-medium truncate text-xs leading-tight">{container.name}</div>
+											<div class="font-medium truncate text-xs leading-tight" title={container.name}>{containerDisplayName(container)}</div>
 											<div class="text-2xs text-muted-foreground truncate leading-tight">{container.image}</div>
 										</div>
 										<button
@@ -1888,7 +1901,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 									{/if}
 									<ContainerIcon image={container.image} name={container.name} class="w-3 h-3" fallbackClass={container.state === 'running' ? 'text-green-500' : 'text-muted-foreground'} showFallbackWhenOff />
 									<div class="flex-1 min-w-0">
-										<div class="font-medium truncate text-xs leading-tight">{container.name}</div>
+										<div class="font-medium truncate text-xs leading-tight" title={container.name}>{containerDisplayName(container)}</div>
 										<div class="text-2xs text-muted-foreground truncate leading-tight">{container.image}</div>
 									</div>
 									{#if layoutMode === 'multi'}
@@ -2019,10 +2032,11 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 								{#if stackName}
 									<span class="text-xs font-medium {darkMode ? 'text-zinc-300' : 'text-gray-700'}">{stackName}</span>
 								{:else if groupedContainerInfo.size === 1}
-									{@const singleContainer = Array.from(groupedContainerInfo.values())[0]}
+									{@const [singleId, singleContainer] = Array.from(groupedContainerInfo.entries())[0]}
+									{@const singleFull = containers.find(c => c.id === singleId)}
 									<div class="flex items-center gap-1">
 										<div class="w-2 h-2 rounded-full" style="background-color: {singleContainer.color}"></div>
-										<span class="text-xs font-medium {darkMode ? 'text-zinc-300' : 'text-gray-700'}">{singleContainer.name}</span>
+										<span class="text-xs font-medium {darkMode ? 'text-zinc-300' : 'text-gray-700'}" title={singleContainer.name}>{singleFull ? containerDisplayName(singleFull) : singleContainer.name}</span>
 									</div>
 								{/if}
 								{#if stackName || groupedContainerInfo.size > 1}
@@ -2229,7 +2243,7 @@ import type { FavoriteGroup } from '../api/preferences/favorite-groups/+server';
 					<!-- Container name + terminal toggles -->
 					{#if selectedContainer}
 						<div class="flex items-center gap-1.5 ml-2">
-							<span class="text-xs font-medium {darkMode ? 'text-zinc-300' : 'text-gray-700'}">{selectedContainer.name}</span>
+							<span class="text-xs font-medium {darkMode ? 'text-zinc-300' : 'text-gray-700'}" title={selectedContainer.name}>{containerDisplayName(selectedContainer)}</span>
 							<button
 								onclick={() => openTerminal(selectedContainer!.id, selectedContainer!.name, 'below')}
 								class="p-0.5 rounded transition-colors {terminalOpen && terminalLayout === 'below' && terminalContainerId === selectedContainer.id ? (darkMode ? 'bg-amber-500/20 ring-1 ring-amber-500/50' : 'bg-amber-500/30 ring-1 ring-amber-600/50') : darkMode ? 'hover:bg-zinc-800' : 'hover:bg-gray-200'}"

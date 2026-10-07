@@ -15,16 +15,17 @@ import { RestoreService, type RestorePorts, type RestoreJob } from './restore-se
 import { openOperation } from './operations';
 import { LiveTargetLocks, DestinationSerializer } from './locks';
 import { resolveTargets, discoverVolumes, stopForBackup } from './docker';
-import { guardSnapshotAccess, listSnapshots as listSnapshotsCore, resolveSnapshotEnvId as resolveSnapshotEnvIdCore, filterSnapshotsByAccessibleEnv } from './snapshots';
+import { guardSnapshotAccess, selectOwnedForForget, listSnapshots as listSnapshotsCore, resolveSnapshotEnvId as resolveSnapshotEnvIdCore, filterSnapshotsByAccessibleEnv } from './snapshots';
 import { initRepository as initRepoCore, testRepository as testRepoCore, checkRepository, pruneRepository, unlockRepository, repoStats, rotateDestinationPassword as rotateCore } from './repo';
 import { parseRetention, buildForgetArgs, checkWouldWipe } from './retention';
 import { buildSnapshotLayout, serializeLayout, parseSnapshotLayout, type SnapshotLayout, type SnapshotStack, type SnapshotSecret } from './snapshot-layout';
 import { instanceTagFilter, parseSnapshots, retentionTagFilter, BackupError } from './models';
+import { localRepoIssueFor } from './local-repo-path';
 import { parseOptionsJson, buildJobOptions, parseSelectedVolumes, parseBackupFlags, sanitizeRestoreFlags, fireWebhook, parseResticDiff, type SnapshotDiff } from './helpers';
 import { getHostname } from '../license';
 import { getBackupConfig, getBackupConfigs, getBackupDestination, updateBackupConfig, updateBackupDestination, decryptBackupDestination } from '../db';
 import { getInstanceId } from './identity';
-import { inspectContainer } from '../docker';
+import { getPortableContainerConfig, inspectContainer } from '../docker';
 import { sendEventNotification } from '../notifications';
 import type { BackupResult, RestoreResult, ResticRun, BackupTargetType } from './models';
 import type { MetadataFile } from './backup-script';
@@ -127,9 +128,9 @@ async function planStackDirVolume(
 	| { kind: 'candidate'; syntheticVolume: DiscoveredVolume; volumeKey: string; composeFileName: string; excludePaths: string[]; bindSources: string[]; probeHint?: StackDirProbeHint }
 > {
 	const { getStackComposeFile } = await import('../stacks');
-	const { dirname, join, basename } = await import('path');
+	const { dirname, join, basename, resolve } = await import('path');
 	const { lstatSync } = await import('fs');
-	const { translateToHostPath, translateContainerPathViaMount, getOwnDockerHost, getAutoDetectedDockerHost } = await import('../host-path');
+	const { translateToHostPath, translateContainerPathViaMount, getOwnDockerHost, getAutoDetectedDockerHost, pathOverriddenBySubMount, getCachedContainerMounts } = await import('../host-path');
 	const { resolveHostStackDir, deriveStackDirFromBinds, trustBindDerivedForEnv, isLocalDaemon, STACKDIR_VOLUME_KEY } = await import('./stackdir-plan');
 	const { relativeBindDirsFromCompose, relativeBindsFromCompose } = await import('./stackfile-filter');
 
@@ -236,7 +237,14 @@ async function planStackDirVolume(
 	// mountHostPath: via a container bind mount (adopted/external stacks outside DATA_DIR).
 	// workingDirLabel: for hawser/matching-paths where the label already IS the host path.
 	const viaDataRaw = localDaemon && dockhandStackDir ? translateToHostPath(dockhandStackDir) : null;
-	const dataDirHostPath = viaDataRaw && viaDataRaw !== dockhandStackDir ? viaDataRaw : null;
+	// A separate bind mount at a subpath of DATA_DIR (e.g. /app/data/stacks -> some host dir)
+	// makes the DATA_DIR translation wrong - the files live under that bind, not the DATA_DIR
+	// volume root. In that case drop the DATA_DIR candidate so the resolver uses mountHostPath,
+	// which longest-prefix-matches the more specific bind and is correct (#1533).
+	const overriddenBySubMount = localDaemon && dockhandStackDir
+		? pathOverriddenBySubMount(dockhandStackDir, resolve(process.env.DATA_DIR || '/app/data'), getCachedContainerMounts())
+		: false;
+	const dataDirHostPath = viaDataRaw && viaDataRaw !== dockhandStackDir && !overriddenBySubMount ? viaDataRaw : null;
 	const mountHostPath = localDaemon && dockhandStackDir ? translateContainerPathViaMount(dockhandStackDir) : null;
 
 	const resolution = resolveHostStackDir({
@@ -303,7 +311,8 @@ async function planStackDirVolume(
 	// HOST-side "Remote stack path (for backup)" - NOT to redeploy.
 	const probeHint: StackDirProbeHint =
 		isHawser && remoteStacksDirDefaulted ? { kind: 'hawser-defaulted', hostPath, envName }
-		: (isHawser || directRemote) && remoteStacksDir ? { kind: 'user-set', hostPath, envName }
+		: (isHawser || directRemote) && remoteStacksDir
+			? { kind: 'user-set', transport: isHawser ? 'hawser' : 'direct', hostPath, envName }
 		: { kind: 'local' };
 
 	return {
@@ -544,7 +553,12 @@ async function collectMetadata(
 	if (type === 'container') {
 		try {
 			const [c] = (await resolveTargets(type, targetName, envId)).containers;
-			if (c) containerInspect = await inspectContainer(c.id, envId ?? undefined);
+			if (c) {
+				const inspect = await inspectContainer(c.id, envId ?? undefined) as { Config?: { Image?: string; Labels?: Record<string, string> | null } };
+				containerInspect = inspect.Config
+					? { ...inspect, Config: await getPortableContainerConfig(inspect.Config, envId) }
+					: inspect;
+			}
 		} catch { /* metadata best-effort; the volume data is what matters */ }
 	}
 
@@ -698,7 +712,7 @@ async function materialiseStackFiles(destination: any, snapId: string, stackName
 	const { tmpdir } = await import('os');
 	const { join, dirname, resolve, sep } = await import('path');
 	const { randomUUID } = await import('crypto');
-	const { getStacksDir } = await import('../stacks');
+	const { getDefaultStacksDir, getLocalStacksDir, isStacksDirEnvSet } = await import('../stacks');
 	const { stackDirSource } = await import('./stackdir-plan');
 	// The stack dir is ALWAYS at /volumes/__dockhand_stackdir__ in the snapshot (local bind
 	// and remote tar both write there), so restore reads ONE deterministic path via
@@ -730,9 +744,15 @@ async function materialiseStackFiles(destination: any, snapId: string, stackName
 
 		// Path-traversal guard: the resolved target MUST stay under the stacks root.
 		const resolvedTarget = resolve(targetPath);
-		const stacksRoot = resolve(getStacksDir());
-		if (resolvedTarget !== stacksRoot && !resolvedTarget.startsWith(stacksRoot + sep)) {
-			console.log(`[Backup] materialiseStackFiles: refusing target "${resolvedTarget}" outside the stacks root "${stacksRoot}"`);
+		const allowedRoots = [resolve(getDefaultStacksDir())];
+		if (isStacksDirEnvSet()) {
+			allowedRoots.push(resolve(getLocalStacksDir()));
+		}
+		const underAllowedRoot = allowedRoots.some(
+			(root) => resolvedTarget === root || resolvedTarget.startsWith(root + sep)
+		);
+		if (!underAllowedRoot) {
+			console.log(`[Backup] materialiseStackFiles: refusing target "${resolvedTarget}" outside allowed stacks roots (${allowedRoots.join(', ')})`);
 			return false;
 		}
 
@@ -955,6 +975,12 @@ function restorePorts(destination: any, access: { isEnterprise: boolean; canAcce
 					log(`registered: composePath=${composePath} envPath=${envPath ?? '(none)'}`);
 				},
 				deploy: async () => {
+					// Deliberately does NOT create a stack_deploy run record: this call goes
+					// straight to redeployStackFromDir (stacks.ts), not through the
+					// deployGitStack()/compose-route path that createRunRecorder is wired
+					// into. A backup restore's redeploy could get its own recorder the same
+					// way -- there is nothing structural stopping it -- it just hasn't been
+					// done yet.
 					const r = await redeployStackFromDir(name, stackDir, composeFileName, envId ?? undefined);
 					if (!r.success) throw new Error(r.error || 'docker compose up failed');
 				}
@@ -1313,10 +1339,96 @@ export async function forgetSnapshot(destinationId: number, snapshotId: string):
 	return { ok: true };
 }
 
+export type ForgetSnapshotsResult = {
+	/** Snapshot ids that were forgotten (owned + passed to restic). */
+	deleted: string[];
+	/** Ids we refused: not owned by this instance or not env-accessible (never sent to restic). */
+	skipped: string[];
+	error?: string;
+};
+
+/** Per-id vetting for forgetSnapshots. `access` carries the enterprise env gate so the
+ * ONE ownership listing per id also covers env access - no separate per-id env round-trip
+ * at the route. `preVetted` skips the per-id guard when the caller has already proven
+ * instance ownership + env access for every id via the SAME instance-scoped restic listing
+ * (e.g. a `--tag instance,configid` config listing), which is a strictly stronger proof. */
+export type ForgetSnapshotsOptions = {
+	access?: { isEnterprise: boolean; canAccessEnvironment: (envId: number) => Promise<boolean> };
+	preVetted?: boolean;
+};
+
+const FULL_ACCESS = { isEnterprise: false, canAccessEnvironment: async () => true };
+
+/**
+ * Forget MANY snapshots from ONE destination in a single `restic forget ... --prune`
+ * (prunes once, not per-id). Every id is instance-ownership- and (enterprise) env-access-
+ * checked first via ONE restic listing per id; ids that fail are skipped (never passed to
+ * restic) so a bulk delete can't reach another instance's or another env's snapshots
+ * sharing the repo. Pass `preVetted` only when the ids came from an instance-scoped
+ * listing that already proved ownership + access. All owned ids share the one lock.
+ */
+export async function forgetSnapshots(
+	destinationId: number,
+	snapshotIds: string[],
+	options: ForgetSnapshotsOptions = {},
+): Promise<ForgetSnapshotsResult> {
+	const destination = await loadDest(destinationId);
+	const instanceId = await getInstanceId();
+	const access = options.access ?? FULL_ACCESS;
+
+	const { owned, skipped } = await selectOwnedForForget(snapshotIds, {
+		preVetted: options.preVetted,
+		guard: (id) => guardSnapshotAccess(reader(), destination, instanceId, id, access),
+	});
+	if (owned.length === 0) return { deleted: [], skipped };
+
+	const run = await serializeByRepo(destinationId, () =>
+		restic.runLocal(destination, ['forget', ...owned, '--prune', '--retry-lock', '5m'], 'data'),
+	);
+	logRepoOp(destination.name, `forget ${owned.length} snapshot(s)`, run.exitCode === 0, { output: run.stdout, error: run.stderr });
+	if (run.exitCode !== 0) return { deleted: [], skipped, error: run.stderr.trim() || 'forget failed' };
+	return { deleted: owned, skipped };
+}
+
+/**
+ * Forget every snapshot belonging to a backup config (matched by its `dockhand:configid`
+ * tag) from its destination, in a single restic forget --prune. Used when a config is
+ * deleted WITH "also delete snapshots". Best-effort: returns the tally; a restic error is
+ * reported, never thrown, so it can't fail the config deletion that already happened.
+ * The listing is `--tag instance,configid` scoped, a stronger ownership proof than the
+ * per-id guard, so the ids are forgotten preVetted (no redundant per-id re-listing).
+ * CALLER CONTRACT: `preVetted` suppresses the per-snapshot env guard, so the caller MUST
+ * gate on the config's environment first. The DELETE config route does (loadConfigGateEnv),
+ * and every id here shares that already-gated config's env - keep this true for any new caller.
+ */
+export async function forgetSnapshotsForConfig(configId: number, destinationId: number): Promise<ForgetSnapshotsResult> {
+	const snaps = await listSnapshots(destinationId, configId).catch(() => []);
+	const ids = snaps.map((s) => s.id);
+	if (ids.length === 0) return { deleted: [], skipped: [] };
+	return forgetSnapshots(destinationId, ids, { preVetted: true });
+}
+
 // --- repository maintenance ---
+
+/**
+ * Reject a local-path repo whose path isn't under any Dockhand bind mount (#1506):
+ * restic would write it into the container's ephemeral filesystem while the helper
+ * looks for it on the host, so both "succeed" yet never share one repo. Returns an
+ * error string to surface, or null when the path is fine (bare-metal, or under a bind).
+ */
+async function localRepoPathIssue(destination: { repository: string }): Promise<string | null> {
+	const { isLocalRepo } = await import('./models');
+	const { getCachedContainerMounts } = await import('../host-path');
+	return localRepoIssueFor(destination.repository, isLocalRepo(destination.repository), getCachedContainerMounts());
+}
 
 export async function initRepository(destinationId: number): Promise<void> {
 	const destination = await loadDest(destinationId);
+	const pathIssue = await localRepoPathIssue(destination);
+	if (pathIssue) {
+		logRepoOp(destination.name, 'init', false, { error: pathIssue });
+		throw new Error(pathIssue);
+	}
 	const r = await initRepoCore(reader(), destination);
 	logRepoOp(destination.name, 'init', r.ok, r.ok ? { output: r.output } : { error: r.error });
 	if (!r.ok) throw new Error(r.error);
@@ -1324,6 +1436,11 @@ export async function initRepository(destinationId: number): Promise<void> {
 
 export async function testRepository(destinationId: number): Promise<{ ok: boolean; needsInit?: boolean; error?: string }> {
 	const destination = await loadDest(destinationId);
+	const pathIssue = await localRepoPathIssue(destination);
+	if (pathIssue) {
+		logRepoOp(destination.name, 'test', false, { error: pathIssue });
+		return { ok: false, error: pathIssue };
+	}
 	const r = await testRepoCore(reader(), destination);
 	logRepoOp(destination.name, 'test', r.ok, r.ok ? undefined : { error: r.error });
 	if (r.ok) return { ok: true };

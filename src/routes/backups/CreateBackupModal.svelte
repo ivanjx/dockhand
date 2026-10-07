@@ -1,14 +1,14 @@
 <script lang="ts">
 	import * as Dialog from '$lib/components/ui/dialog';
 	import * as Select from '$lib/components/ui/select';
-	import { Input } from '$lib/components/ui/input';
+	import { SearchInput } from '$lib/components/ui/search-input';
 	import { Button } from '$lib/components/ui/button';
 	import { Label } from '$lib/components/ui/label';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Checkbox } from '$lib/components/ui/checkbox';
 	import { TogglePill } from '$lib/components/ui/toggle-pill';
 	import CronEditor from '$lib/components/cron-editor.svelte';
-	import { Package, Box, Layers, Search, Loader2, CheckCircle2, ArrowBigRight, Settings, Clock, Play } from 'lucide-svelte';
+	import { Package, Box, Layers, Loader2, CheckCircle2, ArrowBigRight, Settings, Clock, Play } from 'lucide-svelte';
 	import EnvironmentIcon from '$lib/components/EnvironmentIcon.svelte';
 	import { getRepoTypeIcon, formatCron, runBackupAction, type BackupFormState } from '$lib/utils/backup';
 	import { toast } from 'svelte-sonner';
@@ -299,10 +299,7 @@
 					</Select.Content>
 				</Select.Root>
 				{#if selectedEnvId}
-					<div class="relative flex-1">
-						<Search class="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-						<Input bind:value={searchQuery} placeholder="Search containers and stacks..." class="pl-8 h-8 text-xs" />
-					</div>
+					<SearchInput bind:value={searchQuery} placeholder="Search containers and stacks..." class="h-8 text-xs" containerClass="flex-1" />
 				{/if}
 			</div>
 		{/if}

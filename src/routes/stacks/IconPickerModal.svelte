@@ -1,10 +1,10 @@
 <script lang="ts">
 	import * as Dialog from '$lib/components/ui/dialog';
 	import * as Tabs from '$lib/components/ui/tabs';
-	import { Input } from '$lib/components/ui/input';
+	import { SearchInput } from '$lib/components/ui/search-input';
 	import { Button } from '$lib/components/ui/button';
 	import { stackIconMap, getStackIconComponent } from '$lib/utils/icons';
-	import { Upload, Search, Loader2, ExternalLink, ImageOff } from 'lucide-svelte';
+	import { Upload, Loader2, ExternalLink, ImageOff } from 'lucide-svelte';
 	import AvatarCropper from '$lib/components/AvatarCropper.svelte';
 
 	interface Props {
@@ -34,7 +34,7 @@
 	}
 
 	// --- selfh.st tab (lazy) ---
-	interface SelfhstEntry { Name: string; Reference: string; SVG: string }
+	interface SelfhstEntry { Name: string; Reference: string; SVG: string; WebP?: string; PNG?: string }
 	let manifest = $state<SelfhstEntry[]>([]);
 	let manifestLoading = $state(false);
 	let manifestError = $state('');
@@ -48,8 +48,8 @@
 			const res = await fetch('/api/icons/selfhst-manifest');
 			if (!res.ok) throw new Error(`manifest ${res.status}`);
 			const all = (await res.json()) as SelfhstEntry[];
-			// Only SVG-capable entries (that's what our proxy serves).
-			manifest = all.filter((e) => e.SVG === 'Yes' && e.Reference);
+			// Any entry our proxy can serve: SVG, else WebP, else PNG.
+			manifest = all.filter((e) => e.Reference && (e.SVG === 'Yes' || e.WebP === 'Yes' || e.PNG === 'Yes'));
 		} catch (e) {
 			manifestError = 'Could not load the selfh.st icon list. Check the server has internet access.';
 		} finally {
@@ -161,10 +161,7 @@
 
 			<!-- Lucide icons -->
 			<Tabs.Content value="icons" class="mt-3 flex-1 min-h-0 data-[state=active]:flex flex-col">
-				<div class="relative mb-3 shrink-0">
-					<Search class="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-					<Input bind:value={lucideQuery} placeholder="Search icons..." class="pl-8" />
-				</div>
+				<SearchInput bind:value={lucideQuery} placeholder="Search icons..." containerClass="mb-3 shrink-0" />
 				<div class="grid grid-cols-12 gap-1 flex-1 overflow-y-auto pr-1 content-start">
 					{#each filteredLucide as name (name)}
 						{@const Icon = getStackIconComponent(name)}
@@ -182,10 +179,7 @@
 
 			<!-- selfh.st app logos -->
 			<Tabs.Content value="selfhst" class="mt-3 flex-1 min-h-0 data-[state=active]:flex flex-col">
-				<div class="relative mb-3 shrink-0">
-					<Search class="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-					<Input bind:value={selfhstQuery} placeholder="Search app logos (plex, jellyfin, grafana...)" class="pl-8" />
-				</div>
+				<SearchInput bind:value={selfhstQuery} placeholder="Search app logos (plex, jellyfin, grafana...)" containerClass="mb-3 shrink-0" />
 				<div class="flex-1 min-h-0 overflow-y-auto pr-1">
 					{#if manifestLoading}
 						<div class="flex items-center justify-center gap-2 py-12 text-muted-foreground text-sm">

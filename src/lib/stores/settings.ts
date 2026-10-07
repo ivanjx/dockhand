@@ -1,3 +1,9 @@
+import {
+	DEFAULT_GRYPE_IMAGE,
+	DEFAULT_TRIVY_IMAGE,
+	DEFAULT_GRYPE_ARGS,
+	DEFAULT_TRIVY_ARGS
+} from '$lib/utils/scanner-images';
 import { writable, derived, get } from 'svelte/store';
 import { browser } from '$app/environment';
 import {
@@ -7,6 +13,11 @@ import {
 	parseTimestamp,
 	type DateTimeFormatters
 } from '$lib/utils/date-format';
+import {
+	DEFAULT_STACK_LOG_OPERATIONS,
+	sanitizeStackLogOperations,
+	type StackLogOperation
+} from '$lib/utils/stack-log-operations';
 
 export type TimeFormat = '12h' | '24h';
 export type DateFormat = 'MM/DD/YYYY' | 'DD/MM/YYYY' | 'YYYY-MM-DD' | 'DD.MM.YYYY';
@@ -32,6 +43,12 @@ export interface AppSettings {
 	eventCleanupEnabled: boolean;
 	scannerCleanupCron: string;
 	scannerCleanupEnabled: boolean;
+	deployLogReconcileCron: string;
+	deployLogReconcileEnabled: boolean;
+	scanRetentionCron: string;
+	scanRetentionEnabled: boolean;
+	scanRetentionKeep: number;
+	scanRetentionGraceDays: number;
 	logBufferSizeKb: number;  // legacy, retained for migration — UI uses logMaxLines
 	logMaxLines: number;       // line-count cap for the log buffer (replaces KB-based limit)
 	defaultTimezone: string;
@@ -57,6 +74,7 @@ export interface AppSettings {
 	// Scanner Advanced settings (#1219). Empty values = use auto-detection.
 	defaultScannerNetworkMode: string;   // '' | 'host' | 'bridge' | 'none' | <custom-network>
 	defaultScannerDns: string[];         // ['1.1.1.1', '8.8.8.8']; empty = inherit
+	stackLogOperations: StackLogOperation[]; // stack ops that show the log popover (#1558)
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -67,8 +85,8 @@ const DEFAULT_SETTINGS: AppSettings = {
 	timeFormat: '24h',
 	dateFormat: 'DD.MM.YYYY',
 	downloadFormat: 'tar',
-	defaultGrypeArgs: '-o json -v {image}',
-	defaultTrivyArgs: 'image --format json {image}',
+	defaultGrypeArgs: DEFAULT_GRYPE_ARGS,
+	defaultTrivyArgs: DEFAULT_TRIVY_ARGS,
 	scheduleRetentionDays: 30,
 	eventRetentionDays: 30,
 	scheduleCleanupCron: '0 3 * * *',
@@ -77,6 +95,12 @@ const DEFAULT_SETTINGS: AppSettings = {
 	eventCleanupEnabled: true,
 	scannerCleanupCron: '0 3 * * 0',
 	scannerCleanupEnabled: true,
+	deployLogReconcileCron: '0 4 * * *',
+	deployLogReconcileEnabled: true,
+	scanRetentionCron: '30 4 * * *',
+	scanRetentionEnabled: true,
+	scanRetentionKeep: 10,
+	scanRetentionGraceDays: 7,
 	logBufferSizeKb: 500,
 	logMaxLines: 2000,
 	defaultTimezone: 'UTC',
@@ -88,8 +112,8 @@ const DEFAULT_SETTINGS: AppSettings = {
 	formatLogTimestamps: false,
 	externalStackPaths: [],
 	primaryStackLocation: null,
-	defaultGrypeImage: 'anchore/grype:v0.115.0',
-	defaultTrivyImage: 'aquasec/trivy:0.71.2',
+	defaultGrypeImage: DEFAULT_GRYPE_IMAGE,
+	defaultTrivyImage: DEFAULT_TRIVY_IMAGE,
 	labelFilterMode: 'any',
 	honorProxyLabels: true,
 	showImageChangelogLinks: true,
@@ -98,6 +122,7 @@ const DEFAULT_SETTINGS: AppSettings = {
 	protectScannerImages: true,
 	defaultScannerNetworkMode: '',
 	defaultScannerDns: [],
+	stackLogOperations: DEFAULT_STACK_LOG_OPERATIONS,
 	defaultComposeTemplate: `version: "3.8"
 
 services:
@@ -167,6 +192,12 @@ function createSettingsStore() {
 					eventCleanupEnabled: settings.eventCleanupEnabled ?? DEFAULT_SETTINGS.eventCleanupEnabled,
 					scannerCleanupCron: settings.scannerCleanupCron ?? DEFAULT_SETTINGS.scannerCleanupCron,
 					scannerCleanupEnabled: settings.scannerCleanupEnabled ?? DEFAULT_SETTINGS.scannerCleanupEnabled,
+					deployLogReconcileCron: settings.deployLogReconcileCron ?? DEFAULT_SETTINGS.deployLogReconcileCron,
+					deployLogReconcileEnabled: settings.deployLogReconcileEnabled ?? DEFAULT_SETTINGS.deployLogReconcileEnabled,
+					scanRetentionCron: settings.scanRetentionCron ?? DEFAULT_SETTINGS.scanRetentionCron,
+					scanRetentionEnabled: settings.scanRetentionEnabled ?? DEFAULT_SETTINGS.scanRetentionEnabled,
+					scanRetentionKeep: settings.scanRetentionKeep ?? DEFAULT_SETTINGS.scanRetentionKeep,
+					scanRetentionGraceDays: settings.scanRetentionGraceDays ?? DEFAULT_SETTINGS.scanRetentionGraceDays,
 					logBufferSizeKb: settings.logBufferSizeKb ?? DEFAULT_SETTINGS.logBufferSizeKb,
 					logMaxLines: deriveLogMaxLines(settings),
 					defaultTimezone: settings.defaultTimezone ?? DEFAULT_SETTINGS.defaultTimezone,
@@ -189,7 +220,8 @@ function createSettingsStore() {
 					showWhatsNew: settings.showWhatsNew ?? DEFAULT_SETTINGS.showWhatsNew,
 					protectScannerImages: settings.protectScannerImages ?? DEFAULT_SETTINGS.protectScannerImages,
 					defaultScannerNetworkMode: settings.defaultScannerNetworkMode ?? DEFAULT_SETTINGS.defaultScannerNetworkMode,
-					defaultScannerDns: Array.isArray(settings.defaultScannerDns) ? settings.defaultScannerDns : DEFAULT_SETTINGS.defaultScannerDns
+					defaultScannerDns: Array.isArray(settings.defaultScannerDns) ? settings.defaultScannerDns : DEFAULT_SETTINGS.defaultScannerDns,
+					stackLogOperations: sanitizeStackLogOperations(settings.stackLogOperations)
 				});
 			}
 		} catch {
@@ -227,6 +259,12 @@ function createSettingsStore() {
 					eventCleanupEnabled: updatedSettings.eventCleanupEnabled ?? DEFAULT_SETTINGS.eventCleanupEnabled,
 					scannerCleanupCron: updatedSettings.scannerCleanupCron ?? DEFAULT_SETTINGS.scannerCleanupCron,
 					scannerCleanupEnabled: updatedSettings.scannerCleanupEnabled ?? DEFAULT_SETTINGS.scannerCleanupEnabled,
+					deployLogReconcileCron: updatedSettings.deployLogReconcileCron ?? DEFAULT_SETTINGS.deployLogReconcileCron,
+					deployLogReconcileEnabled: updatedSettings.deployLogReconcileEnabled ?? DEFAULT_SETTINGS.deployLogReconcileEnabled,
+					scanRetentionCron: updatedSettings.scanRetentionCron ?? DEFAULT_SETTINGS.scanRetentionCron,
+					scanRetentionEnabled: updatedSettings.scanRetentionEnabled ?? DEFAULT_SETTINGS.scanRetentionEnabled,
+					scanRetentionKeep: updatedSettings.scanRetentionKeep ?? DEFAULT_SETTINGS.scanRetentionKeep,
+					scanRetentionGraceDays: updatedSettings.scanRetentionGraceDays ?? DEFAULT_SETTINGS.scanRetentionGraceDays,
 					logBufferSizeKb: updatedSettings.logBufferSizeKb ?? DEFAULT_SETTINGS.logBufferSizeKb,
 					logMaxLines: deriveLogMaxLines(updatedSettings),
 					defaultTimezone: updatedSettings.defaultTimezone ?? DEFAULT_SETTINGS.defaultTimezone,
@@ -249,7 +287,8 @@ function createSettingsStore() {
 					showWhatsNew: updatedSettings.showWhatsNew ?? DEFAULT_SETTINGS.showWhatsNew,
 					protectScannerImages: updatedSettings.protectScannerImages ?? DEFAULT_SETTINGS.protectScannerImages,
 					defaultScannerNetworkMode: updatedSettings.defaultScannerNetworkMode ?? DEFAULT_SETTINGS.defaultScannerNetworkMode,
-					defaultScannerDns: Array.isArray(updatedSettings.defaultScannerDns) ? updatedSettings.defaultScannerDns : DEFAULT_SETTINGS.defaultScannerDns
+					defaultScannerDns: Array.isArray(updatedSettings.defaultScannerDns) ? updatedSettings.defaultScannerDns : DEFAULT_SETTINGS.defaultScannerDns,
+					stackLogOperations: sanitizeStackLogOperations(updatedSettings.stackLogOperations)
 				});
 			}
 		} catch (error) {
@@ -281,6 +320,13 @@ function createSettingsStore() {
 				const newSettings = { ...current, confirmDestructive: value };
 				saveSettings({ confirmDestructive: value });
 				return newSettings;
+			});
+		},
+		setStackLogOperations: (value: StackLogOperation[]) => {
+			const clean = sanitizeStackLogOperations(value);
+			update((current) => {
+				saveSettings({ stackLogOperations: clean });
+				return { ...current, stackLogOperations: clean };
 			});
 		},
 		setShowStoppedContainers: (value: boolean) => {
@@ -413,6 +459,48 @@ function createSettingsStore() {
 			update((current) => {
 				const newSettings = { ...current, scannerCleanupEnabled: value };
 				saveSettings({ scannerCleanupEnabled: value });
+				return newSettings;
+			});
+		},
+		setDeployLogReconcileCron: (value: string) => {
+			update((current) => {
+				const newSettings = { ...current, deployLogReconcileCron: value };
+				saveSettings({ deployLogReconcileCron: value });
+				return newSettings;
+			});
+		},
+		setDeployLogReconcileEnabled: (value: boolean) => {
+			update((current) => {
+				const newSettings = { ...current, deployLogReconcileEnabled: value };
+				saveSettings({ deployLogReconcileEnabled: value });
+				return newSettings;
+			});
+		},
+		setScanRetentionCron: (value: string) => {
+			update((current) => {
+				const newSettings = { ...current, scanRetentionCron: value };
+				saveSettings({ scanRetentionCron: value });
+				return newSettings;
+			});
+		},
+		setScanRetentionEnabled: (value: boolean) => {
+			update((current) => {
+				const newSettings = { ...current, scanRetentionEnabled: value };
+				saveSettings({ scanRetentionEnabled: value });
+				return newSettings;
+			});
+		},
+		setScanRetentionKeep: (value: number) => {
+			update((current) => {
+				const newSettings = { ...current, scanRetentionKeep: value };
+				saveSettings({ scanRetentionKeep: value });
+				return newSettings;
+			});
+		},
+		setScanRetentionGraceDays: (value: number) => {
+			update((current) => {
+				const newSettings = { ...current, scanRetentionGraceDays: value };
+				saveSettings({ scanRetentionGraceDays: value });
 				return newSettings;
 			});
 		},

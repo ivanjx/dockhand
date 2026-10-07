@@ -5,7 +5,7 @@
 	import MultiSelectFilter from '$lib/components/MultiSelectFilter.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { DatePicker } from '$lib/components/ui/date-picker';
-	import { Input } from '$lib/components/ui/input';
+	import { SearchInput } from '$lib/components/ui/search-input';
 	import { Badge } from '$lib/components/ui/badge';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import {
@@ -30,7 +30,6 @@
 		Loader2,
 		FileX,
 		Heart,
-		Search,
 		Wifi,
 		Radio
 	} from 'lucide-svelte';
@@ -665,16 +664,7 @@
 		</div>
 		<div class="flex flex-wrap items-center gap-2">
 			<!-- Container name search -->
-			<div class="relative">
-				<Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-				<Input
-					type="text"
-					placeholder="Container..."
-					bind:value={filterContainerName}
-					onkeydown={(e) => e.key === 'Escape' && (filterContainerName = '')}
-					class="pl-8 h-8 w-36 text-sm"
-				/>
-			</div>
+			<SearchInput bind:value={filterContainerName} placeholder="Container..." class="h-8 w-36 text-sm" />
 
 			<!-- Action filter -->
 			<MultiSelectFilter

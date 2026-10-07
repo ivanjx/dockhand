@@ -43,8 +43,10 @@
 	import AnimateIconsToggle from '$lib/components/AnimateIconsToggle.svelte';
 	import IndentGuidesToggle from '$lib/components/IndentGuidesToggle.svelte';
 	import ColoredActionsToggle from '$lib/components/ColoredActionsToggle.svelte';
+	import EditorThemeSelector from '$lib/components/EditorThemeSelector.svelte';
 	import { themeStore } from '$lib/stores/theme';
 	import PageHeader from '$lib/components/PageHeader.svelte';
+	import { startRegistration } from '@simplewebauthn/browser';
 
 	interface Profile {
 		id: number;
@@ -95,6 +97,89 @@
 	let apiTokens = $state<ApiToken[]>([]);
 	let showApiTokenModal = $state(false);
 	let tokensLoading = $state(false);
+
+	interface Passkey {
+		id: number;
+		name: string | null;
+		deviceType: string;
+		backedUp: boolean;
+		createdAt: string;
+	}
+	let passkeys = $state<Passkey[]>([]);
+	let passkeysLoading = $state(false);
+	// Whether this instance offers passkeys. Existing keys stay listed when it is
+	// off, so somebody can see what they registered before it was turned off.
+	let passkeysEnabled = $state(true);
+	let passkeyActionLoading = $state(false);
+	let passkeyName = $state('');
+	let passkeyError = $state('');
+
+	async function fetchPasskeys() {
+		passkeysLoading = true;
+		try {
+			const response = await fetch('/api/profile/passkeys');
+			if (response.ok) {
+				const data = await response.json();
+				passkeys = data.passkeys || [];
+				passkeysEnabled = data.enabled !== false;
+			}
+		} finally {
+			passkeysLoading = false;
+		}
+	}
+
+	async function addPasskey() {
+		const name = passkeyName.trim();
+		if (!name) {
+			passkeyError = 'Enter a passkey name';
+			return;
+		}
+		passkeyActionLoading = true;
+		passkeyError = '';
+		try {
+			const optionsResponse = await fetch('/api/auth/passkeys/register/options', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ name })
+			});
+			const optionsData = await optionsResponse.json();
+			if (!optionsResponse.ok) throw new Error(optionsData.error || 'Passkey registration is unavailable');
+
+			const registrationResponse = await startRegistration({ optionsJSON: optionsData.options });
+			const verifyResponse = await fetch('/api/auth/passkeys/register/verify', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					ceremonyId: optionsData.ceremonyId,
+					response: registrationResponse
+				})
+			});
+			const verifyData = await verifyResponse.json();
+			if (!verifyResponse.ok) throw new Error(verifyData.error || 'Passkey registration failed');
+			passkeyName = '';
+			await fetchPasskeys();
+			showSuccessMessage('Passkey added successfully');
+		} catch (e) {
+			passkeyError = e instanceof Error && e.name !== 'NotAllowedError'
+				? e.message
+				: 'Passkey registration was cancelled or timed out';
+		} finally {
+			passkeyActionLoading = false;
+		}
+	}
+
+	async function deletePasskey(passkey: Passkey) {
+		if (!window.confirm(`Delete passkey "${passkey.name || 'Passkey'}"?`)) return;
+		passkeyError = '';
+		const response = await fetch(`/api/profile/passkeys/${passkey.id}`, { method: 'DELETE' });
+		if (response.ok) {
+			await fetchPasskeys();
+			showSuccessMessage('Passkey removed');
+		} else {
+			const data = await response.json();
+			passkeyError = data.error || 'Failed to remove passkey';
+		}
+	}
 
 	async function fetchApiTokens() {
 		tokensLoading = true;
@@ -345,6 +430,7 @@
 				profileFetched = true;
 				fetchProfile();
 				fetchApiTokens();
+				fetchPasskeys();
 			}
 		}
 	});
@@ -641,6 +727,76 @@
 							<Alert.Description>{mfaError}</Alert.Description>
 						</Alert.Root>
 					{/if}
+
+					<div class="p-3 border rounded-lg space-y-3">
+						<div class="flex items-center gap-3">
+							<KeyRound class="w-5 h-5 text-muted-foreground" />
+							<div>
+								<p class="font-medium">Passkeys</p>
+								<p class="text-sm text-muted-foreground">Use a device-bound or synced passkey to sign in</p>
+							</div>
+						</div>
+
+						{#if !passkeysEnabled}
+							<p class="rounded-md bg-muted/50 p-2 text-xs text-muted-foreground">
+								Passkey sign-in is switched off for this instance. Any passkeys below are
+								kept and work again if an administrator turns it back on.
+							</p>
+						{:else}
+						<div class="space-y-2">
+							<Label for="passkey-name">Passkey name</Label>
+							<div class="flex flex-col sm:flex-row gap-2">
+							<Input id="passkey-name" bind:value={passkeyName} maxlength={64} placeholder="e.g. Token2 security key" />
+							<Button onclick={addPasskey} disabled={passkeyActionLoading || !passkeyName.trim()} class="shrink-0">
+								{#if passkeyActionLoading}
+									<RefreshCw class="w-4 h-4 mr-1 animate-spin" />
+								{:else}
+									<Plus class="w-4 h-4 mr-1" />
+								{/if}
+								Add passkey
+							</Button>
+							</div>
+						</div>
+						{/if}
+
+						{#if passkeysLoading}
+							<p class="text-sm text-muted-foreground">Loading passkeys...</p>
+						{:else if passkeys.length === 0}
+							<p class="text-sm text-muted-foreground">No passkeys registered.</p>
+						{:else}
+							<div class="divide-y rounded-md border">
+								{#each passkeys as passkey (passkey.id)}
+									<div class="flex items-center justify-between gap-3 p-3">
+										<div class="min-w-0">
+											<p class="font-medium truncate">{passkey.name || 'Passkey'}</p>
+											<p class="text-xs text-muted-foreground mt-1">
+											{passkey.deviceType === 'multiDevice' ? 'Synced passkey' : 'Device-bound passkey'}
+											{passkey.backedUp ? ' · backed up' : ''} · added {formatDateTime(passkey.createdAt)}
+											</p>
+										</div>
+										<Button
+											variant="outline"
+											size="sm"
+											class="shrink-0 border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+											onclick={() => deletePasskey(passkey)}
+											aria-label={`Delete passkey ${passkey.name || 'Passkey'}`}
+											title={`Delete passkey ${passkey.name || 'Passkey'}`}
+										>
+											<Trash2 class="w-4 h-4 mr-1" />
+											Delete
+										</Button>
+									</div>
+								{/each}
+							</div>
+						{/if}
+
+						{#if passkeyError}
+							<Alert.Root variant="destructive">
+								<TriangleAlert class="h-4 w-4" />
+								<Alert.Description>{passkeyError}</Alert.Description>
+							</Alert.Root>
+						{/if}
+					</div>
 				</Card.Content>
 			</Card.Root>
 
@@ -751,6 +907,20 @@
 			</Card.Root>
 
 			</div>
+
+			<!-- Editor theme on its own full-width row so the live preview isn't cramped. -->
+			<Card.Root>
+				<Card.Header>
+					<Card.Title class="flex items-center gap-2">
+						<Palette class="w-5 h-5" />
+						Editor theme
+					</Card.Title>
+					<Card.Description>Color theme for the code editor, with a live preview.</Card.Description>
+				</Card.Header>
+				<Card.Content>
+					<EditorThemeSelector userId={profile.id} />
+				</Card.Content>
+			</Card.Root>
 		</div>
 	{/if}
 </div>

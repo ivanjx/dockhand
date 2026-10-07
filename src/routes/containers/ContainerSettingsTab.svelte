@@ -8,7 +8,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Checkbox } from '$lib/components/ui/checkbox';
 	import { TogglePill, ToggleGroup } from '$lib/components/ui/toggle-pill';
-	import { Plus, Trash2, Settings2, RefreshCw, Network, X, Ban, RotateCw, AlertTriangle, PauseCircle, PlayCircle, Share2, Server, CircleOff, Box, ChevronDown, ChevronsUpDown, Check, ChevronRight, Cpu, Shield, HeartPulse, Wifi, HardDrive, Lock, Loader2, CheckCircle2, Package, Gpu, Search, CircleHelp, CornerDownLeft } from 'lucide-svelte';
+	import { Plus, Trash2, Settings2, RefreshCw, Network, X, Ban, RotateCw, AlertTriangle, PauseCircle, PlayCircle, Share2, Server, CircleOff, Box, ChevronDown, ChevronsUpDown, Check, ChevronRight, Cpu, Shield, HeartPulse, Wifi, HardDrive, Lock, Loader2, CheckCircle2, Package, Gpu, Search, CircleHelp, CornerDownLeft, CircleArrowUp } from 'lucide-svelte';
 	import { toast } from 'svelte-sonner';
 	import { parseMemory, parseNanoCpus, parsePositiveInt } from '$lib/utils/container-resources';
 	import { parseHostPort, validatePort, validateIp, formatHostPort, expandPortBindings } from '$lib/utils/port-parse';
@@ -19,6 +19,7 @@
 	import ScheduledStartSettings from './ScheduledStartSettings.svelte';
 	import type { VulnerabilityCriteria } from '$lib/components/VulnerabilityCriteriaSelector.svelte';
 	import type { SystemContainerType } from '$lib/types';
+	import { isSameNetwork } from '$lib/utils/network-identity';
 
 	// Detect system containers (must match server-side logic in update-utils.ts)
 	function detectSystemContainer(imageName: string): SystemContainerType | null {
@@ -84,10 +85,13 @@
 
 	interface Props {
 		mode: 'create' | 'edit';
+		/** Shows an "update available" note by the image field (edit mode only). */
+		hasImageUpdate?: boolean;
 		// Basic settings
 		name: string;
 		image: string;
 		command: string;
+		entrypoint: string;
 		restartPolicy: string;
 		restartMaxRetries: number | '';
 		networkMode: string;
@@ -174,9 +178,11 @@
 
 	let {
 		mode,
+		hasImageUpdate = false,
 		name = $bindable(),
 		image = $bindable(),
 		command = $bindable(),
+		entrypoint = $bindable(''),
 		restartPolicy = $bindable(),
 		restartMaxRetries = $bindable(),
 		networkMode = $bindable(),
@@ -315,12 +321,28 @@
 		tick().then(() => networkModePickerTriggerRef?.focus());
 	}
 
+	// The primary as the daemon identifies it. Podman calls the default bridge "podman"
+	// in a container's inspect but "bridge" in the network list, so a name-only match
+	// treats the primary as an extra (#1619).
+	const primaryNetwork = $derived({
+		name: networkMode,
+		id: availableNetworks.find(n => n.name === networkMode)?.id ?? null
+	});
+
+	/** Attached networks other than the primary - what the "Additional networks" list shows. */
+	const attachedExtras = $derived(
+		selectedNetworks.filter(name => !isSameNetwork(
+			{ name, id: availableNetworks.find(n => n.name === name)?.id ?? null },
+			primaryNetwork
+		))
+	);
+
 	// Additional networks: custom networks NOT used as the primary mode and NOT already attached
 	const selectableNetworks = $derived(
 		availableNetworks.filter(n =>
 			!selectedNetworks.includes(n.name) &&
 			!['bridge', 'host', 'none'].includes(n.name) &&
-			n.name !== networkMode  // exclude the primary
+			!isSameNetwork(n, primaryNetwork)  // exclude the primary
 		)
 	);
 
@@ -871,7 +893,16 @@
 			</div>
 			{#if mode === 'edit'}
 				<div class="space-y-1.5">
-					<Label for="image" class="text-xs font-medium">Image *</Label>
+					<div class="flex items-center gap-2">
+						<Label for="image" class="text-xs font-medium">Image *</Label>
+						{#if hasImageUpdate}
+							<span title="A newer image is available - update from the containers list or the details view"
+								class="flex items-center gap-1 text-xs text-amber-500">
+								<CircleArrowUp class="w-3.5 h-3.5" />
+								Update available
+							</span>
+						{/if}
+					</div>
 					<Input
 						id="image"
 						bind:value={image}
@@ -890,6 +921,11 @@
 		<div class="space-y-1.5">
 			<Label for="command" class="text-xs font-medium">Command (optional)</Label>
 			<Input id="command" bind:value={command} placeholder="/bin/sh -c 'echo hello'" class="h-9" />
+		</div>
+
+		<div class="space-y-1.5">
+			<Label for="entrypoint" class="text-xs font-medium">Entrypoint (optional)</Label>
+			<Input id="entrypoint" bind:value={entrypoint} placeholder="/docker-entrypoint.sh" class="h-9" />
 		</div>
 
 		<div class="grid grid-cols-2 gap-3">
@@ -1157,9 +1193,9 @@
 					</Popover.Root>
 				{/if}
 
-				{#if selectedNetworks.filter(n => n !== networkMode).length > 0}
+				{#if attachedExtras.length > 0}
 					<div class="space-y-1 pt-1">
-						{#each selectedNetworks.filter(n => n !== networkMode) as networkName}
+						{#each attachedExtras as networkName}
 							{@const network = availableNetworks.find(n => n.name === networkName)}
 							{@const isExpanded = expandedNetworks.has(networkName)}
 							<div class="border rounded-md">

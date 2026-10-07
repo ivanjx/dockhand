@@ -13,7 +13,7 @@
 
 import { request } from 'undici';
 import type { AzureKvConfig, SecretProvider, TestConnectionResult } from './shared';
-import { assertSafeProviderHost, isJsonResponse } from './shared';
+import { assertSafeProviderHost, isJsonResponse, stripSurroundingQuotes } from './shared';
 
 const API_VERSION = '7.4';
 const AZURE_REF_PREFIX = 'azurekv://';
@@ -140,7 +140,7 @@ export const azureKvProvider: SecretProvider<AzureKvConfig> = {
 	supportsBulk: true,
 
 	isReference(value: unknown): value is string {
-		return typeof value === 'string' && AZURE_REF_RE.test(value.trim());
+		return typeof value === 'string' && AZURE_REF_RE.test(stripSurroundingQuotes(value));
 	},
 
 	async testConnection(config: AzureKvConfig): Promise<TestConnectionResult> {

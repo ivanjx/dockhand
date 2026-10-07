@@ -46,7 +46,7 @@ RUN cp -r node_modules/better-sqlite3/build /tmp/better-sqlite3-build \
 # -----------------------------------------------------------------------------
 # Stage 2: Go Collector Builder
 # -----------------------------------------------------------------------------
-FROM golang:1.25.13 AS go-builder
+FROM golang:1.26.8 AS go-builder
 WORKDIR /app
 COPY collector/ ./collector/
 RUN cd collector && CGO_ENABLED=0 go build -o /app/bin/collection-worker .
@@ -84,14 +84,15 @@ RUN addgroup -g 1001 dockhand \
 WORKDIR /app
 
 # Set up environment variables
+# PUID/PGID are deliberately NOT set here. The entrypoint defaults them to
+# 1001:1001, and it can only tell "nobody asked for a user" from "somebody
+# asked for 1001" while the variables are genuinely absent.
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     NODE_ENV=production \
     PORT=3000 \
     HOST=0.0.0.0 \
     DATA_DIR=/app/data \
     HOME=/home/dockhand \
-    PUID=1001 \
-    PGID=1001 \
     LD_PRELOAD=/usr/lib/libgetrandom-shim.so \
     DOCKHAND_VARIANT=baseline
 

@@ -6,6 +6,7 @@
 	import { onMount } from 'svelte';
 	import { appendEnvParam } from '$lib/stores/environment';
 	import { watchJob } from '$lib/utils/sse-fetch';
+	import { scanProgressLines } from '$lib/utils/scan-progress-lines';
 	import ScanResultsView from '../../routes/images/ScanResultsView.svelte';
 
 	export interface ScanResult {
@@ -176,13 +177,10 @@
 	function handleScanProgress(data: any) {
 		if (data.message) {
 			scanMessage = data.message;
-			const scanner = data.scanner || 'dockhand';
-			addOutputLine(`[${scanner}] ${data.message}`);
 		}
 
-		if (data.output) {
-			const scanner = data.scanner || 'dockhand';
-			addOutputLine(`[${scanner}] ${data.output}`);
+		for (const line of scanProgressLines(data)) {
+			addOutputLine(line);
 		}
 
 		if (data.stage === 'complete' || data.status === 'complete') {

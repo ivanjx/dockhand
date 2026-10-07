@@ -1,7 +1,7 @@
 <script lang="ts" generics="T">
 	import { onMount, onDestroy } from 'svelte';
 	import type { Snippet } from 'svelte';
-	import { CheckSquare, Square as SquareIcon, ArrowUp, ArrowDown, ArrowUpDown, ChevronDown, ChevronRight } from 'lucide-svelte';
+	import { CheckSquare, SquareMinus, Square as SquareIcon, ArrowUp, ArrowDown, ArrowUpDown, ChevronDown, ChevronRight } from 'lucide-svelte';
 	import { columnResize } from '$lib/actions/column-resize';
 	import { gridPreferencesStore } from '$lib/stores/grid-preferences';
 	import { getAllColumnConfigs } from '$lib/config/grid-columns';
@@ -11,6 +11,7 @@
 	import type { GridId, ColumnConfig, ColumnPreference } from '$lib/types';
 	import type { DataGridSortState, DataGridRowState } from './types';
 	import { setDataGridContext } from './context';
+	import { groupData, type GroupDescriptor, type DataGridGroup } from './grouping-core';
 
 	// Props
 	interface Props {
@@ -59,6 +60,18 @@
 		// Selection filter - return false to make an item non-selectable
 		selectableFilter?: (item: T) => boolean;
 
+		// Visual grouping (standard, non-virtual mode only; OFF by default).
+		// When `groupBy` is set, rows are partitioned into collapsible sections with
+		// a coloured header. When it is undefined the render path is byte-for-byte
+		// the ungrouped grid.
+		groupBy?: (item: T) => GroupDescriptor | null;
+		collapsedGroups?: Set<string>;
+		ungroupedLabel?: string;
+		/** Draw the coloured left accent band spanning each group (default true). */
+		showGroupBands?: boolean;
+		/** Optional custom header content (e.g. tag chips/icons) rendered inside the group pill. */
+		groupHeaderLabel?: Snippet<[DataGridGroup<T>]>;
+
 		// Expandable rows
 		expandable?: boolean;
 		expandedKeys?: Set<unknown>;
@@ -101,6 +114,11 @@
 		windowTotal,
 		onWindowShift,
 		onVisibleRangeChange,
+		groupBy,
+		collapsedGroups = $bindable(new Set<string>()),
+		ungroupedLabel = 'Untagged',
+		showGroupBands = true,
+		groupHeaderLabel,
 		onRowClick,
 		highlightedKey,
 		rowClass,
@@ -456,6 +474,28 @@
 		return cachedVisibleData;
 	});
 
+	// Grouping (standard mode only). Empty when `groupBy` is not supplied, so the
+	// ungrouped body is chosen and nothing here runs.
+	const groups = $derived.by<DataGridGroup<T>[]>(() =>
+		groupBy ? groupData(data, groupBy, ungroupedLabel) : []
+	);
+	function toggleGroup(key: string) {
+		const collapsed = collapsedGroups.has(key);
+		const next = new Set(collapsedGroups);
+		if (collapsed) next.delete(key); else next.add(key);
+		collapsedGroups = next;
+	}
+	// Global, stable row index across all groups (for getRowState cache validity).
+	const groupIndexMap = $derived.by(() => {
+		const m = new Map<T, number>();
+		let i = 0;
+		for (const g of groups) for (const item of g.items) m.set(item, i++);
+		return m;
+	});
+	function groupRowIndex(item: T): number {
+		return groupIndexMap.get(item) ?? 0;
+	}
+
 	// Windowed rows for the absolute range [startIndex, endIndex): each position is
 	// the loaded row or undefined (→ a loading placeholder row).
 	const windowedVisible = $derived.by<(T | undefined)[]>(() => {
@@ -770,7 +810,7 @@
 							{#if allSelected}
 								<CheckSquare class="w-3.5 h-3.5 text-muted-foreground" />
 							{:else if someSelected}
-								<CheckSquare class="w-3.5 h-3.5 text-muted-foreground" />
+								<SquareMinus class="w-3.5 h-3.5 text-muted-foreground" />
 							{:else}
 								<SquareIcon class="w-3.5 h-3.5 text-muted-foreground" />
 							{/if}
@@ -974,10 +1014,57 @@
 	</tbody>
 {/snippet}
 
+<!--
+	Grouped body (opt-in via `groupBy`, standard mode only). Emits a coloured
+	collapsible header row before each group; the group's data rows reuse the SAME
+	`dataRow` snippet as the ungrouped path, and carry a left accent band in the
+	group colour. When a group is collapsed its rows are omitted. The row index is
+	a running global counter so `getRowState` caching stays correct.
+-->
+{#snippet groupedBody()}
+	{@const totalCols = fixedStartCols.length + orderedColumns.length + fixedEndCols.length}
+	<!-- One <tbody> per group so the accent band (inset box-shadow on each row's
+	     first cell) spans the whole group - header AND every data row. -->
+	{#each groups as group (group.key)}
+		{@const collapsed = collapsedGroups.has(group.key)}
+		{@const hex = group.color}
+		{@const band = !showGroupBands ? 'transparent' : (hex ?? 'var(--color-muted-foreground)')}
+		<tbody class="tag-group" style="--group-accent: {band};">
+			<tr class="group-header-row">
+				<td colspan={totalCols} class="p-0">
+					<button type="button" onclick={() => toggleGroup(group.key)}
+						class="flex w-full items-center gap-2 px-2 py-1.5 text-left transition-colors hover:bg-muted/60">
+						{#if collapsed}
+							<ChevronRight class="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+						{:else}
+							<ChevronDown class="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+						{/if}
+						<span class="inline-flex items-center gap-1 rounded-full border px-2 py-0 text-xs font-medium"
+							style={hex ? `color: ${hex}; background-color: ${hex}1a; border-color: ${hex}33;` : ''}>
+							{@render groupHeaderLabel?.(group)}
+							{#if !groupHeaderLabel}{group.label}{/if}
+						</span>
+						<span class="text-2xs text-muted-foreground">({group.items.length})</span>
+					</button>
+				</td>
+			</tr>
+			{#if !collapsed}
+				{#each group.items as item (item[keyField])}
+					{@render dataRow(item, getRowState(item, groupRowIndex(item)))}
+				{/each}
+			{/if}
+		</tbody>
+	{/each}
+{/snippet}
+
 {#snippet tableContent()}
 	<table class="text-sm table-fixed data-grid {className}" style="width: {totalTableWidth}px">
 		{@render tableHeader()}
-		{@render tableBody()}
+		{#if groupBy}
+			{@render groupedBody()}
+		{:else}
+			{@render tableBody()}
+		{/if}
 	</table>
 {/snippet}
 
@@ -1027,3 +1114,12 @@
 		{@render tableContent()}
 	{/if}
 </div>
+
+<style>
+	/* Group accent band: a coloured left stripe spanning the whole group
+	   (header + every data/expanded row). Rendered as an inset shadow on each
+	   row's first cell so it works reliably inside a table. */
+	tbody.tag-group > tr > td:first-child {
+		box-shadow: inset 2px 0 0 var(--group-accent);
+	}
+</style>

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { DEFAULT_GRYPE_IMAGE, DEFAULT_TRIVY_IMAGE, imageRepo } from '$lib/utils/scanner-images';
 	import { toast } from 'svelte-sonner';
 	import { readJobResponse } from '$lib/utils/sse-fetch';
 	import { validateEnvName } from '$lib/utils/env-name';
@@ -86,6 +87,7 @@
 	import { licenseStore } from '$lib/stores/license';
 	import { formatDateTime, formatDate } from '$lib/stores/settings';
 	import { getLabelColor, getLabelBgColor, parseLabels, MAX_LABELS } from '$lib/utils/label-colors';
+	import { MEMORY_SUPPORT_DOC_URL } from '$lib/utils/memory-support';
 	import { labelColorOverrides } from '$lib/stores/label-colors';
 	import EventTypesEditor from './EventTypesEditor.svelte';
 	import UpdatesTab from './tabs/UpdatesTab.svelte';
@@ -301,6 +303,11 @@
 	let formHighlightChanges = $state(true);
 	let formDiskWarningEnabled = $state(true);
 	let formDiskWarningMode = $state<'percentage' | 'absolute'>('percentage');
+	/** Whether this host reports a total for percentage warnings; null = not asked yet. */
+	let formPercentageSupported = $state<boolean | null>(null);
+	let formStorageDriver = $state<string | null>(null);
+	/** The mode the server has, kept apart from the form so edits cannot lock it out. */
+	let storedDiskWarningMode = $state<'percentage' | 'absolute' | null>(null);
 	let formDiskWarningThreshold = $state(80);
 	let formDiskWarningThresholdGb = $state(50);
 	let formConnectionType = $state<ConnectionType>('socket');
@@ -494,6 +501,9 @@
 	// Test connection state
 	let testingConnection = $state(false);
 	let testResult = $state<{ success: boolean; info?: any; error?: string; isEdgeMode?: boolean } | null>(null);
+	// Shown when a successful Test connection reveals the daemon's kernel has cgroup
+	// memory accounting disabled (per-container memory shows 0 - common on Raspberry Pi).
+	let memWarnOpen = $state(false);
 
 	// Socket detection state
 	let detectingSockets = $state(false);
@@ -510,9 +520,14 @@
 	let selectedScanner = $state<ScannerType>('both');
 	let scannerAvailability = $state<{ grype: boolean; trivy: boolean }>({ grype: false, trivy: false });
 	let scannerVersions = $state<{ grype: string | null; trivy: string | null }>({ grype: null, trivy: null });
+	// A newer upstream RELEASE, when the Check found one. Distinct from a rebuild of
+	// the pinned tag: moving to it changes the configured image, so it is offered,
+	// never applied on its own.
+	let grypeNewerVersion = $state<string | null>(null);
+	let trivyNewerVersion = $state<string | null>(null);
 	let scannerLoading = $state(true);
-	let scannerGrypeImage = $state('anchore/grype:v0.110.0');
-	let scannerTrivyImage = $state('aquasec/trivy:0.69.3');
+	let scannerGrypeImage = $state(DEFAULT_GRYPE_IMAGE);
+	let scannerTrivyImage = $state(DEFAULT_TRIVY_IMAGE);
 	let loadingScannerVersions = $state(false);
 	let removingGrype = $state(false);
 	let removingTrivy = $state(false);
@@ -540,6 +555,9 @@
 	let updateCheckEnabled = $state(false);
 	let updateCheckCron = $state('0 4 * * *'); // Default: 4 AM daily
 	let updateCheckAutoUpdate = $state(false);
+	let minimumReleaseAgeHours = $state(0);
+	let minimumReleaseAgeOverridden = $state(false);
+	let minimumReleaseAgeOverride = $state(false);
 	let updateCheckVulnerabilityCriteria = $state<VulnerabilityCriteria>('never');
 	let updateCheckLoading = $state(false);
 
@@ -604,6 +622,11 @@
 			formLabels = parseLabels(environment.labels);
 			newLabelInput = '';
 			formPublicIp = environment.publicIp || '';
+			// Unknown until this environment's own host answers: the previous one's
+			// verdict must not be shown against a different host.
+			formPercentageSupported = null;
+			formStorageDriver = null;
+			storedDiskWarningMode = null;
 			modalTab = 'general';
 			// Reset icon state
 			pendingIconData = null;
@@ -644,6 +667,9 @@
 			formHighlightChanges = true;
 			formDiskWarningEnabled = true;
 			formDiskWarningMode = 'percentage';
+			formPercentageSupported = null;
+			formStorageDriver = null;
+			storedDiskWarningMode = null;
 			formDiskWarningThreshold = 80;
 			formDiskWarningThresholdGb = 50;
 			formConnectionType = 'socket';
@@ -667,6 +693,9 @@
 			updateCheckEnabled = false;
 			updateCheckCron = '0 4 * * *';
 			updateCheckAutoUpdate = false;
+			minimumReleaseAgeHours = 0;
+			minimumReleaseAgeOverridden = false;
+			minimumReleaseAgeOverride = false;
 			// Reset image prune settings
 			imagePruneEnabled = false;
 			imagePruneCron = '0 3 * * 0';
@@ -743,7 +772,10 @@
 					tlsCert: cleanCertificate(formTlsCert),
 					tlsKey: cleanCertificate(formTlsKey),
 					tlsSkipVerify: formTlsSkipVerify,
-					hawserToken: formHawserToken || pendingToken
+					hawserToken: formHawserToken || pendingToken,
+					// When editing, let the server fall back to the stored token/key for any
+					// secret the form left blank (secrets are never sent back to the client) (#1483).
+					environmentId: isEditing && environment ? environment.id : undefined
 				})
 			});
 
@@ -755,6 +787,9 @@
 					toast.info('Edge mode - connection will be tested when agent connects');
 				} else {
 					toast.success(`Connected! Docker ${result.info.serverVersion} - ${result.info.containers} containers`);
+					// Docker reports the kernel's cgroup memory controller is off -> container
+					// memory will show 0. Surface it now so the user isn't left guessing.
+					if (result.info.showMemoryWarning) memWarnOpen = true;
 				}
 			} else {
 				toast.error(result.error || 'Connection failed');
@@ -801,6 +836,10 @@
 
 	// === Environment CRUD ===
 	async function createEnvironment() {
+		if (minimumReleaseAgeOverride && (!Number.isInteger(minimumReleaseAgeHours) || minimumReleaseAgeHours < 0 || minimumReleaseAgeHours > 720)) {
+			formError = 'Minimum image age must be a whole number from 0 to 720 hours';
+			return;
+		}
 		// Validation based on connection type
 		formErrors = {};
 		let hasErrors = false;
@@ -897,8 +936,8 @@
 						})
 					});
 				}
-				// Save update check settings if enabled
-				if (updateCheckEnabled && newEnv?.id) {
+				// Save update check settings and the optional release-age override
+				if (newEnv?.id) {
 					await saveUpdateCheckSettings(newEnv.id);
 				}
 				// Save image prune settings if enabled
@@ -918,7 +957,7 @@
 				formError = data.error || 'Failed to create environment';
 			}
 		} catch (error) {
-			formError = 'Failed to create environment';
+			formError = error instanceof Error ? error.message : 'Failed to create environment';
 		} finally {
 			formSaving = false;
 		}
@@ -926,6 +965,10 @@
 
 	async function updateEnvironment() {
 		if (!environment) return;
+		if (minimumReleaseAgeOverride && (!Number.isInteger(minimumReleaseAgeHours) || minimumReleaseAgeHours < 0 || minimumReleaseAgeHours > 720)) {
+			formError = 'Minimum image age must be a whole number from 0 to 720 hours';
+			return;
+		}
 
 		formErrors = {};
 		let hasErrors = false;
@@ -1055,7 +1098,7 @@
 				formError = data.error || 'Failed to update environment';
 			}
 		} catch (error) {
-			formError = 'Failed to update environment';
+			formError = error instanceof Error ? error.message : 'Failed to update environment';
 		} finally {
 			formSaving = false;
 		}
@@ -1069,8 +1112,11 @@
 				const data = await response.json();
 				formDiskWarningEnabled = data.enabled ?? true;
 				formDiskWarningMode = data.mode ?? 'percentage';
+				storedDiskWarningMode = formDiskWarningMode;
 				formDiskWarningThreshold = data.threshold ?? 80;
 				formDiskWarningThresholdGb = data.thresholdGb ?? 50;
+				formPercentageSupported = data.percentageSupported ?? null;
+				formStorageDriver = data.storageDriver ?? null;
 			}
 		} catch (error) {
 			console.error('Failed to load disk warning settings:', error);
@@ -1239,12 +1285,18 @@
 					updateCheckCron = data.settings.cron || '0 4 * * *';
 					updateCheckAutoUpdate = data.settings.autoUpdate ?? false;
 					updateCheckVulnerabilityCriteria = data.settings.vulnerabilityCriteria || 'never';
+					minimumReleaseAgeHours = data.settings.minimumReleaseAgeHours ?? 0;
+					minimumReleaseAgeOverridden = data.settings.minimumReleaseAgeOverridden ?? false;
+					minimumReleaseAgeOverride = data.settings.minimumReleaseAgeOverride ?? false;
 				} else {
 					// No settings found - use defaults
 					updateCheckEnabled = false;
 					updateCheckCron = '0 4 * * *';
 					updateCheckAutoUpdate = false;
 					updateCheckVulnerabilityCriteria = 'never';
+					minimumReleaseAgeHours = 0;
+					minimumReleaseAgeOverridden = false;
+					minimumReleaseAgeOverride = false;
 				}
 			}
 		} catch (error) {
@@ -1255,19 +1307,21 @@
 	}
 
 	async function saveUpdateCheckSettings(envId: number) {
-		try {
-			await fetch(`/api/environments/${envId}/update-check`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					enabled: updateCheckEnabled,
-					cron: updateCheckCron,
-					autoUpdate: updateCheckAutoUpdate,
-					vulnerabilityCriteria: updateCheckVulnerabilityCriteria
-				})
-			});
-		} catch (error) {
-			console.error('Failed to save update check settings:', error);
+		const response = await fetch(`/api/environments/${envId}/update-check`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				enabled: updateCheckEnabled,
+				cron: updateCheckCron,
+				autoUpdate: updateCheckAutoUpdate,
+				vulnerabilityCriteria: updateCheckVulnerabilityCriteria,
+				minimumReleaseAgeHours,
+				minimumReleaseAgeOverride
+			})
+		});
+		if (!response.ok) {
+			const data = await response.json().catch(() => ({}));
+			throw new Error(data.error || 'Failed to save update check settings');
 		}
 	}
 
@@ -1359,11 +1413,16 @@
 		grypeUpdateStatus = 'idle';
 		try {
 			const envParam = environment?.id ? `&env=${environment.id}` : '';
-			const response = await fetch(`/api/settings/scanner?checkUpdates=true${envParam}`);
+			// Ask for BOTH: a rebuild of the pinned tag, and a newer release. A pinned
+			// tag is permanently "up to date" on its own digest, so the release check
+			// is the one that answers "is there a newer scanner".
+			const response = await fetch(`/api/settings/scanner?checkUpdates=true&checkNewerVersions=true${envParam}`);
 			const data = await response.json();
+			grypeNewerVersion = data.newerVersions?.grype?.latest ?? null;
 			if (data.updates) {
-				grypeUpdateStatus = data.updates.grype?.hasUpdate ? 'update-available' : 'up-to-date';
-				setTimeout(() => { grypeUpdateStatus = 'idle'; }, 3000);
+				const rebuilt = data.updates.grype?.hasUpdate === true;
+				grypeUpdateStatus = rebuilt || grypeNewerVersion ? 'update-available' : 'up-to-date';
+				if (!grypeNewerVersion) setTimeout(() => { grypeUpdateStatus = 'idle'; }, 3000);
 			}
 		} catch (error) {
 			console.error('Failed to check Grype update:', error);
@@ -1377,11 +1436,16 @@
 		trivyUpdateStatus = 'idle';
 		try {
 			const envParam = environment?.id ? `&env=${environment.id}` : '';
-			const response = await fetch(`/api/settings/scanner?checkUpdates=true${envParam}`);
+			// Ask for BOTH: a rebuild of the pinned tag, and a newer release. A pinned
+			// tag is permanently "up to date" on its own digest, so the release check
+			// is the one that answers "is there a newer scanner".
+			const response = await fetch(`/api/settings/scanner?checkUpdates=true&checkNewerVersions=true${envParam}`);
 			const data = await response.json();
+			trivyNewerVersion = data.newerVersions?.trivy?.latest ?? null;
 			if (data.updates) {
-				trivyUpdateStatus = data.updates.trivy?.hasUpdate ? 'update-available' : 'up-to-date';
-				setTimeout(() => { trivyUpdateStatus = 'idle'; }, 3000);
+				const rebuilt = data.updates.trivy?.hasUpdate === true;
+				trivyUpdateStatus = rebuilt || trivyNewerVersion ? 'update-available' : 'up-to-date';
+				if (!trivyNewerVersion) setTimeout(() => { trivyUpdateStatus = 'idle'; }, 3000);
 			}
 		} catch (error) {
 			console.error('Failed to check Trivy update:', error);
@@ -1395,11 +1459,27 @@
 		pullingGrype = true;
 		grypeUpdateStatus = 'idle';
 		try {
+			// A newer release means a different TAG, so the configured image has to move
+			// first - pulling the old tag again would just re-fetch the same version.
+			let image = scannerGrypeImage;
+			if (grypeNewerVersion) {
+				image = `${imageRepo(image)}:${grypeNewerVersion}`;
+				const saved = await fetch('/api/settings/scanner', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ grypeImage: image })
+				});
+				if (!saved.ok) {
+					const err = await saved.json().catch(() => ({}));
+					throw new Error(err.error || 'Could not change the scanner image');
+				}
+				scannerGrypeImage = image;
+			}
 			const pullUrl = environment?.id ? `/api/images/pull?env=${environment.id}` : '/api/images/pull';
 			const response = await fetch(pullUrl, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ image: scannerGrypeImage })
+				body: JSON.stringify({ image })
 			});
 
 			if (!response.ok) {
@@ -1413,10 +1493,14 @@
 
 			// Refresh scanner status after pull
 			await loadScannerVersionsAsync(environment?.id);
+			grypeNewerVersion = null;
 			grypeUpdateStatus = 'up-to-date';
 			setTimeout(() => { grypeUpdateStatus = 'idle'; }, 3000);
 		} catch (error) {
+			// Surface it: a refused image change (admin only) or a failed pull leaves
+			// the button looking like it did nothing at all.
 			console.error('Failed to pull Grype image:', error);
+			toast.error(error instanceof Error ? error.message : 'Failed to update Grype');
 		} finally {
 			pullingGrype = false;
 		}
@@ -1427,11 +1511,27 @@
 		pullingTrivy = true;
 		trivyUpdateStatus = 'idle';
 		try {
+			// A newer release means a different TAG, so the configured image has to move
+			// first - pulling the old tag again would just re-fetch the same version.
+			let image = scannerTrivyImage;
+			if (trivyNewerVersion) {
+				image = `${imageRepo(image)}:${trivyNewerVersion}`;
+				const saved = await fetch('/api/settings/scanner', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ trivyImage: image })
+				});
+				if (!saved.ok) {
+					const err = await saved.json().catch(() => ({}));
+					throw new Error(err.error || 'Could not change the scanner image');
+				}
+				scannerTrivyImage = image;
+			}
 			const pullUrl = environment?.id ? `/api/images/pull?env=${environment.id}` : '/api/images/pull';
 			const response = await fetch(pullUrl, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ image: scannerTrivyImage })
+				body: JSON.stringify({ image })
 			});
 
 			if (!response.ok) {
@@ -1445,10 +1545,14 @@
 
 			// Refresh scanner status after pull
 			await loadScannerVersionsAsync(environment?.id);
+			trivyNewerVersion = null;
 			trivyUpdateStatus = 'up-to-date';
 			setTimeout(() => { trivyUpdateStatus = 'idle'; }, 3000);
 		} catch (error) {
+			// Surface it: a refused image change (admin only) or a failed pull leaves
+			// the button looking like it did nothing at all.
 			console.error('Failed to pull Trivy image:', error);
+			toast.error(error instanceof Error ? error.message : 'Failed to update Trivy');
 		} finally {
 			pullingTrivy = false;
 		}
@@ -2002,10 +2106,11 @@
 														A direct daemon shares no filesystem with Dockhand. When set, Dockhand copies each
 														stack's folder to
 														<code class="bg-muted px-1 rounded">&lt;this path&gt;/&lt;stack&gt;</code>
-														<span class="font-medium text-foreground">on the remote host</span> so the backup
+														<span class="font-medium text-foreground">on the remote host</span>
+														<span class="font-medium text-foreground">on each deploy</span> so the backup
 														helper can read the compose and config, and rewrites relative binds
 														(<code class="bg-muted px-1 rounded">./data</code>) to that host path so they resolve
-														on the remote daemon.
+														on the remote daemon. After setting this, redeploy a stack once so its files are staged there.
 													</p>
 													<p class="text-muted-foreground">
 														Leave empty to skip this: the stack won't be backupable and a relative bind resolves
@@ -2031,6 +2136,8 @@
 										Absolute path on the remote host where Dockhand keeps this stack's files, so its compose
 										and config are backupable and relative binds resolve on the remote daemon. Leave empty to
 										use only absolute paths or named volumes.
+										<span class="text-foreground font-medium">Takes effect on the next deploy</span> - after
+										setting this, redeploy each stack so Dockhand stages its files there.
 									{/if}
 								</p>
 							</div>
@@ -2595,6 +2702,9 @@
 						bind:updateCheckCron={updateCheckCron}
 						bind:updateCheckAutoUpdate={updateCheckAutoUpdate}
 						bind:updateCheckVulnerabilityCriteria={updateCheckVulnerabilityCriteria}
+						bind:minimumReleaseAgeHours={minimumReleaseAgeHours}
+						minimumReleaseAgeOverridden={minimumReleaseAgeOverridden}
+						bind:minimumReleaseAgeOverride={minimumReleaseAgeOverride}
 						scannerEnabled={scannerEnabled}
 						imagePruneLoading={imagePruneLoading}
 						bind:imagePruneEnabled={imagePruneEnabled}
@@ -2616,6 +2726,9 @@
 						bind:diskWarningMode={formDiskWarningMode}
 						bind:diskWarningThreshold={formDiskWarningThreshold}
 						bind:diskWarningThresholdGb={formDiskWarningThresholdGb}
+						percentageSupported={formPercentageSupported}
+						storageDriver={formStorageDriver}
+						{storedDiskWarningMode}
 					/>
 				</Tabs.Content>
 
@@ -2735,7 +2848,7 @@
 																Pulling
 															{:else}
 																<Download class="w-2.5 h-2.5 mr-0.5" />
-																Update
+																{#if grypeNewerVersion}Update to {grypeNewerVersion}{:else}Update{/if}
 															{/if}
 														</button>
 													{:else}
@@ -2812,7 +2925,7 @@
 																Pulling
 															{:else}
 																<Download class="w-2.5 h-2.5 mr-0.5" />
-																Update
+																{#if trivyNewerVersion}Update to {trivyNewerVersion}{:else}Update{/if}
 															{/if}
 														</button>
 													{:else}
@@ -3140,6 +3253,36 @@
 			onCancel={() => showIconCropper = false}
 			onSave={handleIconCropSave}
 		/>
+	</Dialog.Content>
+</Dialog.Root>
+
+<!-- Kernel cgroup memory accounting is disabled on this daemon (container memory shows 0). -->
+<Dialog.Root bind:open={memWarnOpen}>
+	<Dialog.Content class="max-w-md">
+		<Dialog.Header>
+			<Dialog.Title class="flex items-center gap-2 text-amber-600 dark:text-amber-400">
+				<AlertTriangle class="w-5 h-5" />
+				Container memory won't be shown
+			</Dialog.Title>
+		</Dialog.Header>
+		<div class="text-sm text-muted-foreground space-y-3">
+			<p>
+				This host's kernel has cgroup memory accounting disabled, so Docker can't report
+				per-container memory - it will show <span class="font-medium text-foreground whitespace-nowrap">0&nbsp;B</span>
+				for every container. This is common on Raspberry Pi and some ARM boards.
+			</p>
+			<p>
+				It's fixed in the kernel boot config, not in Dockhand. See the guide:
+				<a href={MEMORY_SUPPORT_DOC_URL} target="_blank" rel="noopener noreferrer"
+					class="text-primary hover:underline inline-flex items-center gap-1">
+					enabling container memory accounting
+					<ExternalLink class="w-3 h-3" />
+				</a>
+			</p>
+		</div>
+		<Dialog.Footer>
+			<Button onclick={() => (memWarnOpen = false)}>OK</Button>
+		</Dialog.Footer>
 	</Dialog.Content>
 </Dialog.Root>
 

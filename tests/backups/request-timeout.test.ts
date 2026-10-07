@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { computeRequestTimeoutMs } from '../../src/lib/server/backups/request-timeout';
+import { computeRequestTimeoutMs, isPrunePath } from '../../src/lib/server/backups/request-timeout';
 
 const base = { path: '/containers/x/json', streamingBody: false, streamingResponse: false };
 
@@ -19,6 +19,18 @@ describe('computeRequestTimeoutMs - idle-timeout policy', () => {
 	it('a prune request gets 300s (it can take a while)', () => {
 		expect(computeRequestTimeoutMs({ ...base, path: '/images/prune' })).toBe(300000);
 		expect(computeRequestTimeoutMs({ ...base, path: '/containers/prune' })).toBe(300000);
+	});
+
+	it('an image prune WITH a filters query still gets 300s (#1630)', () => {
+		const path = '/images/prune?filters=%7B%22dangling%22%3A%5B%22true%22%5D%7D';
+		expect(computeRequestTimeoutMs({ ...base, path })).toBe(300000);
+		expect(isPrunePath(path)).toBe(true);
+	});
+
+	it('a query string alone never enables the prune timeout', () => {
+		expect(computeRequestTimeoutMs({ ...base, path: '/images/json?filters=/prune' })).toBe(30000);
+		expect(isPrunePath('/images/json?x=/prune')).toBe(false);
+		expect(isPrunePath('/images/json')).toBe(false);
 	});
 
 	it('a compose operation gets the COMPOSE_TIMEOUT (default 900s)', () => {

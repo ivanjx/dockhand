@@ -57,7 +57,8 @@
 		loadingStats = true;
 		try {
 			const res = await fetch(`/api/backup/destinations/${destination.id}/task`, {
-				method: 'POST', headers: { 'Content-Type': 'application/json' },
+				// Accept: json runs the read synchronously so we get {success, stats}, not {jobId}.
+				method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
 				body: JSON.stringify({ task: 'stats' })
 			});
 			const data = await res.json();
@@ -96,7 +97,7 @@
 		{
 			value: 'local', label: 'Local path', icon: HardDrive,
 			fields: [
-				{ key: 'path', label: 'Path', placeholder: '/mnt/backups/dockhand', optional: true }
+				{ key: 'path', label: 'Path', placeholder: '/app/local-backups/myrepo', optional: true }
 			],
 			buildRepo: (f) => f.path || '',
 			parseRepo: (repo) => ({ path: repo })
@@ -393,10 +394,14 @@
 		setTimeout(() => { generatedOk = false; }, 1500);
 	}
 
-	function copyPassword() {
-		copyToClipboard(formPassword);
-		copiedOk = true;
-		setTimeout(() => { copiedOk = false; }, 1500);
+	async function copyPassword() {
+		const ok = await copyToClipboard(formPassword);
+		if (ok) {
+			copiedOk = true;
+			setTimeout(() => { copiedOk = false; }, 1500);
+		} else {
+			toast.error('Could not copy to clipboard. Copy it manually, or use HTTPS to enable one-click copy.');
+		}
 	}
 
 	function handleBackendChange(value: string) {
@@ -564,7 +569,7 @@
 		{#if selectedBackend.value === 'local'}
 			<div class="flex items-start gap-2 p-2.5 mt-4 rounded-md bg-amber-500/10 border border-amber-500/20 text-xs text-amber-600 dark:text-amber-400">
 				<HardDrive class="w-3.5 h-3.5 shrink-0 mt-0.5" />
-				<span>Local path repositories work on the local Docker host, or a co-located socket-proxy on that same host. For remote hosts, use S3, REST, or another remote backend.</span>
+				<span>Enter the path as Dockhand sees it inside its own container (the container side of your backup volume mount, e.g. <code>/app/local-backups/...</code>), not the host path. Local path repositories work on the local Docker host, or a co-located socket-proxy on that same host. For remote hosts, use S3, REST, or another remote backend.</span>
 			</div>
 		{/if}
 		<div class="grid grid-cols-2 gap-6 py-4">

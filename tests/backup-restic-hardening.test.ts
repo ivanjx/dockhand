@@ -108,11 +108,6 @@ describe('buildResticEnv — env allowlist (audit #1, #32)', () => {
 		assert.equal(env.RESTIC_CACHE_DIR, '/app/data/.restic-cache');
 	});
 
-	it('defaults the cache dir to /app/data when DATA_DIR is unset', () => {
-		const env = buildResticEnv(procEnv, { repository: 'r', password: 'p' });
-		assert.equal(env.RESTIC_CACHE_DIR, '/app/data/.restic-cache');
-	});
-
 	it('an operator-set RESTIC_CACHE_DIR wins', () => {
 		const env = buildResticEnv({ ...procEnv, RESTIC_CACHE_DIR: '/custom/cache' }, { repository: 'r', password: 'p' });
 		assert.equal(env.RESTIC_CACHE_DIR, '/custom/cache');

@@ -37,7 +37,7 @@ RUN APKO_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo "aarch64" || echo "x86_64") 
     "    - busybox" \
     "    - tzdata" \
     "    - docker-cli" \
-    "    - docker-compose=5.5.0-r2" \
+    "    - docker-compose=5.5.1-r2" \
     "    - docker-cli-buildx" \
     "    - sqlite" \
     "    - postgresql-client" \
@@ -94,7 +94,7 @@ RUN cp -r node_modules/better-sqlite3/build /tmp/better-sqlite3-build \
     && rm -rf node_modules/@types /tmp/better-sqlite3-build
 
 # Build Go collector
-FROM --platform=$BUILDPLATFORM golang:1.25.13 AS go-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.8 AS go-builder
 ARG TARGETARCH
 WORKDIR /app
 COPY collector/ ./collector/
@@ -124,9 +124,10 @@ ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     PORT=3000 \
     HOST=0.0.0.0 \
     DATA_DIR=/app/data \
-    HOME=/home/dockhand \
-    PUID=1001 \
-    PGID=1001
+    HOME=/home/dockhand
+# PUID/PGID are deliberately NOT set here. The entrypoint defaults them to
+# 1001:1001, and it can only tell "nobody asked for a user" from "somebody asked
+# for 1001" while the variables are genuinely absent.
 
 # Create docker compose plugin symlink
 RUN mkdir -p /usr/libexec/docker/cli-plugins \

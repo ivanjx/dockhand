@@ -41,6 +41,25 @@ describe('parseMiniSchema: always terminates + bracket arrays', () => {
 	test('array<T> long form still works (no regression)', () => {
 		expect(parseMiniSchema('array<string>')).toEqual({ kind: 'array', items: { kind: 'string' } });
 	});
+
+	test('bare `object` parses as an opaque object, not the string fallback', () => {
+		expect(parseMiniSchema('object')).toEqual({ kind: 'object', properties: {}, required: [] });
+	});
+
+	test('nested object with a bare `object` property (the real body: annotation on POST /api/stacks/{name}/validate — was silently "string")', () => {
+		// Before this fix, `severity` and `envVars` both fell through to
+		// `{ kind: 'string' }` because `parseType()` only recognized
+		// integer/number/boolean/string as bare words. `existing` (added for
+		// #1530) is a plain `boolean` and was never affected by this bug —
+		// included here only to keep this literal in sync with the real
+		// annotation.
+		const s = parseMiniSchema(
+			'{compose:string!, existing:boolean, config:{disabled:[string], severity:object}, envVars:object}'
+		);
+		expect((s as any).properties.config.properties.severity).toEqual({ kind: 'object', properties: {}, required: [] });
+		expect((s as any).properties.envVars).toEqual({ kind: 'object', properties: {}, required: [] });
+		expect((s as any).properties.existing).toEqual({ kind: 'boolean' });
+	});
 });
 
 describe('parseAnnotations: non-JSON request bodies', () => {
@@ -117,5 +136,32 @@ describe('buildSpec: emits requestBody for non-JSON bodies', () => {
 		expect(mp.schema.properties.files.type).toBe('array');
 		expect(mp.schema.properties.files.items.format).toBe('binary');
 		expect(mp.schema.required).toEqual(['files']);
+	});
+});
+
+describe('a description survives into the spec whole', () => {
+	// The annotation parser is line-oriented: it reads `key: value` off one line and
+	// drops anything that follows on the next. A description wrapped across lines
+	// therefore publishes its first line and silently loses the rest - and the drift
+	// gates do not look at descriptions, so the build stays green while /api/docs
+	// serves half a sentence.
+	test('no shipped description ends mid-sentence', () => {
+		// Reads the generated spec rather than the sources, so it catches the mistake
+		// wherever it is made rather than in one file at a time.
+		const { readFileSync } = require('node:fs') as typeof import('node:fs');
+		const spec = JSON.parse(
+			readFileSync(new URL('../src/lib/openapi.generated.json', import.meta.url), 'utf8')
+		);
+
+		const truncated: string[] = [];
+		for (const [path, ops] of Object.entries<Record<string, any>>(spec.paths)) {
+			for (const [method, op] of Object.entries<any>(ops)) {
+				const d = op?.description;
+				if (typeof d === 'string' && d && !/[.)\]]$/.test(d.trimEnd())) {
+					truncated.push(`${method.toUpperCase()} ${path}`);
+				}
+			}
+		}
+		expect(truncated).toEqual([]);
 	});
 });

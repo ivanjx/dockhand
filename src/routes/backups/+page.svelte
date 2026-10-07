@@ -9,7 +9,7 @@
 	import { formatBytes } from '$lib/utils/format';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
-	import { Input } from '$lib/components/ui/input';
+	import { SearchInput } from '$lib/components/ui/search-input';
 	import { SnapshotLoadProgress } from '$lib/components/ui/snapshot-load-progress';
 	import * as Select from '$lib/components/ui/select';
 	import * as Tooltip from '$lib/components/ui/tooltip';
@@ -19,14 +19,17 @@
 	import ConfirmPopover from '$lib/components/ConfirmPopover.svelte';
 	import EnvironmentIcon from '$lib/components/EnvironmentIcon.svelte';
 	import {
-		Archive, Box, Layers, ChevronDown, ChevronRight, RefreshCw, Search, Play, Pause, Trash2, FolderOpen, RotateCcw,
+		Archive, Box, Layers, ChevronDown, ChevronRight, RefreshCw, Play, Pause, Trash2, FolderOpen, RotateCcw,
 		CheckCircle, XCircle, AlertCircle, Loader2, Clock, X, ArrowLeftRight, Package, Pencil
 	} from 'lucide-svelte';
 	import RotateCwFadingClock from '$lib/components/icons/RotateCwFadingClock.svelte';
 	import { formatDateTime, formatRelativeTime } from '$lib/stores/settings';
 	import { currentEnvironment } from '$lib/stores/environment';
 	import { watchJob, readJobResponse } from '$lib/utils/sse-fetch';
-	import { getRepoTypeIcon, formatCron, retentionSummary, classifyJobResult, tagLogLine } from '$lib/utils/backup';
+	import { getRepoTypeIcon, formatCron, retentionSummary, classifyJobResult, tagLogLine, bulkDeleteSnapshots, bulkDeleteToast, bulkDeleteFailure } from '$lib/utils/backup';
+	import { Checkbox } from '$lib/components/ui/checkbox';
+	import BulkDeleteSnapshotsDialog from '$lib/components/BulkDeleteSnapshotsDialog.svelte';
+	import BulkDeleteErrorDialog from '$lib/components/BulkDeleteErrorDialog.svelte';
 	import SnapshotBrowser from '../containers/SnapshotBrowser.svelte';
 	import RestoreModal from '../containers/RestoreModal.svelte';
 	import BackupLogModal from './BackupLogModal.svelte';
@@ -105,6 +108,60 @@
 	const SNAPSHOT_PAGE_SIZE = 10;
 	let snapshotLimits = $state<Map<string, number>>(new Map());
 
+	// Multi-select for bulk delete (shared helper + dialog). One global Set of snapshot ids;
+	// each expanded config renders its own checkboxes and bulk bar over its own snapshots.
+	let selectedSnapshots = $state<Set<string>>(new Set());
+	let bulkDialogOpen = $state(false);
+	let bulkDeleting = $state(false);
+	let bulkConfig = $state<BackupConfig | null>(null);
+	let bulkDeleteErrorOpen = $state(false);
+	let bulkDeleteError = $state('');
+	let bulkDeleteErrorDeleted = $state(0);
+	// Snapshots of a config, normalized to {id, _destinationId} for the shared helper.
+	function configSelectedTargets(config: BackupConfig) {
+		return (snapshotsMap.get(config.key) || [])
+			.filter((s) => selectedSnapshots.has(s.id))
+			.map((s) => ({ id: s.id, _destinationId: s._destinationId ?? config.destinationId }));
+	}
+	function toggleSnapshotSel(id: string) {
+		const next = new Set(selectedSnapshots);
+		if (next.has(id)) next.delete(id); else next.add(id);
+		selectedSnapshots = next;
+	}
+	function toggleConfigAll(config: BackupConfig) {
+		const snaps = snapshotsMap.get(config.key) || [];
+		const all = snaps.length > 0 && snaps.every((s) => selectedSnapshots.has(s.id));
+		const next = new Set(selectedSnapshots);
+		if (all) for (const s of snaps) next.delete(s.id);
+		else for (const s of snaps) next.add(s.id);
+		selectedSnapshots = next;
+	}
+	function openConfigBulk(config: BackupConfig) { bulkConfig = config; bulkDialogOpen = true; }
+	async function bulkDeleteConfig() {
+		const config = bulkConfig;
+		if (!config) return;
+		bulkDeleting = true;
+		try {
+			const result = await bulkDeleteSnapshots(configSelectedTargets(config));
+			const failure = bulkDeleteFailure(result);
+			if (failure) {
+				bulkDeleteError = failure.error;
+				bulkDeleteErrorDeleted = failure.deleted;
+				bulkDeleteErrorOpen = true;
+			} else {
+				const t = bulkDeleteToast(result);
+				toast[t.type](t.message);
+			}
+			selectedSnapshots = new Set();
+			await loadSnapshots(config);
+			const loaded = snapshotsMap.get(config.key);
+			if (loaded !== undefined) snapshotCounts = new Map(snapshotCounts).set(config.key, loaded.length);
+		} finally {
+			bulkDeleting = false;
+			bulkDialogOpen = false;
+		}
+	}
+
 	// Snapshot counts loaded async per destination, keyed by targetName:destId
 	let snapshotCounts = $state<Map<string, number>>(new Map());
 	let snapshotCountsLoading = $state(true);
@@ -160,6 +217,8 @@
 	let deletingSnapshot = $state<string | null>(null);
 	let confirmDeleteConfig = $state<number | null>(null);
 	let deletingConfig = $state<number | null>(null);
+	// Opt-in: also forget the config's snapshots on delete (off by default; resets per open).
+	let deleteConfigSnapshots = $state(false);
 	let togglingConfig = $state<number | null>(null);
 	// Edit-config modal (reuses the container/stack Backups tab — BackupPanel).
 	let editModalOpen = $state(false);
@@ -596,10 +655,13 @@
 	// orphan if any snapshots remain.
 	async function deleteConfig(config: BackupConfig) {
 		deletingConfig = config.id;
+		const withSnaps = deleteConfigSnapshots;
 		try {
-			const res = await fetch(`/api/backup/configs/${config.id}`, { method: 'DELETE' });
+			const res = await fetch(`/api/backup/configs/${config.id}${withSnaps ? '?deleteSnapshots=true' : ''}`, { method: 'DELETE' });
 			if (res.ok) {
-				toast.success(`Backup config removed for ${config.targetName}`);
+				const data = await res.json().catch(() => ({}));
+				const n = data.snapshots?.deleted ?? 0;
+				toast.success(`Backup config removed for ${config.targetName}${withSnaps ? ` (${n} snapshot${n === 1 ? '' : 's'} deleted)` : ''}`);
 				fetchData();
 			} else {
 				const data = await res.json().catch(() => ({}));
@@ -610,6 +672,7 @@
 		} finally {
 			deletingConfig = null;
 			confirmDeleteConfig = null;
+			deleteConfigSnapshots = false;
 		}
 	}
 
@@ -694,10 +757,7 @@
 			{/if}
 		</PageHeader>
 		<div class="flex flex-wrap items-center gap-2">
-			<div class="relative">
-				<Search class="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-				<Input bind:value={searchQuery} placeholder="Filter backups..." class="pl-8 h-8 w-48 text-sm" />
-			</div>
+			<SearchInput bind:value={searchQuery} placeholder="Filter backups..." class="h-8 w-48 text-sm" />
 			<Select.Root type="single" value={filterType} onValueChange={(v) => { filterType = v === 'all' ? '' : v; }}>
 				<Select.Trigger class="h-8 w-32 text-xs">
 					{#if filterType === 'container'}<Box class="w-3 h-3 mr-1 text-muted-foreground" />Containers
@@ -929,10 +989,10 @@
 								action="Delete"
 								itemType="backup config"
 								itemName={config.targetName}
-								title="Existing snapshots are kept."
+								title={deleteConfigSnapshots ? 'Snapshots will be deleted too.' : 'Existing snapshots are kept.'}
 								position="left"
 								onConfirm={() => deleteConfig(config)}
-								onOpenChange={(open) => confirmDeleteConfig = open ? config.id : null}
+								onOpenChange={(open) => { confirmDeleteConfig = open ? config.id : null; if (open) deleteConfigSnapshots = false; }}
 							>
 								{#snippet children({ open })}
 									{#if deletingConfig === config.id}
@@ -940,6 +1000,12 @@
 									{:else}
 										<Trash2 class="w-3 h-3 {open ? 'text-destructive' : 'text-muted-foreground hover:text-destructive'}" />
 									{/if}
+								{/snippet}
+								{#snippet extraContent()}
+									<label class="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+										<Checkbox bind:checked={deleteConfigSnapshots} aria-label="Also delete snapshots" />
+										Also delete this config's snapshots
+									</label>
 								{/snippet}
 							</ConfirmPopover>
 						{/if}
@@ -970,6 +1036,12 @@
 						<button type="button" class="p-0.5 rounded hover:bg-muted transition-colors" onclick={() => loadSnapshots(config)} disabled={isLoading}>
 							<RefreshCw class="w-2.5 h-2.5 text-muted-foreground {isLoading ? 'animate-spin' : ''}" />
 						</button>
+						{#if snapshots.some((s) => selectedSnapshots.has(s.id))}
+							{@const n = snapshots.filter((s) => selectedSnapshots.has(s.id)).length}
+							<button type="button" class="ml-2 inline-flex items-center gap-1.5 rounded-md border border-destructive/40 px-2 py-0.5 text-xs text-destructive transition-colors hover:bg-destructive/10" onclick={() => openConfigBulk(config)}>
+								<Trash2 class="h-3 w-3" /> Delete selected ({n})
+							</button>
+						{/if}
 					</div>
 					{#if isLoading && snapshots.length === 0}
 						<!-- First load only: a quiet inline spinner, no skeleton. On a refresh
@@ -986,6 +1058,14 @@
 							<table>
 								<thead class="sticky top-0 bg-background z-10">
 									<tr class="text-xs text-muted-foreground border-b">
+										<th class="w-8 py-1.5" style="padding-left:8px">
+											<Checkbox
+												checked={snapshots.length > 0 && snapshots.every((s) => selectedSnapshots.has(s.id))}
+												indeterminate={snapshots.some((s) => selectedSnapshots.has(s.id)) && !snapshots.every((s) => selectedSnapshots.has(s.id))}
+												onCheckedChange={() => toggleConfigAll(config)}
+												aria-label="Select all snapshots"
+											/>
+										</th>
 										<th class="text-left py-1.5 w-24" style="padding-left:8px">ID</th>
 										<th class="text-left py-1.5 w-40" style="padding-left:8px">Created</th>
 										<th class="text-left py-1.5 w-64" style="padding-left:8px">Stats</th>
@@ -997,7 +1077,10 @@
 									{#each snapshots.slice(0, snapshotLimits.get(key) || SNAPSHOT_PAGE_SIZE) as snapshot}
 										{@const stats = snapshotStats.get(snapshot.id)}
 										{@const isDiffPending = diffPending?.snapshot.id === snapshot.id}
-										<tr class="border-b last:border-0 hover:bg-muted/30 text-xs {isDiffPending ? 'bg-primary/10' : ''}">
+										<tr class="border-b last:border-0 hover:bg-muted/30 text-xs {isDiffPending ? 'bg-primary/10' : ''} {selectedSnapshots.has(snapshot.id) ? 'bg-primary/5' : ''}">
+											<td class="py-1.5" style="padding-left:8px">
+												<Checkbox checked={selectedSnapshots.has(snapshot.id)} onCheckedChange={() => toggleSnapshotSel(snapshot.id)} aria-label="Select snapshot {snapshot.shortId}" />
+											</td>
 											<td class="py-1.5 font-mono text-muted-foreground" style="padding-left:8px">{snapshot.shortId}</td>
 											<td class="py-1.5" style="padding-left:8px">{formatDateTime(snapshot.time)} <span class="text-muted-foreground opacity-60">({formatRelativeTime(snapshot.time)})</span></td>
 											<td class="py-1.5 text-muted-foreground" style="padding-left:8px">
@@ -1069,6 +1152,9 @@
 	{/if}
 	</div>
 </div>
+
+<BulkDeleteSnapshotsDialog bind:open={bulkDialogOpen} count={bulkConfig ? configSelectedTargets(bulkConfig).length : 0} busy={bulkDeleting} onConfirm={bulkDeleteConfig} />
+<BulkDeleteErrorDialog bind:open={bulkDeleteErrorOpen} error={bulkDeleteError} deleted={bulkDeleteErrorDeleted} />
 
 <SnapshotBrowser
 	bind:open={showBrowser}

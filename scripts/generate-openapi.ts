@@ -45,7 +45,8 @@ import { buildSpec } from './openapi/build-spec';
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = join(SCRIPT_DIR, '..');
 const ROUTES_ROOT = join(ROOT_DIR, 'src', 'routes');
-const HOOKS_FILE = join(ROOT_DIR, 'src', 'hooks.server.ts');
+// The public-route lists live in public-paths-core.ts.
+const HOOKS_FILE = join(ROOT_DIR, 'src', 'lib', 'server', 'public-paths-core.ts');
 const PACKAGE_JSON = join(ROOT_DIR, 'package.json');
 // Bundled as an importable module (src/lib) rather than read from disk at
 // runtime — see src/routes/api/docs/+server.ts. The production Docker image
@@ -56,6 +57,16 @@ const LIB_OUT_FILE = join(ROOT_DIR, 'src', 'lib', 'openapi.generated.json');
 // SvelteKit build (useful for direct static-asset access / debugging), even
 // though /api/docs no longer reads from this path.
 const STATIC_OUT_FILE = join(ROOT_DIR, 'static', 'openapi.json');
+
+// `body` can be `request.body` (a ReadableStream), not the parsed JSON. Only the
+// UNAMBIGUOUS stream/Body methods belong here: names that could plausibly be a real
+// JSON request field (json, text, blob, bytes, on, once, locked, cancel, tee) are
+// deliberately EXCLUDED - keeping them would let a genuinely-undocumented field of
+// that name slip past the drift check. A JSON-object-body handler never calls these
+// stream methods, so this narrow set is safe.
+const STREAM_BODY_MEMBERS = new Set([
+	'arrayBuffer', 'formData', 'pipe', 'pipeTo', 'pipeThrough', 'getReader'
+]);
 
 const args = process.argv.slice(2);
 const mode = args.includes('--check') ? 'check' : args.includes('--scaffold') ? 'scaffold' : 'generate';
@@ -189,9 +200,10 @@ function runCheck(): number {
 	report.splice(report.length - pathParamIssues, 0, `[Gate 2] Path-param consistency: ${pathParamIssues} issue(s)`);
 	if (pathParamIssues > 0) hardFailures++;
 
-	// Gates 3+4: query-param drift, status-code drift (only for annotated handlers)
+	// Gates 3+4+7: query-param, status-code, body-field drift (only for annotated handlers)
 	let queryDrift = 0;
 	let statusDrift = 0;
+	let bodyDrift = 0;
 	const driftLines: string[] = [];
 	for (const route of routes) {
 		const perMethod = annotationsByPath[route.openapiPath];
@@ -232,13 +244,32 @@ function runCheck(): number {
 					statusDrift++;
 				}
 			}
+
+			// Body-field drift (ONE direction: read in code but not documented).
+			// Only for handlers that DO document a JSON object body - a missing body:
+			// annotation is a coverage concern, not drift. body-raw/body-multipart
+			// are non-JSON, so they have no field list to compare. The other direction
+			// (documented but not read locally) is deliberately NOT hard: a field can be
+			// forwarded to a helper without a local `body.x`.
+			if (ann.body && ann.body.kind === 'object') {
+				const docBody = new Set(Object.keys(ann.body.properties));
+				for (const f of analysis.bodyFields) {
+					if (STREAM_BODY_MEMBERS.has(f)) continue; // request.body stream methods, not JSON fields
+					if (!docBody.has(f)) {
+						driftLines.push(`  [Gate 7] ${relative(ROOT_DIR, route.filePath)} ${method} ${route.openapiPath}: body field "${f}" read in code but not documented`);
+						bodyDrift++;
+					}
+				}
+			}
 		}
 	}
 	report.push(`[Gate 3] Query-param drift: ${queryDrift} issue(s)`);
 	report.push(`[Gate 4] Status-code drift: ${statusDrift} issue(s)`);
+	report.push(`[Gate 7] Body-field drift: ${bodyDrift} issue(s)`);
 	report.push(...driftLines);
 	if (queryDrift > 0) hardFailures++;
 	if (statusDrift > 0) hardFailures++;
+	if (bodyDrift > 0) hardFailures++;
 
 	// Gate 5: orphan JSDoc (a @openapi marker that didn't attach to an export)
 	report.push(`[Gate 5] Orphan @openapi blocks: ${orphanMarkers.length} file(s)`);

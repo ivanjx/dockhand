@@ -10,6 +10,7 @@
  * Pure and dependency-light (js-yaml only) so it is unit-testable without a daemon.
  */
 import yaml from 'js-yaml';
+import { portableImageReference, UPDATE_SOURCE_LABEL } from './tracked-image';
 
 /** The slice of a Docker inspect object this mapper reads (loosely typed on purpose). */
 export interface DockerInspect {
@@ -184,6 +185,21 @@ function portSpec(containerPort: string, bindings: Array<{ HostIp?: string; Host
 	});
 }
 
+/**
+ * Escape `$` -> `$$` in the VALUE half of a `KEY=VALUE` env entry so `docker compose`
+ * does not interpolate it (#1507). Inspect values are already resolved literals (the
+ * daemon expanded any real variable), so every `$` must survive verbatim - e.g. a
+ * bcrypt hash `$2a$12$...` would otherwise be read as variable references and mangled.
+ * Only the value is escaped; the key never contains `$`.
+ */
+function escapeEnvEntryForCompose(entry: string): string {
+	const eq = entry.indexOf('=');
+	if (eq < 0) return entry;
+	const key = entry.slice(0, eq);
+	const value = entry.slice(eq + 1);
+	return `${key}=${value.replace(/\$/g, '$$$$')}`;
+}
+
 /** Convert a nanosecond duration (Docker healthcheck) to a compose `30s` string. */
 function nsToDuration(ns: number | undefined): string | undefined {
 	if (!ns || ns <= 0) return undefined;
@@ -205,7 +221,7 @@ export function inspectToComposeService(
 	const composeServiceName = config.Labels?.['com.docker.compose.service'];
 	const service: Record<string, unknown> = {};
 
-	if (config.Image) service.image = config.Image;
+	if (config.Image) service.image = portableImageReference(config.Image, config.Labels);
 	service.container_name = name;
 
 	// Entrypoint / command: drop them when they equal the image's own (an image default the
@@ -225,7 +241,7 @@ export function inspectToComposeService(
 	// Environment: drop image-baked vars when the image env is provided.
 	if (Array.isArray(config.Env) && config.Env.length > 0) {
 		const imageEnv = new Set(options.imageEnv ?? []);
-		const env = config.Env.filter((e) => !imageEnv.has(e));
+		const env = config.Env.filter((e) => !imageEnv.has(e)).map(escapeEnvEntryForCompose);
 		if (env.length > 0) service.environment = env;
 	}
 
@@ -235,7 +251,7 @@ export function inspectToComposeService(
 	if (config.Labels) {
 		const imageLabels = options.imageLabels ?? {};
 		const labels = Object.entries(config.Labels).filter(
-			([k, v]) => !k.startsWith('com.docker.compose.') && imageLabels[k] !== v
+			([k, v]) => !k.startsWith('com.docker.compose.') && k !== UPDATE_SOURCE_LABEL && imageLabels[k] !== v
 		);
 		if (labels.length > 0) service.labels = Object.fromEntries(labels);
 	}

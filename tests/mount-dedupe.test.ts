@@ -195,3 +195,84 @@ describe('dedupeVolumesForRecreate', () => {
 		assert.equal(dedupeVolumesForRecreate({}, { Binds: [] }, [], []), undefined);
 	});
 });
+
+describe('#583 trailing-slash mount targets (Duplicate mount point)', () => {
+	// The user bind carries a trailing slash ("caddy-logs:/var/log/") but Docker
+	// normalizes the same volume's inspect Destination to "/var/log". Recreate must
+	// treat them as the same mount point, or it re-adds the volume and the daemon
+	// rejects the create with "Duplicate mount point: /var/log".
+	it('getAdditionalVolumeBinds does NOT re-add a volume already bound with a trailing slash', () => {
+		const additionalBinds = getAdditionalVolumeBinds(
+			{ Binds: ['caddy-logs:/var/log/'] },
+			[{ Type: 'volume', Name: 'caddy-logs', Destination: '/var/log' }]
+		);
+		assert.deepEqual(additionalBinds, []);
+	});
+
+	it('getAdditionalVolumeBinds handles the inverse (bind no slash, inspect Destination with slash)', () => {
+		const additionalBinds = getAdditionalVolumeBinds(
+			{ Binds: ['caddy-logs:/var/log'] },
+			[{ Type: 'volume', Name: 'caddy-logs', Destination: '/var/log/' }]
+		);
+		assert.deepEqual(additionalBinds, []);
+	});
+
+	it('getAdditionalVolumeBinds still re-adds a genuinely different, unmounted volume', () => {
+		const additionalBinds = getAdditionalVolumeBinds(
+			{ Binds: ['caddy-logs:/var/log/'] },
+			[
+				{ Type: 'volume', Name: 'caddy-logs', Destination: '/var/log' },
+				{ Type: 'volume', Name: 'caddy-data', Destination: '/data' }
+			]
+		);
+		assert.deepEqual(additionalBinds, ['caddy-data:/data']);
+	});
+
+	it('dedupeVolumesForRecreate drops a Config.Volumes entry already bound with a trailing-slash difference', () => {
+		const kept = dedupeVolumesForRecreate(
+			{ '/var/log': {} },
+			{ Binds: ['caddy-logs:/var/log/'] },
+			[{ Type: 'volume', Name: 'caddy-logs', Destination: '/var/log' }],
+			[]
+		);
+		assert.equal(kept, undefined);
+	});
+
+	it('dedupeVolumesForRecreate drops a trailing-slash Config.Volumes key against a no-slash mount', () => {
+		const kept = dedupeVolumesForRecreate(
+			{ '/var/log/': {} },
+			{ Binds: [] },
+			[{ Type: 'volume', Name: 'caddy-logs', Destination: '/var/log' }],
+			[]
+		);
+		assert.equal(kept, undefined);
+	});
+
+	it('collapses MULTIPLE trailing slashes (pins the /+$ quantifier)', () => {
+		// A regression narrowing normalizeMountTarget to a single-slash strip would keep
+		// every other test green but re-add this volume -> duplicate mount.
+		const additionalBinds = getAdditionalVolumeBinds(
+			{ Binds: ['caddy-logs:/var/log//'] },
+			[{ Type: 'volume', Name: 'caddy-logs', Destination: '/var/log' }]
+		);
+		assert.deepEqual(additionalBinds, []);
+
+		const kept = dedupeVolumesForRecreate(
+			{ '/var/log//': {} },
+			{ Binds: [] },
+			[{ Type: 'volume', Name: 'caddy-logs', Destination: '/var/log' }],
+			[]
+		);
+		assert.equal(kept, undefined);
+	});
+
+	it('root "/" is preserved (not stripped to empty)', () => {
+		const kept = dedupeVolumesForRecreate(
+			{ '/': {} },
+			{ Binds: ['somevol:/'] },
+			[],
+			[]
+		);
+		assert.equal(kept, undefined);
+	});
+});

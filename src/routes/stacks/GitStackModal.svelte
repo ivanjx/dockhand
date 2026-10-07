@@ -1,27 +1,33 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { Button } from '$lib/components/ui/button';
+	import { Badge } from '$lib/components/ui/badge';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import * as Select from '$lib/components/ui/select';
 	import { Label } from '$lib/components/ui/label';
 	import { Input } from '$lib/components/ui/input';
 	import { TogglePill } from '$lib/components/ui/toggle-pill';
-	import { Loader2, GitBranch, RefreshCw, Webhook, Rocket, RefreshCcw, Copy, Check, XCircle, FolderGit2, Github, Key, KeyRound, Lock, FileText, HelpCircle, GripVertical, X, Download, Hammer, ArrowDownToLine, Zap, FolderOpen, Ban, TriangleAlert, Settings2, Archive } from 'lucide-svelte';
+	import { Loader2, GitBranch, RefreshCw, Webhook, Rocket, RefreshCcw, Copy, Check, XCircle, FolderGit2, Github, Key, KeyRound, Lock, FileText, HelpCircle, GripVertical, X, Download, Hammer, ArrowDownToLine, Zap, FolderOpen, Ban, TriangleAlert, Settings2, Archive, History } from 'lucide-svelte';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import { page } from '$app/stores'; // BETA GATE: backups feature flag
 	import BackupPanel from '../containers/BackupPanel.svelte';
+	import DeploysPanel from './DeploysPanel.svelte';
 	import { volumesForStack, type VolumeInfo } from '$lib/utils/mounts';
 	import { fetchBackupExecutions } from '$lib/utils/backup';
+	import { deployTallyFromRuns } from '$lib/utils/deploy-run-view';
 	import { copyToClipboard } from '$lib/utils/clipboard';
 	import CronEditor from '$lib/components/cron-editor.svelte';
 	import StackEnvVarsPanel from '$lib/components/StackEnvVarsPanel.svelte';
 	import SecretProviderPicker from '$lib/components/SecretProviderPicker.svelte';
 	import BranchCombobox from './BranchCombobox.svelte';
 	import IconPickerModal from './IconPickerModal.svelte';
+	import ComposeOutputModal from './ComposeOutputModal.svelte';
 	import StackIcon from '$lib/components/StackIcon.svelte';
+	import StackTagsSection from '$lib/components/StackTagsSection.svelte';
 	import { appendEnvParam } from '$lib/stores/environment';
 	import { persistStackIcon } from '$lib/utils/stack-icon';
 	import { type EnvVar, type ValidationResult } from '$lib/components/StackEnvVarsEditor.svelte';
+	import { mergeGitStackEnvVars, isGitStackOverride } from '$lib/env-merge';
 	import { toast } from 'svelte-sonner';
 	import { focusFirstInput } from '$lib/utils';
 	import { readJobResponse } from '$lib/utils/sse-fetch';
@@ -111,8 +117,26 @@
 	let formNewRepoBranch = $state('main');
 	let formNewRepoCredentialId = $state<number | null>(null);
 
-	// Tabs: Settings (the deploy form) and Backups (edit mode + feature flag only).
-	let activeTab = $state<'settings' | 'backups'>('settings');
+	// Tabs: Settings (the deploy form), Deploys (recorded run history, edit mode),
+	// and Backups (edit mode + feature flag only).
+	let activeTab = $state<'settings' | 'deploys' | 'backups'>('settings');
+	// Bumped after a deploy finishes so the Deploys tab re-fetches the new run.
+	let deploysReloadKey = $state(0);
+	// Deploys tab badge tally (total + ok/failed). Fetched cheaply when the modal
+	// opens so the badge shows immediately; DeploysPanel's onTally keeps it fresh.
+	let deploysTally = $state<{ total: number; ok: number; failed: number }>({ total: 0, ok: 0, failed: 0 });
+
+	// Live compose output for "Save and deploy" (mirrors StackModal's deploy output;
+	// shown in the shared ComposeOutputModal). Without this the streamed lines from
+	// the deploy job are consumed and discarded, so the user sees no live output.
+	let outputOpen = $state(false);
+	let outputTitle = $state('');
+	let outputLines = $state<string[]>([]);
+	let outputRunning = $state(false);
+	let outputOk = $state<boolean | undefined>(undefined);
+	let outputMs = $state<number | undefined>(undefined);
+	let outputExitCode = $state<number | undefined>(undefined);
+	let outputStartedAt = 0;
 	// The stack's volumes, loaded lazily when the Backups tab opens (git stacks
 	// don't otherwise need them). Feeds the backup volume picker.
 	let stackVolumes = $state<VolumeInfo[]>([]);
@@ -152,6 +176,30 @@
 	// Load volumes the first time the Backups tab is opened.
 	$effect(() => {
 		if (activeTab === 'backups') void loadStackVolumes();
+	});
+
+	async function loadDeploysCount() {
+		if (!gitStack) {
+			deploysTally = { total: 0, ok: 0, failed: 0 };
+			return;
+		}
+		try {
+			const res = await fetch(appendEnvParam(`/api/stacks/${encodeURIComponent(gitStack.stackName)}/deploys`, effectiveEnvId));
+			if (!res.ok) return;
+			const data = await res.json();
+			deploysTally = deployTallyFromRuns(Array.isArray(data?.runs) ? data.runs : []);
+		} catch {
+			// Non-fatal: the badge just stays at its current value.
+		}
+	}
+
+	// Show the Deploys badge count as soon as the modal opens (not only once the tab
+	// is viewed); re-count after a deploy bumps the key.
+	$effect(() => {
+		if (open) {
+			void deploysReloadKey;
+			void loadDeploysCount();
+		}
 	});
 
 	// Form state - stack deployment config
@@ -331,13 +379,10 @@
 		}
 	}
 
-	async function loadEnvFileContents(path: string) {
-		if (!gitStack || !path) {
-			fileEnvVars = {};
-			return;
-		}
-
-		loadingFileVars = true;
+	// Read one .env file from the synced clone (repo-root-relative path). Not-found /
+	// error yields {} so a missing file is harmless.
+	async function readRepoEnvFile(path: string): Promise<Record<string, string>> {
+		if (!gitStack || !path) return {};
 		try {
 			const response = await fetch(`/api/git/stacks/${gitStack.id}/env-files`, {
 				method: 'POST',
@@ -346,11 +391,32 @@
 			});
 			if (response.ok) {
 				const data = await response.json();
-				fileEnvVars = data.vars || {};
+				return data.vars || {};
 			}
 		} catch (e) {
-			console.error('Failed to load env file contents:', e);
+			console.error('Failed to read env file contents:', e);
+		}
+		return {};
+	}
+
+	// Populate fileEnvVars with what the deploy sees: the compose-dir default .env as
+	// the base, then the explicit envFilePath layered on top (deploy applies the custom
+	// env file second). This is the diff base for save AND the file base for the merge.
+	async function loadEnvFileContents(explicitPath: string | null) {
+		if (!gitStack) {
 			fileEnvVars = {};
+			return;
+		}
+		loadingFileVars = true;
+		try {
+			const composeDir = (formComposePath || 'compose.yaml').replace(/[^/]*$/, '');
+			const defaultEnvPath = `${composeDir}.env`;
+			const base = await readRepoEnvFile(defaultEnvPath);
+			const overlay =
+				explicitPath && explicitPath !== defaultEnvPath
+					? await readRepoEnvFile(explicitPath)
+					: {};
+			fileEnvVars = { ...base, ...overlay };
 		} finally {
 			loadingFileVars = false;
 		}
@@ -432,16 +498,12 @@
 				return;
 			}
 
-			// Convert to EnvVar array - preserve existing user entries that aren't in repo
-			const existingUserVars = envVars.filter(v => v.key.trim() && !(v.key in vars));
-			const newVars: EnvVar[] = Object.entries(vars).map(([key, value]) => ({
-				key,
-				value,
-				isSecret: false
-			}));
-
-			envVars = [...newVars, ...existingUserVars];
+			// Refresh the file base from the repo, then merge the current editor state on
+			// top so re-populating never clobbers the user's values. Any editor value that
+			// differs from the fresh repo (a real edit, or a secret) wins; keys the user
+			// never touched follow the refreshed repo value.
 			fileEnvVars = vars;
+			envVars = mergeGitStackEnvVars(vars, envVars.filter((v) => v.key.trim()));
 
 			toast.success(`Loaded ${count} variable${count === 1 ? '' : 's'}`, {
 				description: 'You can now customize values before deploying'
@@ -457,6 +519,16 @@
 	async function resetForm() {
 		// Clear state BEFORE async loads to avoid race conditions
 		activeTab = 'settings';
+		// Reset the deploy-output overlay so a previous run's window (bound to
+		// outputOpen) can't reappear over a freshly opened modal -- the main modal is
+		// deliberately left open behind it after a deploy, so closing the main modal
+		// first would otherwise leave outputOpen=true with stale lines.
+		outputOpen = false;
+		outputLines = [];
+		outputRunning = false;
+		outputOk = undefined;
+		outputMs = undefined;
+		outputExitCode = undefined;
 		stackVolumes = [];
 		stackVolumesLoaded = false;
 		backupTally = { ok: 0, failed: 0 };
@@ -495,12 +567,19 @@
 			formBranch = gitStack.branch ?? null;
 
 			// Load env files and overrides SYNCHRONOUSLY to avoid race conditions
-			// Wait for all loads to complete before allowing any other effect to run
+			// Wait for all loads to complete before allowing any other effect to run.
+			// Always read the repo .env (default compose-dir .env + explicit envFilePath)
+			// so the editor can show the full effective set, not just DB overrides.
 			await Promise.all([
 				loadEnvFiles(),
 				loadEnvVarsOverrides(),
-				gitStack.envFilePath ? loadEnvFileContents(gitStack.envFilePath) : Promise.resolve()
+				loadEnvFileContents(gitStack.envFilePath)
 			]);
+
+			// Merge repo .env (base) with DB overrides/secrets so untouched populated
+			// vars stay visible on reopen. The save filter still drops file-equal
+			// non-secrets, keeping the DB override-only (git-sync pickup intact).
+			envVars = mergeGitStackEnvVars(fileEnvVars, envVars);
 		} else {
 			formRepoMode = repositories.length > 0 ? 'existing' : 'new';
 			formRepositoryId = null;
@@ -602,7 +681,9 @@
 			hasErrors = true;
 		}
 
-		if (formWebhookEnabled && !formWebhookSecret.trim()) {
+		// A secret is required unless the instance opted into secret-less webhooks
+		// (ALLOW_WEBHOOKS_WITHOUT_SECRET, for isolated networks) - mirror the server.
+		if (formWebhookEnabled && !formWebhookSecret.trim() && !$page.data.allowSecretlessWebhook) {
 			errors.webhookSecret = 'A webhook secret is required when the webhook is enabled';
 			hasErrors = true;
 		}
@@ -632,14 +713,10 @@
 		formError = '';
 
 		try {
-			// Only save vars that are actual overrides (differ from file) or new (not in file)
-			// This ensures file updates from git are picked up on next sync
-			const overrideVars = envVars.filter(v => {
-				if (!v.key.trim()) return false;
-				const fileValue = fileEnvVars[v.key];
-				// Save if: not in file (new var), value differs from file, or is a secret
-				return fileValue === undefined || v.value !== fileValue || v.isSecret;
-			});
+			// Store only actual overrides (differ from file / new / secret) so file updates
+			// from git are picked up on next sync. Shared predicate keeps this in step with
+			// the merge round-trip guard and the re-populate preserve step.
+			const overrideVars = envVars.filter((v) => isGitStackOverride(v, fileEnvVars));
 
 			let body: any = {
 				stackName: formStackName,
@@ -682,32 +759,71 @@
 				: '/api/git/stacks';
 			const method = gitStack ? 'PUT' : 'POST';
 
+			// Live-stream the compose output into the shared window when deploying, so
+			// "Save and deploy" shows progress like StackModal's "Save & redeploy".
+			// (A plain save with no deploy has no output to show.)
+			if (deployAfterSave) {
+				outputTitle = `Deploying ${formStackName.trim()}`;
+				outputLines = [];
+				outputRunning = true;
+				outputOk = undefined;
+				outputMs = undefined;
+				outputExitCode = undefined;
+				outputStartedAt = Date.now();
+				outputOpen = true;
+			}
+
 			const response = await fetch(url, {
 				method,
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(body)
 			});
 
-			const data = await readJobResponse(response);
+			const data = deployAfterSave
+				? await readJobResponse(response, (line) => (outputLines = [...outputLines, line]))
+				: await readJobResponse(response);
 
 			if (!response.ok) {
+				if (deployAfterSave) {
+					// A pre-deploy failure (e.g. git sync) streams no lines, so surface
+					// the error text in the window instead of "No logs available".
+					if (outputLines.length === 0 && data.error) outputLines = String(data.error).split('\n');
+					outputRunning = false;
+					outputOk = false;
+					outputMs = Date.now() - outputStartedAt;
+				}
 				formError = data.error || 'Failed to save git stack';
 				return;
 			}
 
 			// Check if deployment failed
 			const deployResult = data.deployResult as { success?: boolean; error?: string } | undefined;
+			if (deployAfterSave) {
+				const ok = !(deployResult && !deployResult.success);
+				// The sync phase (clone/pull) fails before any compose line streams, so
+				// on a failure with no streamed output, show the error text.
+				if (!ok && outputLines.length === 0 && deployResult?.error) {
+					outputLines = String(deployResult.error).split('\n');
+				}
+				outputRunning = false;
+				outputOk = ok;
+				outputMs = Date.now() - outputStartedAt;
+			}
 			if (deployResult && !deployResult.success) {
 				toast.error('Deployment failed', {
 					description: deployResult.error || 'Unknown error'
 				});
+				deploysReloadKey++; // the failed run is recorded; refresh the Deploys tab
 				onSaved(); // Still refresh the list to show the new stack
-				onClose(); // Close modal, error shown as toast
+				// Keep the modal open so the user can read the output window; they close it.
 				return;
 			}
 
+			deploysReloadKey++; // a new run was recorded; refresh the Deploys tab
 			onSaved();
-			onClose();
+			// With a deploy, leave the modal open behind the output window so the user
+			// can review the log; a plain save closes as before.
+			if (!deployAfterSave) onClose();
 		} catch (error) {
 			formError = 'Failed to save git stack';
 		} finally {
@@ -807,10 +923,10 @@
 			</div>
 		</Dialog.Header>
 
-		<!-- Tabs: Settings (deploy form) + Backups. Backups only in edit mode AND when
-		     the backups feature flag is on (BETA GATE) — a git stack must exist before
-		     it can be backed up, and the feature must be enabled. -->
-		{#if gitStack && $page.data.backupsEnabled}
+		<!-- Tabs (edit mode only - a git stack must exist first): Settings (deploy form),
+		     Deploys (recorded run history), and Backups. Backups is additionally gated on
+		     the backups feature flag (BETA GATE). -->
+		{#if gitStack}
 			<div class="flex items-center gap-1 border-b border-zinc-200 px-5 dark:border-zinc-700 flex-shrink-0">
 				<button
 					type="button"
@@ -821,13 +937,31 @@
 				</button>
 				<button
 					type="button"
-					class="relative -mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm transition-colors {activeTab === 'backups' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}"
-					onclick={() => (activeTab = 'backups')}
+					class="relative -mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm transition-colors {activeTab === 'deploys' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}"
+					onclick={() => (activeTab = 'deploys')}
 				>
-					<Archive class="h-3.5 w-3.5" /> Backups
-					{#if backupTally.ok > 0}<span class="inline-flex items-center gap-0.5 rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-medium text-emerald-500"><Check class="w-2.5 h-2.5" />{backupTally.ok}</span>{/if}
-					{#if backupTally.failed > 0}<span class="inline-flex items-center gap-0.5 rounded-full bg-red-500/15 px-1.5 text-[10px] font-semibold text-red-500"><X class="w-2.5 h-2.5" />{backupTally.failed}</span>{/if}
+					<History class="h-3.5 w-3.5" /> Deploys
+					{#if deploysTally.ok > 0}
+						<span class="inline-flex items-center gap-0.5 rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-medium text-emerald-500"><Check class="h-2.5 w-2.5" />{deploysTally.ok}</span>
+					{/if}
+					{#if deploysTally.failed > 0}
+						<span class="inline-flex items-center gap-0.5 rounded-full bg-red-500/15 px-1.5 text-[10px] font-semibold text-red-500"><X class="h-2.5 w-2.5" />{deploysTally.failed}</span>
+					{/if}
+					{#if deploysTally.total > 0 && deploysTally.ok === 0 && deploysTally.failed === 0}
+						<Badge variant="secondary" class="ml-0.5 h-4 min-w-4 justify-center rounded-full px-1 text-[10px] tabular-nums">{deploysTally.total}</Badge>
+					{/if}
 				</button>
+				{#if $page.data.backupsEnabled}
+					<button
+						type="button"
+						class="relative -mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm transition-colors {activeTab === 'backups' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}"
+						onclick={() => (activeTab = 'backups')}
+					>
+						<Archive class="h-3.5 w-3.5" /> Backups
+						{#if backupTally.ok > 0}<span class="inline-flex items-center gap-0.5 rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-medium text-emerald-500"><Check class="w-2.5 h-2.5" />{backupTally.ok}</span>{/if}
+						{#if backupTally.failed > 0}<span class="inline-flex items-center gap-0.5 rounded-full bg-red-500/15 px-1.5 text-[10px] font-semibold text-red-500"><X class="w-2.5 h-2.5" />{backupTally.failed}</span>{/if}
+					</button>
+				{/if}
 			</div>
 		{/if}
 
@@ -840,6 +974,10 @@
 					environmentId={effectiveEnvId ?? undefined}
 					onTally={(t) => (backupTally = t)}
 				/>
+			</div>
+		{:else if activeTab === 'deploys' && gitStack}
+			<div class="flex min-h-0 flex-1 flex-col p-5">
+				<DeploysPanel stackName={gitStack.stackName} envId={effectiveEnvId} reloadKey={deploysReloadKey} onTally={(t) => (deploysTally = t)} />
 			</div>
 		{:else}
 		<div bind:this={containerRef} class="flex-1 min-h-0 flex {isDraggingSplit ? 'select-none' : ''}">
@@ -1056,6 +1194,13 @@
 					<p class="text-xs text-muted-foreground">This will be the name of the deployed stack</p>
 				{/if}
 			</div>
+
+			{#if gitStack?.stackName}
+				<div class="space-y-2">
+					<Label>Tags</Label>
+					<StackTagsSection stackName={gitStack.stackName} envId={effectiveEnvId} />
+				</div>
+			{/if}
 
 			{#if gitStack && selectedRepo}
 				<div class="space-y-2">
@@ -1363,42 +1508,41 @@
 					injectedSecretKeys={gitStack !== null ? injectedSecretKeys : []}
 					providerType={secretProviders.find((p) => p.id === formSecretProviderId)?.type ?? null}
 					providerName={secretProviders.find((p) => p.id === formSecretProviderId)?.name ?? null}
+					providerBound={formSecretProviderId != null && secretProviders.some((p) => p.id === formSecretProviderId)}
 					placeholder={{ key: 'MY_VAR', value: 'value' }}
 					infoText="Override variables from your repository env files. Non-secrets are saved to <code class='bg-muted px-1 rounded'>.env.dockhand</code> in the stack directory. Secrets are stored in the database and injected via shell environment at deploy time.<br/><br/>Variables are available for <strong>compose file interpolation</strong> using <code class='bg-muted px-1 rounded'>${'{VAR_NAME}'}</code> syntax. They are not automatically injected into containers — use <code class='bg-muted px-1 rounded'>environment:</code> or reference <code class='bg-muted px-1 rounded'>.env.dockhand</code> in <code class='bg-muted px-1 rounded'>env_file:</code> to pass them through."
 					existingSecretKeys={gitStack !== null ? existingSecretKeys : new Set()}
 					showInterpolationHint={true}
 				>
 					{#snippet headerActions()}
-						{#if !gitStack}
-							<div class="flex items-center gap-0.5">
-								<Button
-									type="button"
-									size="sm"
-									variant="ghost"
-									onclick={populateEnvVars}
-									disabled={populatingEnvVars || (formRepoMode === 'existing' && !formRepositoryId) || (formRepoMode === 'new' && !formNewRepoUrl.trim())}
-									class="h-6 text-xs px-2"
-								>
-									{#if populatingEnvVars}
-										<Loader2 class="w-3.5 h-3.5 mr-1 animate-spin" />
-										Loading...
-									{:else}
-										<Download class="w-3.5 h-3.5" />
-										Populate
-									{/if}
-								</Button>
-								<Tooltip.Root>
-									<Tooltip.Trigger>
-										<HelpCircle class="w-3.5 h-3.5 text-muted-foreground cursor-help" />
-									</Tooltip.Trigger>
-									<Tooltip.Content>
-										<div class="w-64">
-											<p class="text-xs">Clone the repository and load environment variables from the <code class="bg-muted px-1 rounded">.env</code> file (in compose directory) and additional env file (if specified), so you can see what you can override.</p>
-										</div>
-									</Tooltip.Content>
-								</Tooltip.Root>
-							</div>
-						{/if}
+						<div class="flex items-center gap-0.5">
+							<Button
+								type="button"
+								size="sm"
+								variant="ghost"
+								onclick={populateEnvVars}
+								disabled={populatingEnvVars || (formRepoMode === 'existing' && !formRepositoryId) || (formRepoMode === 'new' && !formNewRepoUrl.trim())}
+								class="h-6 text-xs px-2"
+							>
+								{#if populatingEnvVars}
+									<Loader2 class="w-3.5 h-3.5 mr-1 animate-spin" />
+									Loading...
+								{:else}
+									<Download class="w-3.5 h-3.5" />
+									Populate
+								{/if}
+							</Button>
+							<Tooltip.Root>
+								<Tooltip.Trigger>
+									<HelpCircle class="w-3.5 h-3.5 text-muted-foreground cursor-help" />
+								</Tooltip.Trigger>
+								<Tooltip.Content>
+									<div class="w-64">
+										<p class="text-xs">Clone the repository and load environment variables from the <code class="bg-muted px-1 rounded">.env</code> file (in compose directory) and additional env file (if specified), so you can see what you can override.</p>
+									</div>
+								</Tooltip.Content>
+							</Tooltip.Root>
+						</div>
 					{/snippet}
 				</StackEnvVarsPanel>
 			</div>
@@ -1464,3 +1608,17 @@
 </Dialog.Root>
 
 <IconPickerModal bind:open={showIconPicker} value={formIcon} onselect={onIconSelect} title="Choose a stack icon" />
+
+<!-- Live compose output for "Save and deploy" (see saveGitStack). -->
+<ComposeOutputModal
+	bind:open={outputOpen}
+	title={outputTitle}
+	lines={outputLines}
+	running={outputRunning}
+	ok={outputOk}
+	ms={outputMs}
+	exitCode={outputExitCode}
+	stackName={formStackName}
+	stackIcon={formIcon}
+	envId={effectiveEnvId}
+/>

@@ -3,7 +3,11 @@
 	import { Label } from '$lib/components/ui/label';
 	import { TogglePill } from '$lib/components/ui/toggle-pill';
 	import * as Select from '$lib/components/ui/select';
-	import { Percent, HardDrive } from 'lucide-svelte';
+	import { Percent, HardDrive, TriangleAlert } from 'lucide-svelte';
+	import {
+		percentageUnsupportedNote,
+		percentageOptionDisabled
+	} from '$lib/utils/disk-percentage-support';
 
 	interface Props {
 		collectActivity: boolean;
@@ -13,6 +17,11 @@
 		diskWarningMode: 'percentage' | 'absolute';
 		diskWarningThreshold: number;
 		diskWarningThresholdGb: number;
+		/** Whether this host reports a total to measure against; null = could not ask. */
+		percentageSupported?: boolean | null;
+		storageDriver?: string | null;
+		/** The mode as loaded from the server, so switching away cannot lock it out. */
+		storedDiskWarningMode?: 'percentage' | 'absolute' | null;
 	}
 
 	let {
@@ -22,8 +31,16 @@
 		diskWarningEnabled = $bindable(),
 		diskWarningMode = $bindable(),
 		diskWarningThreshold = $bindable(),
-		diskWarningThresholdGb = $bindable()
+		diskWarningThresholdGb = $bindable(),
+		percentageSupported = null,
+		storageDriver = null,
+		storedDiskWarningMode = null
 	}: Props = $props();
+
+	// Only a definite "no" disables the option. An unreachable host stays unknown, so a
+	// momentary outage never takes the setting away from somebody.
+	const percentageDead = $derived(percentageSupported === false);
+	const percentageNote = $derived(percentageUnsupportedNote(storageDriver));
 </script>
 
 <div class="flex items-start gap-3">
@@ -36,14 +53,14 @@
 <div class="flex items-start gap-3">
 	<div class="flex-1">
 		<Label>Collect system metrics</Label>
-		<p class="text-xs text-muted-foreground">Collect CPU and memory usage statistics from this environment</p>
+		<p class="text-xs text-muted-foreground">Collect CPU and memory history for the dashboard tiles and charts. The live per-container stats on the containers page are always shown and are not affected by this.</p>
 	</div>
 	<TogglePill bind:checked={collectMetrics} />
 </div>
 <div class="flex items-start gap-3">
 	<div class="flex-1">
 		<Label>Highlight value changes</Label>
-		<p class="text-xs text-muted-foreground">Show amber glow when container values change in the containers list</p>
+		<p class="text-xs text-muted-foreground">Flash an amber glow on a container's stat cell when its value changes. The numbers keep updating either way - this only controls the highlight animation.</p>
 	</div>
 	<TogglePill bind:checked={highlightChanges} />
 </div>
@@ -63,7 +80,11 @@
 				<Select.Trigger class="w-48">
 					<div class="flex items-center gap-2">
 						{#if diskWarningMode === 'percentage'}
-							<Percent class="w-3.5 h-3.5" />
+							{#if percentageDead}
+								<TriangleAlert class="w-3.5 h-3.5 text-[hsl(39_67%_69%)]" />
+							{:else}
+								<Percent class="w-3.5 h-3.5" />
+							{/if}
 							<span>Percentage</span>
 						{:else}
 							<HardDrive class="w-3.5 h-3.5" />
@@ -72,10 +93,18 @@
 					</div>
 				</Select.Trigger>
 				<Select.Content>
-					<Select.Item value="percentage">
-						<div class="flex items-center gap-2">
-							<Percent class="w-3.5 h-3.5" />
-							Percentage
+					<Select.Item
+						value="percentage"
+						disabled={percentageOptionDisabled(percentageSupported, storedDiskWarningMode)}
+					>
+						<div class="flex flex-col gap-0.5">
+							<div class="flex items-center gap-2">
+								<Percent class="w-3.5 h-3.5" />
+								Percentage
+							</div>
+							{#if percentageDead}
+								<span class="text-xs text-muted-foreground">does not work on this host</span>
+							{/if}
 						</div>
 					</Select.Item>
 					<Select.Item value="absolute">
@@ -106,5 +135,24 @@
 				<span class="text-sm text-muted-foreground">GB</span>
 			{/if}
 		</div>
+
+		{#if percentageDead && diskWarningMode === 'percentage'}
+			<!-- A stored mode that cannot fire is worse than no warning: the setting
+			     looks on, so nobody goes looking. Say it where the setting is. -->
+			<div
+				class="flex items-start gap-2 rounded-md border border-[hsl(39_67%_69%_/_0.3)] bg-[hsl(39_67%_69%_/_0.08)] px-3 py-2"
+			>
+				<TriangleAlert class="mt-0.5 w-4 h-4 shrink-0 text-[hsl(39_67%_69%)]" />
+				<div class="flex-1 text-xs">
+					<p class="text-[hsl(39_67%_69%)]">{percentageNote}</p>
+					<button
+						class="mt-1 underline underline-offset-2 text-muted-foreground hover:text-foreground"
+						onclick={() => (diskWarningMode = 'absolute')}
+					>
+						Switch to Absolute (GB)
+					</button>
+				</div>
+			</div>
+		{/if}
 	{/if}
 </div>

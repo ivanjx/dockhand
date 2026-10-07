@@ -73,6 +73,22 @@
 		}
 	});
 
+	// React to the ?container= URL param CHANGING while already mounted (e.g. a
+	// cross-host jump from the command palette). onMount only matches the URL once,
+	// so a later navigation to a container - possibly on another host, hence keyed on
+	// `containers` too - is handled here once its list has loaded.
+	let lastHandledUrlContainer: string | null = null;
+	$effect(() => {
+		const urlContainerId = $page.url.searchParams.get('container');
+		const list = containers;
+		if (!urlContainerId || urlContainerId === lastHandledUrlContainer) return;
+		const container = list.find(c => c.id === urlContainerId || c.id.startsWith(urlContainerId));
+		if (!container) return;
+		lastHandledUrlContainer = urlContainerId;
+		if (selectedContainer?.id === container.id) return;
+		selectContainer(container);
+	});
+
 	// Filtered containers based on search
 	let filteredContainers = $derived(() => {
 		if (!searchQuery.trim()) return containers;
@@ -107,6 +123,12 @@
 		selectedContainer = container;
 		searchQuery = '';
 		dropdownOpen = false;
+		if (terminalMode === 'attach') {
+			shellDetection = null;
+			detectingShells = false;
+			return;
+		}
+
 
 		// Detect available shells
 		detectingShells = true;
@@ -313,7 +335,11 @@
 		</div>
 		<div class="flex items-center gap-2">
 			<Label class="text-sm text-muted-foreground">Mode:</Label>
-			<Select.Root type="single" value={terminalMode} onValueChange={(value) => terminalMode = value as TerminalMode}>
+			<Select.Root type="single" value={terminalMode} onValueChange={(value) => {
+				if (value !== 'exec' && value !== 'attach') return;
+				terminalMode = value;
+				if (value === 'exec' && selectedContainer) selectContainer(selectedContainer);
+			}}>
 				<Select.Trigger class="h-9 w-48">
 					{#if terminalMode === 'attach'}
 						<Unplug class="w-4 h-4 mr-2 text-muted-foreground" />

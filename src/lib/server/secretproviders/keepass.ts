@@ -20,6 +20,7 @@
 import { spawn } from 'node:child_process';
 import { isAbsolute } from 'node:path';
 import type { KeePassConfig, SecretProvider, TestConnectionResult } from './shared';
+import { stripSurroundingQuotes } from './shared';
 
 const DEFAULT_CLI_PATH = '/usr/bin/keepassxc-cli';
 const COMMAND_TIMEOUT_MS = 30_000;
@@ -260,7 +261,7 @@ export const keepassProvider: SecretProvider<KeePassConfig> = {
 	supportsBulk: true,
 
 	isReference(value: unknown): value is string {
-		return typeof value === 'string' && value.trim().startsWith(KEEPASS_PREFIX);
+		return typeof value === 'string' && stripSurroundingQuotes(value).startsWith(KEEPASS_PREFIX);
 	},
 
 	async testConnection(config: KeePassConfig): Promise<TestConnectionResult> {

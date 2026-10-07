@@ -12,7 +12,8 @@ import {
 	real,
 	primaryKey,
 	unique,
-	index
+	index,
+	uniqueIndex
 } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
 
@@ -397,6 +398,44 @@ export const containerIconOverrides = sqliteTable('container_icon_overrides', {
 	containerIconEnvUnique: unique().on(table.containerName, table.environmentId)
 }));
 
+// User-defined organizational tags for containers and stacks.
+// Distinct from Docker labels. The catalog below is GLOBAL (one 'prod'/'infra'/etc
+// across the whole instance, unique on name). Assignments (container_tags/stack_tags)
+// ARE env-scoped and keyed by the container/stack NAME (stable across recreation), so
+// which containers/stacks carry a tag is decided per environment.
+export const tags = sqliteTable('tags', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	name: text('name').notNull(),
+	color: text('color').notNull().default('slate'), // one of the fixed palette (tags-core.ts)
+	icon: text('icon'),                              // optional lucide icon name; null = default tag icon
+	createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`)
+}, (table) => ({
+	// Unique on name. The migration makes the index case-INSENSITIVE (COLLATE NOCASE
+	// on sqlite, lower(name) on pg) so "Prod" and "prod" are the same tag even under
+	// a concurrent create; preserve this expression when regenerating migrations.
+	tagNameUnique: unique().on(table.name)
+}));
+
+export const containerTags = sqliteTable('container_tags', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	containerName: text('container_name').notNull(),
+	environmentId: integer('environment_id').references(() => environments.id, { onDelete: 'cascade' }),
+	tagId: integer('tag_id').notNull().references(() => tags.id, { onDelete: 'cascade' }),
+	createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`)
+}, (table) => ({
+	containerTagUnique: unique().on(table.containerName, table.environmentId, table.tagId)
+}));
+
+export const stackTags = sqliteTable('stack_tags', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	stackName: text('stack_name').notNull(),
+	environmentId: integer('environment_id').references(() => environments.id, { onDelete: 'cascade' }),
+	tagId: integer('tag_id').notNull().references(() => tags.id, { onDelete: 'cascade' }),
+	createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`)
+}, (table) => ({
+	stackTagUnique: unique().on(table.stackName, table.environmentId, table.tagId)
+}));
+
 export const stackEnvironmentVariables = sqliteTable('stack_environment_variables', {
 	id: integer('id').primaryKey({ autoIncrement: true }),
 	stackName: text('stack_name').notNull(),
@@ -502,7 +541,9 @@ export const scheduleExecutions = sqliteTable('schedule_executions', {
 	logs: text('logs'), // Execution logs/output
 	createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`)
 }, (table) => ({
-	typeIdIdx: index('schedule_executions_type_id_idx').on(table.scheduleType, table.scheduleId)
+	typeIdIdx: index('schedule_executions_type_id_idx').on(table.scheduleType, table.scheduleId),
+	// Powers "runs for this stack/container" lookups without a full table scan.
+	entityEnvIdx: index('schedule_executions_entity_env_idx').on(table.entityName, table.environmentId)
 }));
 
 // =============================================================================
@@ -521,6 +562,9 @@ export const pendingContainerUpdates = sqliteTable('pending_container_updates', 
 	// A newer VERSION tag (semver) for a pinned image, as JSON {tag,bump,skipped}.
 	// Null when there's no semver suggestion. Advisory - never auto-applied.
 	newerVersion: text('newer_version'),
+	// Hours left before a held update may be applied. Null when no cooldown applies,
+	// so a row can record "waiting" without claiming the update is ready.
+	releaseAgeRemainingHours: integer('release_age_remaining_hours'),
 	checkedAt: text('checked_at').default(sql`CURRENT_TIMESTAMP`),
 	createdAt: text('created_at').default(sql`CURRENT_TIMESTAMP`)
 }, (table) => ({
@@ -723,3 +767,37 @@ export type NewBackupDestination = typeof backupDestinations.$inferInsert;
 
 export type BackupConfig = typeof backupConfigs.$inferSelect;
 export type NewBackupConfig = typeof backupConfigs.$inferInsert;
+
+
+// =============================================================================
+// PASSKEYS (WebAuthn)
+// =============================================================================
+
+/**
+ * A registered WebAuthn credential.
+ *
+ * `counter` is the authenticator's signature counter: it must only ever move
+ * forward, so a replayed or cloned credential is refused at login. `aaguid`
+ * identifies the authenticator model, which is what lets a credential be named
+ * after the manager it lives in.
+ */
+export const passkeyCredentials = sqliteTable('passkey_credentials', {
+	id: integer('id').primaryKey({ autoIncrement: true }),
+	userId: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+	credentialId: text('credential_id').notNull().unique(),
+	webauthnUserId: text('webauthn_user_id').notNull(),
+	publicKey: text('public_key').notNull(),
+	counter: integer('counter').notNull().default(0),
+	deviceType: text('device_type').notNull(),
+	backedUp: integer('backed_up', { mode: 'boolean' }).notNull().default(false),
+	transports: text('transports'),
+	aaguid: text('aaguid'),
+	name: text('name'),
+	createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`)
+}, (table) => ({
+	userIdIdx: index('passkey_credentials_user_id_idx').on(table.userId),
+	userNameUnique: uniqueIndex('passkey_credentials_user_name_unique').on(table.userId, sql`lower(${table.name})`)
+}));
+
+export type PasskeyCredential = typeof passkeyCredentials.$inferSelect;
+export type NewPasskeyCredential = typeof passkeyCredentials.$inferInsert;

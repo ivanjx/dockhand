@@ -3,32 +3,47 @@
 </svelte:head>
 
 <script lang="ts">
+	import { matchesStackFilter } from '$lib/utils/grid-filters';
 	import { onMount, onDestroy } from 'svelte';
-	import { goto } from '$app/navigation';
+	import { goto, afterNavigate } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { toast } from 'svelte-sonner';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
-	import { Input } from '$lib/components/ui/input';
+	import { SearchInput } from '$lib/components/ui/search-input';
 	import { Checkbox } from '$lib/components/ui/checkbox';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import * as Popover from '$lib/components/ui/popover';
 	import MultiSelectFilter from '$lib/components/MultiSelectFilter.svelte';
-	import { Play, Square, Trash2, Plus, ArrowBigDown, Search, Pencil, ExternalLink, GitBranch, RefreshCw, Loader2, FileCode, FileText, FileOutput, Box, RotateCcw, ScrollText, Terminal, Eye, Network, HardDrive, Heart, HeartPulse, HeartOff, ChevronsUpDown, ChevronsDownUp, Rocket, AlertTriangle, X, Layers, Pause, CircleDashed, Skull, FolderOpen, Variable, Clock, RotateCw, Import, Ship, Cable, LayoutPanelLeft, Rows3, GripVertical, Globe, CircleArrowUp, NotepadText, Tag, Copy, Check } from 'lucide-svelte';
+	import { Play, Square, Trash2, Plus, ArrowBigDown, Pencil, ExternalLink, GitBranch, RefreshCw, Loader2, FileCode, FileText, FileOutput, Box, RotateCcw, ScrollText, Terminal, Eye, Network, HardDrive, Heart, HeartPulse, HeartOff, ChevronsUpDown, ChevronsDownUp, Rocket, AlertTriangle, X, Layers, Pause, CircleDashed, Skull, FolderOpen, Variable, Clock, RotateCw, Import, Ship, Cable, LayoutPanelLeft, Rows3, GripVertical, Globe, CircleArrowUp, NotepadText, Tag, Copy, Check } from 'lucide-svelte';
 	import { formatPorts } from '$lib/utils/port-format';
+	import { formatUptime } from '$lib/utils/container-status';
 	import { parseCustomUrl } from '$lib/utils/custom-url';
+	import { containerDisplayName } from '$lib/utils/container-display-name';
 	import { extractTraefikUrls } from '$lib/utils/traefik-urls';
 	import { resolveChangelogUrl } from '$lib/utils/changelog-url';
 	import { extractPangolinUrls } from '$lib/utils/pangolin-urls';
 	import { extractCaddyUrls } from '$lib/utils/caddy-urls';
 	import { appSettings } from '$lib/stores/settings';
+	import { shouldShowStackLog, type StackLogOperation } from '$lib/utils/stack-log-operations';
 	import ConfirmPopover from '$lib/components/ConfirmPopover.svelte';
 	import StackIcon from '$lib/components/StackIcon.svelte';
+	import TagChips from '$lib/components/TagChips.svelte';
+	import TagEditPopover from '$lib/components/TagEditPopover.svelte';
+	import TagFilter from '$lib/components/TagFilter.svelte';
+	import { matchesTagFilter, tagGroupDescriptor, type Tag as UserTag, type TagColor as UserTagColor, mergeNamedTags, filterTagList, prunedTagFilter, type LabelTagSpec } from '$lib/utils/tags-core';
+	import { isKnownIconName } from '$lib/utils/icons';
+	import { tagOrder } from '$lib/stores/tag-order';
+	import { applyOrder } from '$lib/utils/apply-order';
+	import TagLucideIcon from '$lib/components/TagLucideIcon.svelte';
 	import ContainerIcon from '$lib/components/ContainerIcon.svelte';
 	import BatchOperationModal from '$lib/components/BatchOperationModal.svelte';
 	import type { ComposeStackInfo, ContainerStats, StackContainer } from '$lib/types';
+	import { showsManagementActions } from '$lib/utils/stack-actions';
+	import { sumStackStats, type StackStats } from '$lib/utils/stack-stats';
 	import StackModal from './StackModal.svelte';
 	import DeleteStackModal from './DeleteStackModal.svelte';
+	import ComposeOutputModal from './ComposeOutputModal.svelte';
 	import GitSourceBadge from './GitSourceBadge.svelte';
 	import GitStackModal from './GitStackModal.svelte';
 	import ImportStackModal from './ImportStackModal.svelte';
@@ -44,7 +59,7 @@
 	import LogsPanel from '../logs/LogsPanel.svelte';
 	import { currentEnvironment, environments, appendEnvParam, clearStaleEnvironment } from '$lib/stores/environment';
 	import { onDockerEvent, isContainerListChange } from '$lib/stores/events';
-	import { canAccess } from '$lib/stores/auth';
+	import { canAccess, isAdmin } from '$lib/stores/auth';
 	import { readJobResponse } from '$lib/utils/sse-fetch';
 	import { EmptyState, NoEnvironment } from '$lib/components/ui/empty-state';
 	import PageHeader from '$lib/components/PageHeader.svelte';
@@ -98,6 +113,143 @@
 	let stackModalGitInfo = $state<{ commit?: string; url?: string; branch?: string } | null>(null);
 	let editingGitStack = $state<any>(null);
 	let envId = $state<number | null>(null);
+
+	// User-defined tags: assignments (name -> tagId[]) + catalog + filter.
+	let tagsMap = $state<Record<string, number[]>>({});
+	let tagCatalog = $state<UserTag[]>([]);
+	// The catalogue has actually been fetched. Until then the tag picker is only
+	// half-built, so a saved selection must not be measured against it.
+	let tagsLoaded = $state(false);
+	const tagById = $derived(new Map(tagCatalog.map((t) => [t.id, t])));
+	// Tags assigned in Dockhand, plus the ones the stack's containers name in their
+	// dockhand.tags labels - so a stack started outside Dockhand is tagged too.
+	function tagsFor(stack: { name: string; labelTags?: LabelTagSpec[] }): UserTag[] {
+		const assigned = (tagsMap[stack.name] ?? [])
+			.map((id) => tagById.get(id))
+			.filter((t): t is UserTag => !!t);
+		return mergeNamedTags(assigned, stack.labelTags, tagCatalog, isKnownIconName);
+	}
+
+	// Group-by-tag: partition rows by their unique tag COMBINATION. Persisted per browser.
+	const SHOW_TAGS_KEY = 'dockhand-stacks-show-tags';
+	const SHOW_BANDS_KEY = 'dockhand-stacks-group-bands';
+	const INLINE_TAG_EDIT_KEY = 'dockhand-stacks-inline-tag-editing';
+	const TAG_SETTINGS_EXPANDED_KEY = 'dockhand-stacks-tag-settings-expanded';
+	// Show tag chips on rows (default true - only '0' hides them).
+	let showTags = $state(typeof window === 'undefined' || localStorage.getItem(SHOW_TAGS_KEY) !== '0');
+	// Coloured group bands (default true - only '0' hides them).
+	let showBands = $state(typeof window === 'undefined' || localStorage.getItem(SHOW_BANDS_KEY) !== '0');
+	// Show a tag-edit button on each row (default true - only '0' hides it).
+	let inlineTagEditing = $state(typeof window === 'undefined' || localStorage.getItem(INLINE_TAG_EDIT_KEY) !== '0');
+	// Tag-settings section open/closed (default open - only '0' collapses it).
+	let tagSettingsExpanded = $state(typeof window === 'undefined' || localStorage.getItem(TAG_SETTINGS_EXPANDED_KEY) !== '0');
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(SHOW_TAGS_KEY, showTags ? '1' : '0');
+	});
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(SHOW_BANDS_KEY, showBands ? '1' : '0');
+	});
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(INLINE_TAG_EDIT_KEY, inlineTagEditing ? '1' : '0');
+	});
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(TAG_SETTINGS_EXPANDED_KEY, tagSettingsExpanded ? '1' : '0');
+	});
+	const GROUP_BY_TAG_KEY = 'dockhand-stacks-group-by-tag';
+	const COLLAPSED_GROUPS_KEY = 'dockhand-stacks-collapsed-groups';
+	let groupByTag = $state(typeof window !== 'undefined' && localStorage.getItem(GROUP_BY_TAG_KEY) === '1');
+	let collapsedGroups = $state<Set<string>>(loadCollapsedGroups());
+	function loadCollapsedGroups(): Set<string> {
+		if (typeof window === 'undefined') return new Set();
+		try { const s = localStorage.getItem(COLLAPSED_GROUPS_KEY); return new Set(s ? JSON.parse(s) : []); } catch { return new Set(); }
+	}
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(GROUP_BY_TAG_KEY, groupByTag ? '1' : '0');
+	});
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify([...collapsedGroups]));
+	});
+	// The order the tag lists actually show, so the groups read the same way:
+	// applyOrder decides where an unarranged tag sits, and this follows it.
+	const resolvedTagOrder = $derived(
+		applyOrder(tagCatalog, $tagOrder, (t) => t.id).map((t) => t.id)
+	);
+	// The filter lists the catalogue plus any tag only a label names, so a tag that
+	// lives in a label can still be filtered and grouped by.
+	const filterTags = $derived(filterTagList(tagCatalog, stacks.map((stack) => tagsFor(stack))));
+
+	// Drop a selected tag the picker no longer offers - a deleted catalog tag, or a
+	// label tag whose last stack is gone - so a filter can never empty the list with
+	// no visible cause. Waits for both the catalog and the rows: measuring a
+	// selection against a half-built picker would drop every valid id, and the
+	// result is persisted straight away.
+	$effect(() => {
+		tagFilter = prunedTagFilter(tagFilter, filterTags, tagsLoaded && stacks.length > 0);
+	});
+	const stackGroupBy = $derived(groupByTag ? (s: any) => tagGroupDescriptor(tagsFor(s), resolvedTagOrder) : undefined);
+	async function loadTags(forEnvId: number | null) {
+		// The catalogue is global, but the order it is shown and grouped in belongs
+		// to this user, so it is loaded alongside it - and again after a sign-in.
+		tagOrder.init();
+		try {
+			const [assignRes, catRes] = await Promise.all([
+				fetch(appendEnvParam('/api/stack-tags', forEnvId)), // assignments: per env
+				fetch('/api/tags')                                   // catalog: global
+			]);
+			tagsMap = assignRes.ok ? await assignRes.json() : {};
+			tagCatalog = catRes.ok ? (await catRes.json()).tags : [];
+		} catch { tagsMap = {}; tagCatalog = []; }
+		tagsLoaded = true;
+		// Stale filter ids are dropped against filterTags, which knows the label
+		// tags on screen as well as the catalog.
+	}
+	async function createTag(name: string, color: UserTagColor, icon: string | null): Promise<UserTag | null> {
+		try {
+			const res = await fetch('/api/tags', {
+				method: 'POST', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ name, color, icon })
+			});
+			if (!res.ok) return null;
+			const tag = await res.json();
+			await loadTags(envId);
+			return tag;
+		} catch { return null; }
+	}
+	async function applyStackTags(stackName: string, tagIds: number[]) {
+		tagsMap = { ...tagsMap, [stackName]: tagIds };
+		try {
+			await fetch(appendEnvParam(`/api/stacks/${encodeURIComponent(stackName)}/tags`, envId), {
+				method: 'PUT', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ tagIds })
+			});
+		} catch { /* optimistic */ }
+	}
+	// Tag filter, persisted per browser.
+	const TAG_FILTER_KEY = 'dockhand-stacks-tag-filter';
+	const TAG_FILTER_MODE_KEY = 'dockhand-stacks-tag-filter-mode';
+	let tagFilter = $state<number[]>(loadTagFilter());
+	let tagFilterMode = $state<'all' | 'any'>(loadTagFilterMode());
+	function loadTagFilter(): number[] {
+		if (typeof window === 'undefined') return [];
+		try { const s = localStorage.getItem(TAG_FILTER_KEY); return s ? JSON.parse(s) : []; } catch { return []; }
+	}
+	function loadTagFilterMode(): 'all' | 'any' {
+		if (typeof window === 'undefined') return 'any';
+		const s = localStorage.getItem(TAG_FILTER_MODE_KEY);
+		return s === 'all' || s === 'any' ? s : 'any';
+	}
+	$effect(() => {
+		const f = tagFilter, m = tagFilterMode;
+		if (typeof window === 'undefined') return;
+		localStorage.setItem(TAG_FILTER_KEY, JSON.stringify(f));
+		localStorage.setItem(TAG_FILTER_MODE_KEY, m);
+	});
 
 	// Single-container update (mirrors the containers page action)
 	let showBatchUpdateModal = $state(false);
@@ -198,16 +350,6 @@
 
 		// No public IP available for socket or hawser-edge
 		return null;
-	}
-
-	// Helper: format uptime from status string
-	function formatUptime(status: string): string {
-		if (!status) return '-';
-		const upMatch = status.match(/Up\s+(.+?)(?:\s+\(|$)/i);
-		if (upMatch) return upMatch[1].trim();
-		const exitMatch = status.match(/Exited.+?(\d+\s+\w+)\s+ago/i);
-		if (exitMatch) return exitMatch[1] + ' ago';
-		return '-';
 	}
 
 	// Helper: get container's primary IP address
@@ -321,49 +463,8 @@
 	}
 
 	// Aggregate stats for a stack (sum of all running containers)
-	interface StackStats {
-		cpuPercent: number;
-		memoryUsage: number;
-		memoryLimit: number;
-		networkRx: number;
-		networkTx: number;
-		blockRead: number;
-		blockWrite: number;
-		runningCount: number;
-	}
-
 	function getStackStats(stack: ComposeStackInfo): StackStats | null {
-		if (!stack.containerDetails || stack.containerDetails.length === 0) return null;
-
-		let cpuPercent = 0;
-		let memoryUsage = 0;
-		let memoryLimit = 0;
-		let networkRx = 0;
-		let networkTx = 0;
-		let blockRead = 0;
-		let blockWrite = 0;
-		let runningCount = 0;
-
-		for (const container of stack.containerDetails) {
-			// Only aggregate stats from running containers
-			if (container.state !== 'running') continue;
-
-			const stats = containerStats.get(container.id);
-			if (stats) {
-				cpuPercent += stats.cpuPercent;
-				memoryUsage += stats.memoryUsage;
-				memoryLimit = Math.max(memoryLimit, stats.memoryLimit);
-				networkRx += stats.networkRx;
-				networkTx += stats.networkTx;
-				blockRead += stats.blockRead;
-				blockWrite += stats.blockWrite;
-				runningCount++;
-			}
-		}
-
-		if (runningCount === 0) return null;
-
-		return { cpuPercent, memoryUsage, memoryLimit, networkRx, networkTx, blockRead, blockWrite, runningCount };
+		return sumStackStats(stack.containerDetails ?? [], (id) => containerStats.get(id));
 	}
 
 	// Search and sort state - initialize from URL for persistence across navigation
@@ -385,6 +486,16 @@
 		{ value: 'stopped', label: 'Stopped', icon: Square, color: 'text-rose-500' },
 		{ value: 'created', label: 'Created', icon: CircleDashed, color: 'text-slate-500' },
 		{ value: 'not deployed', label: 'Not deployed', icon: Rocket, color: 'text-violet-500' }
+	];
+
+	// Health rides the status filter as synthetic 'health:*' entries rather than a
+	// second dropdown. Always offered, unlike update-available: the question "is
+	// anything unhealthy" is asked precisely when the answer is no.
+	const filterOptions = [
+		...stackStatusTypes,
+		{ value: 'health:unhealthy', label: 'Unhealthy', icon: HeartOff, color: 'text-red-500', colorLabel: true },
+		{ value: 'health:starting', label: 'Starting up', icon: Heart, color: 'text-amber-500' },
+		{ value: 'health:healthy', label: 'Healthy', icon: HeartPulse, color: 'text-emerald-500' }
 	];
 
 	function getStackStatusIcon(status: string) {
@@ -520,6 +631,71 @@
 	let restartPopoverOpen = $state<Record<string, boolean>>({});
 	let stackDownLoading = $state<string | null>(null);
 
+	// Live compose output window: shown while a stack action (start/stop/restart/
+	// redeploy/down) runs, fed line-by-line via readJobResponse's onLine callback.
+	let composeOutputOpen = $state(false);
+	let composeOutputTitle = $state('');
+	let composeOutputLines = $state<string[]>([]);
+	let composeOutputRunning = $state(false);
+	// Status-line inputs, measured here in the browser (wall-clock incl. the round
+	// trip through fetch/polling) — NOT the server-side execution time recorded
+	// separately for the deploy-history dataset (Task 10). Different path, different
+	// number; don't conflate the two.
+	let composeOutputStartedAt = 0;
+	let composeOutputOk = $state<boolean | undefined>(undefined);
+	let composeOutputMs = $state<number | undefined>(undefined);
+	let composeOutputExitCode = $state<number | undefined>(undefined);
+
+	let composeOutputStackName = $state<string | undefined>(undefined);
+
+	// `op` gates the log popover per the user's Settings choice (#1558): the output is
+	// always buffered (so it's ready if needed), but the popover only opens for ops the
+	// user opted into. `op` omitted = always show (deploy/git paths that pass no op).
+	// finishComposeOutput force-opens it on failure, so a quiet op still surfaces errors.
+	function startComposeOutput(title: string, stackName?: string, op?: StackLogOperation) {
+		composeOutputTitle = title;
+		composeOutputStackName = stackName;
+		composeOutputLines = [];
+		composeOutputRunning = true;
+		composeOutputOpen = op === undefined || shouldShowStackLog($appSettings.stackLogOperations, op);
+		composeOutputStartedAt = Date.now();
+		composeOutputOk = undefined;
+		composeOutputMs = undefined;
+		composeOutputExitCode = undefined;
+	}
+
+	function appendComposeOutputLine(line: string) {
+		composeOutputLines = [...composeOutputLines, line];
+	}
+
+	// Called once the job settles. Older agent versions (pre line-streaming, see Task 5)
+	// only return a batched `output` string — show it if nothing arrived incrementally.
+	// `ok`/`exitCode` come from the job result (or `false`/undefined on a thrown
+	// network error, from the catch blocks below) — the payload does not carry an
+	// exit code today (StackOperationResult has no such field, see stacks.ts), so
+	// `exitCode` stays undefined in practice until the server starts sending one.
+	function finishComposeOutput(output: string | undefined, ok: boolean, exitCode?: number, error?: string) {
+		composeOutputRunning = false;
+		composeOutputOk = ok;
+		composeOutputMs = Date.now() - composeOutputStartedAt;
+		composeOutputExitCode = exitCode;
+		// A quiet op (popover suppressed by the setting) still surfaces its log on failure,
+		// so the user is never left with only a toast when something went wrong (#1558).
+		if (!ok) composeOutputOpen = true;
+		if (composeOutputLines.length === 0 && output) {
+			composeOutputLines = output.split('\n');
+		}
+		// On failure the reason lives in `error` (compose's stderr), which the streamed
+		// log lines don't carry -- append it so the modal shows WHY it failed instead of
+		// ending on a bare "Started" with the cause hidden in a separate dialog.
+		if (!ok && error) {
+			const errLines = error.split('\n').map((l) => l.trimEnd()).filter(Boolean);
+			const already = new Set(composeOutputLines.map((l) => l.trim()));
+			const fresh = errLines.filter((l) => !already.has(l.trim()));
+			if (fresh.length > 0) composeOutputLines = [...composeOutputLines, ...fresh];
+		}
+	}
+
 	// Container-level confirmation popover state
 	let confirmStopContainerId = $state<string | null>(null);
 	let confirmRestartContainerId = $state<string | null>(null);
@@ -583,7 +759,12 @@
 
 		// Filter by status (uses display status so git "created" matches "not deployed")
 		if (statusFilter.length > 0) {
-			result = result.filter(stack => statusFilter.includes(getDisplayStatus(stack).toLowerCase()));
+			result = result.filter(stack => matchesStackFilter(stack, statusFilter, getDisplayStatus(stack)));
+		}
+
+		// Filter by user-defined tags.
+		if (tagFilter.length > 0) {
+			result = result.filter(stack => matchesTagFilter(tagsFor(stack).map((t) => t.id), tagFilter, tagFilterMode));
 		}
 
 		// Sort
@@ -801,11 +982,14 @@
 			fetchStacks();
 			fetchStats();
 			loadScannerSettings();
+			loadTags(newEnvId);
 		} else if (!env) {
 			// No environment - clear data and stop loading
 			envId = null;
 			stacks = [];
 			containerStats = new Map();
+			tagsMap = {};
+			tagCatalog = [];
 			loading = false;
 		}
 	});
@@ -813,12 +997,16 @@
 	// True when any stack container shows an update-available (amber) or
 	// check-failed (red) indicator — gates the "dismiss indicators" button.
 	const hasUpdateIndicators = $derived(
-		stacks.some((s) => s.updatesAvailable || (s.newerVersionCount ?? 0) > 0) ||
+		stacks.some((s) => s.updatesAvailable || (s.newerVersionCount ?? 0) > 0 || (s.coolingDownCount ?? 0) > 0) ||
 			failedUpdateCheckIds.size > 0
 	);
 	// Counts for the compact dismiss: stacks with a digest update, and total containers
 	// with a newer version tag - each shown with its icon, mirroring the containers page.
 	const stackDigestCount = $derived(stacks.filter((s) => s.updatesAvailable).length);
+	// Containers waiting out the minimum image age, across every stack.
+	const stackCoolingDownCount = $derived(
+		stacks.reduce((sum, s) => sum + (s.coolingDownCount ?? 0), 0)
+	);
 	const stackNewerVersionCount = $derived(
 		stacks.reduce((sum, s) => sum + (s.newerVersionCount ?? 0), 0)
 	);
@@ -965,11 +1153,18 @@
 	async function startStack(name: string) {
 		operationError = null;
 		stackActionLoading = name;
+		startComposeOutput(`Starting ${name}`, name, 'start');
 		try {
 			const response = await fetch(appendEnvParam(`/api/stacks/${encodeURIComponent(name)}/start`, envId), { method: 'POST' });
-			const data = await readJobResponse(response);
+			const data = await readJobResponse(response, appendComposeOutputLine);
+			finishComposeOutput(
+				typeof data.output === 'string' ? data.output : undefined,
+				Boolean(data.success),
+				typeof data.exitCode === 'number' ? data.exitCode : undefined,
+				typeof data.error === 'string' ? data.error : undefined
+			);
 			if (!data.success) {
-				showErrorDialog(`Failed to start ${name}`, data.error || 'Failed to start stack');
+				toast.error(`Failed to start ${name}`);
 				return;
 			}
 			toast.success(`Started ${name}`);
@@ -977,7 +1172,8 @@
 		} catch (error) {
 			console.error('Failed to start stack:', error);
 			const errorMsg = error instanceof Error ? error.message : 'Failed to start stack';
-			showErrorDialog(`Failed to start ${name}`, errorMsg);
+			finishComposeOutput(undefined, false, undefined, errorMsg);
+			toast.error(`Failed to start ${name}`);
 		} finally {
 			stackActionLoading = null;
 		}
@@ -986,11 +1182,18 @@
 	async function stopStack(name: string) {
 		operationError = null;
 		stackActionLoading = name;
+		startComposeOutput(`Stopping ${name}`, name, 'stop');
 		try {
 			const response = await fetch(appendEnvParam(`/api/stacks/${encodeURIComponent(name)}/stop`, envId), { method: 'POST' });
-			const data = await readJobResponse(response);
+			const data = await readJobResponse(response, appendComposeOutputLine);
+			finishComposeOutput(
+				typeof data.output === 'string' ? data.output : undefined,
+				Boolean(data.success),
+				typeof data.exitCode === 'number' ? data.exitCode : undefined,
+				typeof data.error === 'string' ? data.error : undefined
+			);
 			if (!data.success) {
-				showErrorDialog(`Failed to stop ${name}`, data.error || 'Failed to stop stack');
+				toast.error(`Failed to stop ${name}`);
 				return;
 			}
 			toast.success(`Stopped ${name}`);
@@ -998,7 +1201,8 @@
 		} catch (error) {
 			console.error('Failed to stop stack:', error);
 			const errorMsg = error instanceof Error ? error.message : 'Failed to stop stack';
-			showErrorDialog(`Failed to stop ${name}`, errorMsg);
+			finishComposeOutput(undefined, false, undefined, errorMsg);
+			toast.error(`Failed to stop ${name}`);
 		} finally {
 			stackActionLoading = null;
 		}
@@ -1007,15 +1211,24 @@
 	async function restartStack(name: string, mode: 'restart' | 'ordered' | 'recreate' = 'restart') {
 		operationError = null;
 		stackActionLoading = name;
+		startComposeOutput(mode === 'recreate' ? `Recreating ${name}` : `Restarting ${name}`, name, 'restart');
 		try {
 			let url = appendEnvParam(`/api/stacks/${encodeURIComponent(name)}/restart`, envId);
 			if (mode === 'recreate' || mode === 'ordered') {
 				url += (url.includes('?') ? '&' : '?') + `mode=${mode}`;
 			}
 			const response = await fetch(url, { method: 'POST' });
-			const data = await readJobResponse(response);
+			const data = await readJobResponse(response, appendComposeOutputLine);
+			finishComposeOutput(
+				typeof data.output === 'string' ? data.output : undefined,
+				Boolean(data.success),
+				typeof data.exitCode === 'number' ? data.exitCode : undefined,
+				typeof data.error === 'string' ? data.error : undefined
+			);
 			if (!data.success) {
-				showErrorDialog(`Failed to restart ${name}`, data.error || 'Failed to restart stack');
+				// The reason is now in the output modal's log; a toast points the user to it
+				// without a second, redundant error dialog stacked over the same modal.
+				toast.error(`Failed to restart ${name}`);
 				return;
 			}
 			toast.success(mode === 'recreate' ? `Recreated ${name}` : `Restarted ${name}`);
@@ -1023,7 +1236,8 @@
 		} catch (error) {
 			console.error('Failed to restart stack:', error);
 			const errorMsg = error instanceof Error ? error.message : 'Failed to restart stack';
-			showErrorDialog(`Failed to restart ${name}`, errorMsg);
+			finishComposeOutput(undefined, false, undefined, errorMsg);
+			toast.error(`Failed to restart ${name}`);
 		} finally {
 			stackActionLoading = null;
 		}
@@ -1032,15 +1246,32 @@
 	async function redeployStack(name: string, options: { pull: boolean; build: boolean; forceRecreate: boolean }) {
 		operationError = null;
 		stackActionLoading = name;
+		startComposeOutput(`Redeploying ${name}`, name, 'deploy');
+		// Record which redeploy options were chosen so the log shows them (they are not
+		// otherwise visible once the popover closes).
+		const chosen = [
+			options.pull && 'pull images',
+			options.build && 'build images',
+			options.forceRecreate && 'force recreate'
+		].filter(Boolean);
+		appendComposeOutputLine(`Options: ${chosen.length ? chosen.join(', ') : 'none'}`);
 		try {
 			const response = await fetch(appendEnvParam(`/api/stacks/${encodeURIComponent(name)}/deploy`, envId), {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(options)
 			});
-			const data = await readJobResponse(response);
+			const data = await readJobResponse(response, appendComposeOutputLine);
+			finishComposeOutput(
+				typeof data.output === 'string' ? data.output : undefined,
+				Boolean(data.success),
+				typeof data.exitCode === 'number' ? data.exitCode : undefined,
+				typeof data.error === 'string' ? data.error : undefined
+			);
 			if (!data.success) {
-				showErrorDialog(`Failed to redeploy ${name}`, data.error || 'Failed to redeploy stack');
+				// The compose output window carries the full log (incl. the failure reason)
+				// plus the failed status, so a separate error dialog would duplicate it.
+				toast.error(`Failed to redeploy ${name}`);
 				return;
 			}
 			toast.success(`Redeployed ${name}`);
@@ -1048,7 +1279,10 @@
 		} catch (error) {
 			console.error('Failed to redeploy stack:', error);
 			const errorMsg = error instanceof Error ? error.message : 'Failed to redeploy stack';
-			showErrorDialog(`Failed to redeploy ${name}`, errorMsg);
+			// A throw before any output streams would otherwise leave the window with
+			// only the Options line and a red status, so put the error text in it.
+			finishComposeOutput(undefined, false, undefined, errorMsg);
+			toast.error(`Failed to redeploy ${name}`);
 		} finally {
 			stackActionLoading = null;
 		}
@@ -1058,11 +1292,18 @@
 		operationError = null;
 		stackActionLoading = name;
 		stackDownLoading = name;
+		startComposeOutput(`Bringing down ${name}`, name, 'down');
 		try {
 			const response = await fetch(appendEnvParam(`/api/stacks/${encodeURIComponent(name)}/down`, envId), { method: 'POST' });
-			const data = await readJobResponse(response);
+			const data = await readJobResponse(response, appendComposeOutputLine);
+			finishComposeOutput(
+				typeof data.output === 'string' ? data.output : undefined,
+				Boolean(data.success),
+				typeof data.exitCode === 'number' ? data.exitCode : undefined,
+				typeof data.error === 'string' ? data.error : undefined
+			);
 			if (!data.success) {
-				showErrorDialog(`Failed to bring down ${name}`, data.error || 'Failed to bring down stack');
+				toast.error(`Failed to bring down ${name}`);
 				return;
 			}
 			toast.success(`Brought down ${name}`);
@@ -1070,7 +1311,8 @@
 		} catch (error) {
 			console.error('Failed to bring down stack:', error);
 			const errorMsg = error instanceof Error ? error.message : 'Failed to bring down stack';
-			showErrorDialog(`Failed to bring down ${name}`, errorMsg);
+			finishComposeOutput(undefined, false, undefined, errorMsg);
+			toast.error(`Failed to bring down ${name}`);
 		} finally {
 			stackActionLoading = null;
 			stackDownLoading = null;
@@ -1382,6 +1624,23 @@
 		}
 	}
 
+	// Deep-link from the command palette: ?expand=<name> filters to that stack and expands
+	// it, mirroring a click on the stack name. Handled in afterNavigate (not just onMount)
+	// so it also fires when a goto lands on the already-mounted stacks page (same-route
+	// navigation does not remount). Guard on the last-applied value so an unrelated
+	// navigation (that keeps the param in the URL) doesn't re-apply it.
+	let lastAppliedExpand: string | null = null;
+	afterNavigate(() => {
+		const expandName = $page.url.searchParams.get('expand');
+		if (expandName && expandName !== lastAppliedExpand) {
+			lastAppliedExpand = expandName;
+			searchInput = expandName;
+			searchQuery = expandName;
+			expandedStacks = new Set(expandedStacks).add(expandName);
+			saveExpandedState();
+		}
+	});
+
 	onMount(() => {
 		loadExpandedState();
 		loadStatusFilter();
@@ -1467,24 +1726,16 @@
 			{/if}
 		</PageHeader>
 		<div class="flex flex-wrap items-center gap-2">
-			<div class="relative">
-				<Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-				<Input
-					type="text"
-					placeholder="Search stacks..."
-					bind:value={searchInput}
-					onkeydown={(e) => e.key === 'Escape' && (searchInput = '')}
-					class="pl-8 h-8 w-48 text-sm"
-				/>
-			</div>
+			<SearchInput bind:value={searchInput} placeholder="Search stacks..." class="h-8 w-48 text-sm" />
 			<MultiSelectFilter
 				bind:value={statusFilter}
-				options={stackStatusTypes}
+				options={filterOptions}
 				placeholder="All statuses"
 				pluralLabel="statuses"
 				width="w-44"
 				defaultIcon={Layers}
 			/>
+			<TagFilter tags={filterTags} bind:selected={tagFilter} bind:mode={tagFilterMode} bind:groupBy={groupByTag} bind:showTags={showTags} bind:showBands={showBands} bind:inlineEditing={inlineTagEditing} bind:settingsExpanded={tagSettingsExpanded} />
 			<Button size="sm" variant="outline" onclick={fetchStacks}>
 				<RefreshCw class="w-3.5 h-3.5" />
 				Refresh
@@ -1505,6 +1756,7 @@
 				show={hasUpdateIndicators}
 				digestCount={stackDigestCount}
 				newerVersionCount={stackNewerVersionCount}
+				coolingDownCount={stackCoolingDownCount}
 				onDismiss={dismissStackUpdates}
 			/>
 			<Button
@@ -1670,6 +1922,10 @@
 			gridId="stacks"
 			loading={loading}
 			selectable
+			groupBy={stackGroupBy}
+			bind:collapsedGroups={collapsedGroups}
+			ungroupedLabel="Untagged"
+			showGroupBands={showBands}
 			bind:selectedKeys={selectedStacks}
 			expandable
 			bind:expandedKeys={expandedStacks}
@@ -1688,6 +1944,12 @@
 				return `${isExp ? 'bg-muted/40' : ''} ${isSel ? 'bg-muted/30' : ''}`;
 			}}
 		>
+			{#snippet groupHeaderLabel(group)}
+				{#each group.icons as ic}
+					{#if ic}<TagLucideIcon name={ic} class="h-3 w-3 shrink-0" />{:else}<Tag class="h-3 w-3 shrink-0" />{/if}
+				{/each}
+				<span>{group.label}</span>
+			{/snippet}
 			{#snippet cell(column, stack, rowState)}
 				{@const source = getStackSource(stack.name)}
 				{#if column.id === 'name'}
@@ -1743,6 +2005,8 @@
 							<GitDeployProgressPopover
 								stackId={source.gitStack.id}
 								stackName={stack.name}
+								stackIcon={source.icon}
+								envId={$currentEnvironment?.id ?? null}
 								onComplete={fetchStacks}
 							>
 								{#snippet children()}
@@ -1764,6 +2028,7 @@
 							<RedeployPopover
 								stackName={stack.name}
 								{envId}
+								stackIcon={stackSources[stack.name]?.icon}
 								side="bottom"
 								align="start"
 								disabled={stackActionLoading === stack.name}
@@ -1801,6 +2066,29 @@
 								{stack.newerVersionCount} container{(stack.newerVersionCount ?? 0) > 1 ? 's have' : ' has'} a newer version tag.
 							</Tooltip.Content>
 						</Tooltip.Root>
+					{/if}
+					{#if (stack.coolingDownCount ?? 0) > 0}
+						<Tooltip.Root>
+							<Tooltip.Trigger class="inline-flex items-center gap-0.5 self-center shrink-0 text-muted-foreground">
+								<Clock class="w-3.5 h-3.5" />
+								<span class="text-2xs font-medium leading-none">{stack.coolingDownCount}</span>
+							</Tooltip.Trigger>
+							<Tooltip.Content>
+								{stack.coolingDownCount} container{(stack.coolingDownCount ?? 0) > 1 ? 's are' : ' is'} waiting out the minimum image age.
+							</Tooltip.Content>
+						</Tooltip.Root>
+					{/if}
+					{#if showTags}<TagChips tags={tagsFor(stack)} />{/if}
+					{#if inlineTagEditing && $canAccess('stacks', 'edit')}
+						<span onclick={(e) => e.stopPropagation()} role="presentation">
+							<TagEditPopover
+								catalog={tagCatalog}
+								selected={tagsMap[stack.name] ?? []}
+								onCreate={createTag}
+								onApply={(ids) => applyStackTags(stack.name, ids)}
+								allowCreate={$isAdmin}
+							/>
+						</span>
 					{/if}
 					</span>
 				{:else if column.id === 'source'}
@@ -2005,9 +2293,25 @@
 				{:else if column.id === 'status'}
 					{@const displayStatus = getDisplayStatus(stack)}
 					{@const StatusIcon = getStackStatusIcon(displayStatus)}
-					<span class={getStatusClasses(displayStatus)}>
-						<StatusIcon class="w-3 h-3" />
-						{displayStatus}
+					{@const stackHealth = stack.health}
+					<span class="inline-flex items-center gap-1.5 min-w-0 max-w-full">
+						<span class={getStatusClasses(displayStatus)}>
+							<StatusIcon class="w-3 h-3" />
+							{displayStatus}
+						</span>
+						{#if stackHealth === 'unhealthy'}
+							<span class="inline-flex shrink-0" title="One or more containers are unhealthy">
+								<HeartOff class="w-3.5 h-3.5 text-red-500" />
+							</span>
+						{:else if stackHealth === 'starting'}
+							<span class="inline-flex shrink-0" title="A healthcheck has not settled yet">
+								<Heart class="w-3.5 h-3.5 text-amber-500" />
+							</span>
+						{:else if stackHealth === 'healthy'}
+							<span class="inline-flex shrink-0" title="All checked containers are healthy">
+								<HeartPulse class="w-3.5 h-3.5 text-emerald-500" />
+							</span>
+						{/if}
 					</span>
 				{:else if column.id === 'actions'}
 					<div class="relative flex gap-1 justify-end">
@@ -2020,48 +2324,43 @@
 								</button>
 							</div>
 						{/if}
-						{#if (stack.status === 'not deployed' || stack.status === 'created') && source.gitStack}
-							<button
-								type="button"
-								onclick={() => openGitModal(source.gitStack)}
-								title="Edit git stack"
-								class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
-							>
-								<Pencil class="grid-action-icon grid-action-edit text-muted-foreground hover:text-purple-500" />
-							</button>
+						{#if source.sourceType === 'git' && source.gitStack}
+							<!-- One deploy popover for a git stack in ANY state (only the trigger
+							     icon differs by status), so the instance is stable: a status
+							     flip mid-deploy must not remount it and drop its open dialog. -->
+							{#if stack.status === 'not deployed' || stack.status === 'created'}
+								<button
+									type="button"
+									onclick={() => openGitModal(source.gitStack)}
+									title="Edit git stack"
+									class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
+								>
+									<Pencil class="grid-action-icon grid-action-edit text-muted-foreground hover:text-purple-500" />
+								</button>
+							{/if}
 							<GitDeployProgressPopover
 								stackId={source.gitStack.id}
 								stackName={stack.name}
+								stackIcon={source.icon}
+								envId={$currentEnvironment?.id ?? null}
 								onComplete={fetchStacks}
 							>
 								{#snippet children()}
 									<button
 										type="button"
-										title="Deploy"
+										title={(stack.status === 'not deployed' || stack.status === 'created') ? 'Deploy' : 'Sync from Git'}
 										class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
 									>
-										<Rocket class="grid-action-icon grid-action-start text-muted-foreground hover:text-violet-500" />
+										{#if stack.status === 'not deployed' || stack.status === 'created'}
+											<Rocket class="grid-action-icon grid-action-start text-muted-foreground hover:text-violet-500" />
+										{:else}
+											<RefreshCw class="grid-action-icon grid-action-restart text-muted-foreground hover:text-purple-500" />
+										{/if}
 									</button>
 								{/snippet}
 							</GitDeployProgressPopover>
-						{:else}
-							{#if source.sourceType === 'git' && source.gitStack}
-								<GitDeployProgressPopover
-									stackId={source.gitStack.id}
-									stackName={stack.name}
-									onComplete={fetchStacks}
-								>
-									{#snippet children()}
-										<button
-											type="button"
-											title="Sync from Git"
-											class="p-1 rounded hover:bg-muted transition-colors opacity-70 hover:opacity-100 cursor-pointer"
-										>
-											<RefreshCw class="grid-action-icon grid-action-restart text-muted-foreground hover:text-purple-500" />
-										</button>
-									{/snippet}
-								</GitDeployProgressPopover>
-							{/if}
+						{/if}
+						{#if showsManagementActions(source.sourceType, stack.status)}
 							{#if $canAccess('stacks', 'edit')}
 								{#if source.sourceType === 'git' && source.gitStack}
 									<button
@@ -2098,6 +2397,7 @@
 								<RedeployPopover
 									stackName={stack.name}
 									{envId}
+									stackIcon={stackSources[stack.name]?.icon}
 									disabled={stackActionLoading === stack.name}
 									onDeploy={(options) => redeployStack(stack.name, options)}
 								>
@@ -2143,8 +2443,11 @@
 											align="end"
 											sideOffset={8}
 										>
-											<div class="flex flex-col gap-2 w-60">
-												<span class="text-xs text-muted-foreground">Restart stack <strong>{stack.name.length > 20 ? stack.name.slice(0, 20) + '...' : stack.name}</strong></span>
+											<div class="flex flex-col gap-2 w-72">
+												<span class="flex items-center gap-1.5 text-xs text-muted-foreground">
+													<StackIcon icon={stackSources[stack.name]?.icon} stackName={stack.name} envId={$currentEnvironment?.id ?? null} class="w-4 h-4 shrink-0" />
+													<span class="truncate">Restart stack <strong class="font-semibold text-foreground">{stack.name}</strong></span>
+												</span>
 												<button class="flex flex-col items-start gap-0.5 rounded px-2 py-1.5 text-left hover:bg-muted" onclick={() => { restartPopoverOpen[stack.name] = false; restartStack(stack.name, 'restart'); }}>
 													<span class="text-xs font-medium">Restart</span>
 													<span class="text-[11px] text-muted-foreground">Fast in-place restart. Ignores depends_on ordering.</span>
@@ -2171,6 +2474,9 @@
 										onConfirm={() => stopStack(stack.name)}
 										onOpenChange={(open) => confirmStopName = open ? stack.name : null}
 									>
+										{#snippet icon()}
+											<StackIcon icon={stackSources[stack.name]?.icon} stackName={stack.name} envId={$currentEnvironment?.id ?? null} class="w-4 h-4 shrink-0" />
+										{/snippet}
 										{#snippet children({ open })}
 											<Square class="grid-action-icon grid-action-stop {open ? 'text-destructive' : 'text-muted-foreground hover:text-destructive'}" />
 										{/snippet}
@@ -2188,6 +2494,9 @@
 								onConfirm={() => downStack(stack.name)}
 								onOpenChange={(open) => confirmDownName = open ? stack.name : null}
 							>
+								{#snippet icon()}
+									<StackIcon icon={stackSources[stack.name]?.icon} stackName={stack.name} envId={$currentEnvironment?.id ?? null} class="w-4 h-4 shrink-0" />
+								{/snippet}
 								{#snippet children({ open })}
 									<ArrowBigDown class="grid-action-icon grid-action-stop {stackDownLoading === stack.name ? 'animate-bounce text-orange-500' : open ? 'text-orange-500' : 'text-muted-foreground hover:text-orange-500'}" />
 								{/snippet}
@@ -2231,7 +2540,7 @@
 										{:else}
 											<Box class="w-4 h-4 shrink-0 {container.state === 'running' ? 'text-emerald-500' : 'text-muted-foreground'}" />
 										{/if}
-										<span class="font-medium truncate" title={container.name}>{container.service}</span>
+										<span class="font-medium truncate" title={container.name}>{containerDisplayName({ name: container.service || container.name, labels: container.labels })}</span>
 										{#if container.updateAvailable && $appSettings.highlightUpdates}
 											<!-- Update arrow + changelog link read as one pair — keep them tight. -->
 											<span class="inline-flex items-center gap-0.5 shrink-0">
@@ -2733,6 +3042,7 @@
 		editingStackName = '';
 		stackModalReadonly = false;
 		stackModalGitInfo = null;
+		loadTags(envId);
 	}}
 	onSuccess={fetchStacks}
 />
@@ -2747,6 +3057,7 @@
 	onClose={() => {
 		showGitModal = false;
 		editingGitStack = null;
+		loadTags(envId);
 	}}
 	onSaved={fetchStacks}
 />
@@ -2761,7 +3072,21 @@
 	bind:open={showDeleteModal}
 	stackName={deleteStackName}
 	envId={envId ?? null}
+	stackIcon={stackSources[deleteStackName]?.icon}
 	onConfirm={(opts) => removeStack(deleteStackName, opts)}
+/>
+
+<ComposeOutputModal
+	bind:open={composeOutputOpen}
+	title={composeOutputTitle}
+	lines={composeOutputLines}
+	running={composeOutputRunning}
+	ok={composeOutputOk}
+	ms={composeOutputMs}
+	exitCode={composeOutputExitCode}
+	stackName={composeOutputStackName}
+	stackIcon={composeOutputStackName ? stackSources[composeOutputStackName]?.icon ?? null : null}
+	envId={$currentEnvironment?.id ?? null}
 />
 
 <ContainerInspectModal

@@ -10,7 +10,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { parseWorkflowsUrl, buildWorkflowsHttpUrl, parseTelegramUrl } from '../src/lib/utils/notification-parsers';
+import { parseWorkflowsUrl, buildWorkflowsHttpUrl, resolveWorkflowsHttpUrl, parseTelegramUrl } from '../src/lib/utils/notification-parsers';
 
 // Telegram request body construction (mirrors notifications.ts)
 function buildTelegramBody(chatId: string, text: string, topicId?: number) {
@@ -81,6 +81,50 @@ describe('Workflows HTTP URL Construction', () => {
 	test('signature is placed in sig query param', () => {
 		const url = buildWorkflowsHttpUrl('host', 'wf', 'my-signature');
 		expect(url).toContain('sig=my-signature');
+	});
+});
+
+describe('resolveWorkflowsHttpUrl (full-URL passthrough, #1512)', () => {
+	test('new Power Automate URL with /cu/<n>/ passes through verbatim (only scheme swapped)', () => {
+		// The exact shape from #1512: powerplatform.com host, a /cu/11/ segment,
+		// api-version=1. Rebuilding from parts drops those -> 401. Passthrough keeps them.
+		const full =
+			'workflows://myenv.11.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/11/workflows/abc123/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=THE_SIGNATURE';
+		const url = resolveWorkflowsHttpUrl(full);
+		expect(url).toBe(
+			'https://myenv.11.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/11/workflows/abc123/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=THE_SIGNATURE'
+		);
+	});
+
+	test('legacy logic.azure.com full URL passes through verbatim', () => {
+		const full =
+			'workflows://prod-161.westeurope.logic.azure.com:443/workflows/643e/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=KODu';
+		const url = resolveWorkflowsHttpUrl(full)!;
+		expect(url).toBe('https://' + full.slice('workflows://'.length));
+		expect(url).toContain('api-version=2016-06-01');
+		expect(url).toContain('sig=KODu');
+	});
+
+	test('short legacy form host/workflow/sig is still reconstructed (back-compat)', () => {
+		const url = resolveWorkflowsHttpUrl('workflows://prod.logic.azure.com/abc123/sig456');
+		expect(url).toBe(
+			'https://prod.logic.azure.com/powerautomate/automations/direct/workflows/abc123/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=sig456'
+		);
+	});
+
+	test('a full invoke path WITHOUT a sig is not treated as passthrough (falls back / rejects)', () => {
+		// No sig= -> not a signed webhook; short-form parse also fails -> null.
+		expect(resolveWorkflowsHttpUrl('workflows://host/workflows/x/triggers/manual/paths/invoke')).toBeNull();
+	});
+
+	test('non-workflows scheme returns null', () => {
+		expect(resolveWorkflowsHttpUrl('https://host/x/y')).toBeNull();
+		expect(resolveWorkflowsHttpUrl('')).toBeNull();
+	});
+
+	test('workflow:// (singular) full URL also passes through', () => {
+		const url = resolveWorkflowsHttpUrl('workflow://host:443/workflows/w/triggers/manual/paths/invoke?sig=s')!;
+		expect(url).toBe('https://host:443/workflows/w/triggers/manual/paths/invoke?sig=s');
 	});
 });
 

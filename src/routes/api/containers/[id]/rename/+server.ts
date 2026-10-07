@@ -12,7 +12,7 @@ import type { RequestHandler } from './$types';
  * @openapi
  * summary: Rename a container and update any associated auto-update schedule (requires the 'create' permission)
  * path: id:string! Container ID or name (from GET /api/containers)
- * query: env:integer The target environment ID (omit for the local/default Docker host) (from GET /api/environments)
+ * query: env:integer! The target environment ID the container lives in (from GET /api/environments)
  * body: {name:string!}
  * body-example: {"name":"my-renamed-container"}
  * resp-200: {success:boolean!}
@@ -36,6 +36,9 @@ export const POST: RequestHandler = async (event) => {
 	if (auth.authEnabled && !await auth.can('containers', 'create', envIdNum)) {
 		return json({ error: 'Permission denied' }, { status: 403 });
 	}
+
+	const envDenied = await auth.requireEnvAccess(envIdNum);
+	if (envDenied) return envDenied;
 
 	try {
 		const { name } = await request.json();

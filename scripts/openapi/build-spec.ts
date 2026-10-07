@@ -40,7 +40,7 @@ export interface BuildSpecInput {
 }
 
 function genericParamDescription(kind: 'path' | 'query', name: string): string {
-	return `${kind === 'path' ? 'Path' : 'Query'} parameter "${name}" (auto-detected from the handler's source — no @openapi annotation for this parameter yet)`;
+	return `${kind === 'path' ? 'Path' : 'Query'} parameter "${name}" (auto-detected from the handler's source - no @openapi annotation for this parameter yet)`;
 }
 
 export function buildSpec({ routes, fileContents, annotationsByPath, isPublicFn, version }: BuildSpecInput) {
@@ -177,7 +177,7 @@ export function buildSpec({ routes, fileContents, annotationsByPath, isPublicFn,
 								type: 'object',
 								properties,
 								description:
-									'Fields auto-detected from the handler’s destructuring of the request body — generic string type, no @openapi annotation for this body yet.'
+									"Fields auto-detected from the handler's destructuring of the request body - generic string type, no @openapi annotation for this body yet."
 							}
 						}
 					}

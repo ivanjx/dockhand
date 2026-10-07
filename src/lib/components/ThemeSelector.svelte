@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { Sun, Moon, Type, AArrowUp, Table, Terminal, CodeXml, MousePointerClick } from 'lucide-svelte';
+	import { Sun, Moon, Type, AArrowUp, Table, Terminal, MousePointerClick } from 'lucide-svelte';
 	import * as Select from '$lib/components/ui/select';
 	import { Label } from '$lib/components/ui/label';
 	import { lightThemes, darkThemes, fonts, monospaceFonts } from '$lib/themes';
@@ -48,7 +48,12 @@
 	let selectedGridFontSize = $state<FontSize>('normal');
 	let selectedActionIconSize = $state<ActionIconSize>('normal');
 	let selectedTerminalFont = $state('system-mono');
-	let selectedEditorFont = $state('system-mono');
+
+	// The global-scope values are fetched on mount; render waits on this so the selects
+	// don't briefly show the hardcoded defaults before the global settings arrive. Only
+	// the global editor (no userId) fetches; the user scope reads the store synchronously.
+	let valuesLoaded = $state(false);
+	const awaitingGlobal = $derived(!userId && !valuesLoaded);
 
 	onMount(async () => {
 		// Load bundled monospace fonts for dropdown previews
@@ -76,7 +81,6 @@
 			selectedGridFontSize = $themeStore.gridFontSize;
 			selectedActionIconSize = $themeStore.actionIconSize;
 			selectedTerminalFont = $themeStore.terminalFont;
-			selectedEditorFont = $themeStore.editorFont;
 		} else {
 			// Global settings: fetch directly from API
 			try {
@@ -90,12 +94,12 @@
 					selectedGridFontSize = data.gridFontSize || 'normal';
 					selectedActionIconSize = data.actionIconSize || 'normal';
 					selectedTerminalFont = data.terminalFont || 'system-mono';
-					selectedEditorFont = data.editorFont || 'system-mono';
 				}
 			} catch {
 				// Use defaults on error
 			}
 		}
+		valuesLoaded = true;
 	});
 
 	// Sync with themeStore changes only when editing user profile
@@ -108,7 +112,6 @@
 			selectedGridFontSize = $themeStore.gridFontSize;
 			selectedActionIconSize = $themeStore.actionIconSize;
 			selectedTerminalFont = $themeStore.terminalFont;
-			selectedEditorFont = $themeStore.editorFont;
 		}
 	});
 
@@ -154,15 +157,14 @@
 		await themeStore.setPreference('terminalFont', value, userId, skipApply);
 	}
 
-	async function handleEditorFontChange(value: string | undefined) {
-		if (!value) return;
-		selectedEditorFont = value;
-		await themeStore.setPreference('editorFont', value, userId, skipApply);
-	}
-
 </script>
 
 <div class="space-y-4">
+	{#if awaitingGlobal}
+		<!-- Editing the global defaults: wait for the fetch so the selects don't flash the
+		     hardcoded defaults before the real global values arrive. -->
+		<div class="h-10 animate-pulse rounded-md bg-muted/50"></div>
+	{:else}
 	<!-- Light Theme -->
 	<div class="flex items-center justify-between">
 		<div class="flex items-center gap-2">
@@ -355,27 +357,5 @@
 		</Select.Root>
 	</div>
 
-	<!-- Editor Font -->
-	<div class="flex items-center justify-between">
-		<div class="flex items-center gap-2">
-			<CodeXml class="w-4 h-4 text-muted-foreground" />
-			<Label>Editor font</Label>
-		</div>
-		<Select.Root type="single" value={selectedEditorFont} onValueChange={handleEditorFontChange}>
-			<Select.Trigger class="w-56">
-				{#each monospaceFonts as font}
-					{#if font.id === selectedEditorFont}
-						<span style="font-family: {font.family}">{font.name}</span>
-					{/if}
-				{/each}
-			</Select.Trigger>
-			<Select.Content>
-				{#each monospaceFonts as font}
-					<Select.Item value={font.id}>
-						<span style="font-family: {font.family}">{font.name}</span>
-					</Select.Item>
-				{/each}
-			</Select.Content>
-		</Select.Root>
-	</div>
+	{/if}
 </div>

@@ -8,7 +8,8 @@
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import { getProviderIcon } from '$lib/components/provider-icons';
 	import { providerTypeLabel } from '../../routes/settings/secrets/ProviderModal.svelte';
-	import { effectiveMissing } from '$lib/utils/invault-markers';
+	import { effectiveMissing, isInlineProviderRef } from '$lib/utils/invault-markers';
+	import { parseRawContent, generateRawContent, keysInRawContent, mergeParsedIntoVariables, textEditorContent as deriveTextEditorContent } from '$lib/utils/env-panel-core';
 
 	interface Props {
 		variables: EnvVar[]; // Bindable - ALL variables (secrets + non-secrets)
@@ -26,6 +27,13 @@
 		/** Bound provider type/name, for the injected banner + pills. */
 		providerType?: string | null;
 		providerName?: string | null;
+		/**
+		 * Whether a secret provider is CURRENTLY bound to this stack. When false but
+		 * injectedSecretKeys is non-empty, the keys are historical (from the last deploy)
+		 * and the next deploy will drop them - the banner says so instead of implying they
+		 * are still active (#1522).
+		 */
+		providerBound?: boolean;
 		/** Set when the live provider probe failed - shown as an amber line. */
 		probeError?: string | null;
 		/** Key NAMES the live probe found in the bound provider (present RIGHT NOW).
@@ -52,6 +60,7 @@
 		injectedSecretKeys = [],
 		providerType = null,
 		providerName = null,
+		providerBound = true,
 		probeError = null,
 		providerKeySet = new Set<string>(),
 		showInterpolationHint = false,
@@ -88,26 +97,16 @@
 	// Count of secrets (for display in hint)
 	const secretCount = $derived(variables.filter(v => v.isSecret && v.key.trim()).length);
 
-	// True when any variable's VALUE is a provider reference (op:// / pass://).
-	// Such a reference is resolved only here (stack env), never when written
-	// straight into a compose environment: block - so we surface a hint.
+	// True when any variable's VALUE is a provider reference. Such a reference is
+	// resolved only here (stack env), never when written straight into a compose
+	// environment: block - so we surface a hint.
 	const hasProviderReference = $derived(
-		variables.some((v) => {
-			const val = (v.value ?? '').trim();
-			return val.startsWith('op://') || val.startsWith('pass://');
-		})
+		variables.some((v) => isInlineProviderRef((v.value ?? '').trim()))
 	);
 
-	// Generate text representation from variables (non-secrets only)
-	// This is used for text view display
-	const generatedRawContent = $derived.by(() => {
-		const nonSecrets = variables.filter(v => v.key.trim() && !v.isSecret);
-		if (nonSecrets.length === 0) return '';
-		return nonSecrets.map(v => `${v.key.trim()}=${v.value}`).join('\n') + '\n';
-	});
-
-	// Text editor content - either from file (rawContent prop) or generated from variables
-	const textEditorContent = $derived(rawContent.trim() ? rawContent : generatedRawContent);
+	// What text view shows: the .env file, or the non-secret rows rendered as text when
+	// there is no file yet.
+	const textEditorContent = $derived(deriveTextEditorContent(rawContent, variables));
 
 	/**
 	 * Sync variables with rawContent after initial load.
@@ -116,7 +115,7 @@
 	 */
 	export function syncAfterLoad(loadedVars: EnvVar[], loadedRaw: string) {
 		if (!loadedRaw.trim()) {
-			// No raw content from file - just set variables, text view will use generatedRawContent
+			// No raw content from file - just set variables; text view renders them as text
 			variables = loadedVars;
 			rawContent = '';
 			return;
@@ -136,39 +135,6 @@
 		rawContent = loadedRaw;
 	}
 
-	/**
-	 * Parse raw content to extract non-secret variables.
-	 */
-	function parseRawContent(content: string): { vars: EnvVar[], warnings: string[] } {
-		const result: EnvVar[] = [];
-		const warnings: string[] = [];
-		let lineNum = 0;
-
-		for (const line of content.split('\n')) {
-			lineNum++;
-			const trimmed = line.trim();
-			if (!trimmed || trimmed.startsWith('#')) continue;
-
-			const eqIndex = trimmed.indexOf('=');
-			if (eqIndex === -1) {
-				warnings.push(`Line ${lineNum}: "${trimmed.slice(0, 30)}${trimmed.length > 30 ? '...' : ''}" (no = found)`);
-				continue;
-			}
-
-			const key = trimmed.slice(0, eqIndex).trim();
-			const value = trimmed.slice(eqIndex + 1);
-
-			if (key) {
-				if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
-					warnings.push(`Line ${lineNum}: "${key}" (invalid variable name)`);
-					continue;
-				}
-				result.push({ key, value, isSecret: false });
-			}
-		}
-
-		return { vars: result, warnings };
-	}
 
 	/**
 	 * Sync variables (non-secrets) TO rawContent.
@@ -180,7 +146,7 @@
 		// If no raw content exists, generate fresh
 		if (!rawContent.trim()) {
 			if (nonSecretVars.length > 0) {
-				rawContent = nonSecretVars.map(v => `${v.key.trim()}=${v.value}`).join('\n') + '\n';
+				rawContent = generateRawContent(nonSecretVars);
 			}
 			return;
 		}
@@ -234,18 +200,17 @@
 	}
 
 	/**
-	 * Sync rawContent TO variables.
-	 * Parses raw content for non-secrets, preserves existing secrets.
+	 * Parse editor text back into variables.
+	 *
+	 * `shownBefore` is what the editor was displaying before this text arrived. Rows
+	 * outside it were never on screen - a selector written straight into variables by
+	 * the provider picker, say - so they are kept rather than wiped (#1620). Rows that
+	 * WERE on screen and are absent from the new text were deleted by the user.
 	 */
-	function syncRawToVariables(content?: string) {
+	function syncRawToVariables(content?: string, shownBefore?: Set<string>) {
 		const { vars, warnings } = parseRawContent(content ?? rawContent);
 		parseWarnings = warnings;
-
-		// Preserve existing secrets (they're not in rawContent)
-		const existingSecrets = variables.filter(v => v.isSecret);
-
-		// Merge: non-secrets from raw + existing secrets
-		variables = [...vars, ...existingSecrets];
+		variables = mergeParsedIntoVariables(vars, variables, shownBefore ?? keysInRawContent(textEditorContent));
 	}
 
 	/**
@@ -253,9 +218,11 @@
 	 * Always syncs variables→raw to get proper .env content for disk.
 	 */
 	export function prepareForSave(): { rawContent: string; variables: EnvVar[] } {
-		// If in text view, first sync raw→variables to capture edits
+		// If in text view, first sync raw->variables to capture edits. Parse what the
+		// editor SHOWS: with an empty .env that is the rows rendered as text, and reading
+		// rawContent instead would drop every visible non-secret row (#1620).
 		if (viewMode === 'text') {
-			syncRawToVariables();
+			syncRawToVariables(textEditorContent);
 		}
 		// Then sync variables→raw to ensure rawContent is up to date
 		syncVariablesToRaw();
@@ -267,8 +234,11 @@
 	}
 
 	function handleTextChange(value: string) {
+		// Capture what was on screen BEFORE the edit, so a row the user just deleted is
+		// not mistaken for one the editor never showed.
+		const shownBefore = keysInRawContent(textEditorContent);
 		rawContent = value;
-		syncRawToVariables(); // Sync to variables so parent's envVars updates (for compose decorations)
+		syncRawToVariables(value, shownBefore); // keeps parent's envVars live for compose decorations
 		onchange?.();
 	}
 
@@ -277,8 +247,8 @@
 			// Form → Text: sync variables to raw (preserves comments)
 			syncVariablesToRaw();
 		} else if (newMode === 'form' && viewMode === 'text') {
-			// Text → Form: use textEditorContent which falls back to generatedRawContent
-			// when rawContent is empty (fixes vars lost on view switch for git stacks)
+			// Text -> Form: parse what the editor shows, which is the rows rendered as text
+			// when there is no .env file (keeps vars that only exist as rows)
 			syncRawToVariables(textEditorContent);
 		}
 
@@ -496,12 +466,12 @@
 				</div>
 			</div>
 		{/if}
-		<!-- Provider-reference placement hint: op:// / pass:// only resolve here, not in compose environment: -->
+		<!-- Provider-reference placement hint: inline refs only resolve here, not in compose environment: -->
 		{#if hasProviderReference}
 			<div class="flex items-start gap-2 px-2.5 py-2 rounded bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50">
 				<Info class="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
 				<p class="text-xs text-amber-700 dark:text-amber-300">
-					A <code class="bg-amber-100 dark:bg-amber-800/40 px-1 rounded">op://</code> / <code class="bg-amber-100 dark:bg-amber-800/40 px-1 rounded">pass://</code> reference is resolved <strong>here</strong>, in the stack's environment. It is <strong>not</strong> resolved when written directly in a compose <code class="bg-amber-100 dark:bg-amber-800/40 px-1 rounded">environment:</code> block - reference the variable there with <code class="bg-amber-100 dark:bg-amber-800/40 px-1 rounded">${'{VAR}'}</code> instead.
+					A secret-provider reference (<code class="bg-amber-100 dark:bg-amber-800/40 px-1 rounded">op://</code>, <code class="bg-amber-100 dark:bg-amber-800/40 px-1 rounded">keepass://</code>, <code class="bg-amber-100 dark:bg-amber-800/40 px-1 rounded">azurekv://</code>, <code class="bg-amber-100 dark:bg-amber-800/40 px-1 rounded">pass://</code>) is resolved <strong>here</strong>, in the stack's environment. It is <strong>not</strong> resolved when written directly in a compose <code class="bg-amber-100 dark:bg-amber-800/40 px-1 rounded">environment:</code> block - reference the variable there with <code class="bg-amber-100 dark:bg-amber-800/40 px-1 rounded">${'{VAR}'}</code> instead.
 				</p>
 			</div>
 		{/if}
@@ -524,7 +494,7 @@
 			</div>
 		{/if}
 		<!-- Provider-injected secrets loaded at the last deploy -->
-		{#if injectedSecretKeys.length > 0}
+		{#if injectedSecretKeys.length > 0 && providerBound}
 			<div class="flex items-start gap-2 px-2.5 py-2 rounded bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800/50">
 				<Check class="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
 				<div class="text-xs text-emerald-700 dark:text-emerald-300 min-w-0">
@@ -546,6 +516,24 @@
 					<div class="flex flex-wrap gap-1.5 mt-1.5">
 						{#each injectedSecretKeys as key}
 							<span class="inline-flex items-center gap-1 font-mono text-2xs font-semibold px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-800/40 border border-emerald-300 dark:border-emerald-700">
+								<KeyRound class="w-2.5 h-2.5" />{key}
+							</span>
+						{/each}
+					</div>
+				</div>
+			</div>
+		{:else if injectedSecretKeys.length > 0 && !providerBound}
+			<!-- Historical: keys were injected on a previous deploy but no provider is bound now (#1522). -->
+			<div class="flex items-start gap-2 px-2.5 py-2 rounded bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50">
+				<AlertTriangle class="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+				<div class="text-xs text-amber-700 dark:text-amber-300 min-w-0">
+					<div class="font-semibold">No secret provider is bound</div>
+					<p class="text-amber-600 dark:text-amber-400 mt-0.5">
+						These {injectedSecretKeys.length} secret{injectedSecretKeys.length === 1 ? ' was' : 's were'} injected on the last deploy but the stack is no longer bound to a provider. The next deploy will drop {injectedSecretKeys.length === 1 ? 'it' : 'them'}. Reselect a provider to keep them.
+					</p>
+					<div class="flex flex-wrap gap-1.5 mt-1.5">
+						{#each injectedSecretKeys as key}
+							<span class="inline-flex items-center gap-1 font-mono text-2xs font-semibold px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-800/40 border border-amber-300 dark:border-amber-700 line-through decoration-amber-500/60">
 								<KeyRound class="w-2.5 h-2.5" />{key}
 							</span>
 						{/each}

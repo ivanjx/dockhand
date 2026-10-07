@@ -1,10 +1,11 @@
 <script lang="ts">
 	// Trigger rebuild for debug logging changes
 	import * as Card from '$lib/components/ui/card';
+	import { releasedEntries } from '$lib/utils/changelog-filter';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
-	import { Input } from '$lib/components/ui/input';
-	import { Box, Images, HardDrive, Network, Cpu, Server, Crown, Building2, Layers, Clock, Code, Package, ExternalLink, Search, FileText, Tag, Sparkles, Bug, ChevronDown, ChevronRight, Plug, ScrollText, Shield, MessageSquarePlus, GitBranch, Coffee, Monitor, Cog, MemoryStick, Database, CircleArrowUp, Loader2, CheckCircle2, TriangleAlert } from 'lucide-svelte';
+	import { SearchInput } from '$lib/components/ui/search-input';
+	import { Box, Images, HardDrive, Network, Cpu, Server, Crown, Building2, Layers, Clock, Code, Package, ExternalLink, FileText, Tag, Sparkles, Bug, ChevronDown, ChevronRight, Plug, ScrollText, Shield, MessageSquarePlus, GitBranch, Coffee, Monitor, Cog, MemoryStick, Database, CircleArrowUp, Loader2, CheckCircle2, TriangleAlert } from 'lucide-svelte';
 	import * as Tabs from '$lib/components/ui/tabs';
 	import { onMount, onDestroy } from 'svelte';
 	import { licenseStore } from '$lib/stores/license';
@@ -33,6 +34,7 @@
 		date: string;
 		changes: ChangelogChange[];
 		imageTag: string;
+		comingSoon?: boolean;
 	}
 
 	let dependencies = $state<Dependency[]>([]);
@@ -84,7 +86,9 @@
 		try {
 			const res = await fetch('/api/changelog');
 			if (!res.ok) throw new Error('Failed to fetch changelog');
-			changelog = await res.json();
+			// Shipped releases only: an unreleased (coming-soon) entry must not show as
+			// the "Latest" version.
+			changelog = releasedEntries(await res.json());
 		} catch (e) {
 			changelogError = e instanceof Error ? e.message : 'Unknown error';
 		} finally {
@@ -465,16 +469,10 @@
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
 					<div class="animate-speedy {isJumping ? (clickCount >= 10 ? 'crazy-jumping' : `jumping-${jumpLevel}`) : ''} {hasClicked && !isJumping ? 'clicked' : ''}" onclick={handleLogoClick}>
 						<img
-							src="/logo-light.webp"
+							src="/logo.svg"
 							alt="Dockhand Logo"
-							class="h-36 w-auto object-contain dark:hidden"
-							style="filter: drop-shadow(1px 1px 2px rgba(0,0,0,0.3)) drop-shadow(-1px -1px 1px rgba(255,255,255,0.9));"
-						/>
-						<img
-							src="/logo-dark.webp"
-							alt="Dockhand Logo"
-							class="h-36 w-auto object-contain hidden dark:block"
-							style="filter: drop-shadow(2px 2px 3px rgba(0,0,0,0.6)) drop-shadow(-1px -1px 1px rgba(255,255,255,0.2));"
+							class="h-36 w-auto object-contain"
+							style="filter: drop-shadow(0 2px 3px rgba(0,0,0,0.22));"
 						/>
 						<!-- Sparkles on DOCKHAND text area (bottom half) -->
 						<span class="sparkle sparkle-1">✦</span>
@@ -909,15 +907,7 @@
 
 			<Tabs.Content value="dependencies" class="px-4 pb-4">
 				<div class="mb-3">
-					<div class="relative w-full max-w-xs">
-						<Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-						<Input
-							type="text"
-							placeholder="Search packages or licenses..."
-							class="h-7 text-xs pl-7"
-							bind:value={depsSearch}
-						/>
-					</div>
+					<SearchInput bind:value={depsSearch} placeholder="Search packages or licenses..." class="h-7 text-xs" containerClass="w-full max-w-xs" />
 				</div>
 				{#if loadingDeps}
 					<div class="flex items-center justify-center py-8">

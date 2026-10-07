@@ -14,10 +14,11 @@
 		Network,
 		LogIn,
 		RefreshCw,
-		Save
+		Save,
+		Info
 	} from 'lucide-svelte';
 	import { TogglePill, ToggleGroup } from '$lib/components/ui/toggle-pill';
-	import { canAccess, authStore } from '$lib/stores/auth';
+	import { canAccess, isAdmin, authStore } from '$lib/stores/auth';
 	import { licenseStore } from '$lib/stores/license';
 
 	// Sub-tab components
@@ -46,8 +47,15 @@
 	// Authentication state
 	let authSubTab = $state<'general' | 'local' | 'ldap' | 'sso' | 'roles'>('general');
 	let authEnabled = $state(false);
+	// Set when the server refuses to describe the auth setup, so the page can say that
+	// rather than render its defaults as though they were the configuration.
+	let authForbidden = $state(false);
 	let authLoading = $state(true);
 	let sessionTimeout = $state(86400);
+	let passkeysEnabled = $state(true);
+	// Whether ORIGIN lets a ceremony run at all, so the screen can say why an
+	// enabled setting is still not offering anything.
+	let passkeysConfigurable = $state(true);
 	let neverExpire = $state(false);
 	let authSaving = $state(false);
 
@@ -59,12 +67,17 @@
 		authLoading = true;
 		try {
 			const response = await fetch('/api/auth/settings');
-			if (response.ok) {
+			if (response.status === 401 || response.status === 403) {
+				authForbidden = true;
+			} else if (response.ok) {
+				authForbidden = false;
 				const data = await response.json();
 				authEnabled = data.authEnabled;
 				// 0 is the "never expire" sentinel; keep the last real timeout for the input.
 				neverExpire = data.sessionTimeout === 0;
 				sessionTimeout = data.sessionTimeout || 86400;
+				passkeysEnabled = data.passkeysEnabled !== false;
+				passkeysConfigurable = data.passkeysConfigurable !== false;
 			}
 		} catch (error) {
 			console.error('Failed to fetch auth settings:', error);
@@ -119,7 +132,7 @@
 			const response = await fetch('/api/auth/settings', {
 				method: 'PUT',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ sessionTimeout: neverExpire ? 0 : sessionTimeout })
+				body: JSON.stringify({ sessionTimeout: neverExpire ? 0 : sessionTimeout, passkeysEnabled })
 			});
 			if (response.ok) {
 				toast.success('Settings saved');
@@ -157,6 +170,7 @@
 
 <div class="flex flex-col flex-1 min-h-0">
 <!-- Auth Enable/Disable Toggle at Top -->
+{#if !authForbidden}
 <div class="flex items-start gap-3 p-3 mb-3 border rounded-md bg-muted/30 flex-shrink-0">
 	<Shield class="w-5 h-5 text-muted-foreground mt-0.5" />
 	<div class="flex-1">
@@ -185,6 +199,7 @@
 		</p>
 	</div>
 </div>
+{/if}
 
 <!-- Auth Subtabs Navigation -->
 <div class="inline-flex gap-1 p-1 bg-muted/50 rounded-lg mb-3 flex-shrink-0">
@@ -198,48 +213,65 @@
 		<Settings class="w-4 h-4" />
 		General
 	</button>
-	<button
-		class="flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-all {authSubTab ===
-		'local'
-			? 'bg-background text-foreground shadow-sm'
-			: 'text-muted-foreground hover:text-foreground'}"
-		onclick={() => (authSubTab = 'local')}
-	>
-		<User class="w-4 h-4" />
-		Users
-	</button>
-	<button
-		class="flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-all {authSubTab ===
-		'sso'
-			? 'bg-background text-foreground shadow-sm'
-			: 'text-muted-foreground hover:text-foreground'}"
-		onclick={() => (authSubTab = 'sso')}
-	>
-		<LogIn class="w-4 h-4" />
-		SSO / OIDC
-	</button>
-	<button
-		class="flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-all {authSubTab ===
-		'ldap'
-			? 'bg-background text-foreground shadow-sm'
-			: 'text-muted-foreground hover:text-foreground'}"
-		onclick={() => (authSubTab = 'ldap')}
-	>
-		<Network class="w-4 h-4" />
-		LDAP / AD
-		<Crown class="w-3 h-3 text-amber-500" />
-	</button>
-	<button
-		class="flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-all {authSubTab ===
-		'roles'
-			? 'bg-background text-foreground shadow-sm'
-			: 'text-muted-foreground hover:text-foreground'}"
-		onclick={() => (authSubTab = 'roles')}
-	>
-		<Shield class="w-4 h-4" />
-		Roles
-		<Crown class="w-3 h-3 text-amber-500" />
-	</button>
+	<!-- The list behind this tab carries every account's email and says which are
+	     administrators, so the tab follows the same permission the API asks for. -->
+	{#if $canAccess('users', 'view')}
+		<button
+			class="flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-all {authSubTab ===
+			'local'
+				? 'bg-background text-foreground shadow-sm'
+				: 'text-muted-foreground hover:text-foreground'}"
+			onclick={() => (authSubTab = 'local')}
+		>
+			<User class="w-4 h-4" />
+			Users
+		</button>
+	{/if}
+	<!-- Behind this is the identity-provider configuration, which /api/auth/oidc holds
+	     to settings:view. Without the tab, a refused read renders as an empty list that
+	     reads like "nothing is configured" - a confident wrong answer. -->
+	{#if $canAccess('settings', 'view')}
+		<button
+			class="flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-all {authSubTab ===
+			'sso'
+				? 'bg-background text-foreground shadow-sm'
+				: 'text-muted-foreground hover:text-foreground'}"
+			onclick={() => (authSubTab = 'sso')}
+		>
+			<LogIn class="w-4 h-4" />
+			SSO / OIDC
+		</button>
+	{/if}
+	<!-- /api/auth/ldap asks for admin, not settings:view, so this tab follows that
+	     instead - the same empty-list problem otherwise reappears one permission down. -->
+	{#if $isAdmin}
+		<button
+			class="flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-all {authSubTab ===
+			'ldap'
+				? 'bg-background text-foreground shadow-sm'
+				: 'text-muted-foreground hover:text-foreground'}"
+			onclick={() => (authSubTab = 'ldap')}
+		>
+			<Network class="w-4 h-4" />
+			LDAP / AD
+			<Crown class="w-3 h-3 text-amber-500" />
+		</button>
+	{/if}
+	<!-- A role carries its full permission matrix, which is a map of who may do what
+	     here, so this follows the permission /api/roles asks for. -->
+	{#if $canAccess('users', 'view')}
+		<button
+			class="flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-all {authSubTab ===
+			'roles'
+				? 'bg-background text-foreground shadow-sm'
+				: 'text-muted-foreground hover:text-foreground'}"
+			onclick={() => (authSubTab = 'roles')}
+		>
+			<Shield class="w-4 h-4" />
+			Roles
+			<Crown class="w-3 h-3 text-amber-500" />
+		</button>
+	{/if}
 </div>
 
 <!-- Sub-tab Content -->
@@ -247,7 +279,20 @@
 <!-- General Settings Subtab -->
 {#if authSubTab === 'general'}
 	<div class="flex-1 min-h-0 overflow-y-auto space-y-4">
-		{#if authEnabled}
+		{#if authForbidden}
+			<!-- The server refused to describe the auth setup to this account. Saying so
+			     beats rendering the defaults, which would read as "auth is disabled". -->
+			<div class="flex items-start gap-3 p-3 border rounded-md bg-muted/30">
+				<Shield class="w-5 h-5 text-muted-foreground mt-0.5" />
+				<div class="flex-1">
+					<p class="text-sm font-medium">Authentication settings are not visible to you</p>
+					<p class="text-xs text-muted-foreground mt-1">
+						Your account does not have permission to see how this instance
+						authenticates. Ask an administrator if you need it.
+					</p>
+				</div>
+			</div>
+		{:else if authEnabled}
 			<Card.Root>
 				<Card.Header>
 					<Card.Title class="text-sm font-medium flex items-center gap-2">
@@ -292,6 +337,26 @@
 							</span>
 						</div>
 					</div>
+					<div class="space-y-1.5 border-t border-border/60 pt-4">
+						<div class="flex items-center gap-3">
+							<Label class="text-sm">Allow passkey sign-in</Label>
+							<TogglePill bind:checked={passkeysEnabled} disabled={!$canAccess('settings', 'edit')} />
+						</div>
+						<p class="text-xs text-muted-foreground">
+							Offer passkeys on the login page, and let people register one from their
+							profile. Off hides the option and refuses the endpoints; existing passkeys
+							are kept and work again when you turn it back on.
+						</p>
+						{#if passkeysEnabled && !passkeysConfigurable}
+							<div class="flex items-start gap-2 rounded-md bg-muted/50 p-2 text-xs text-muted-foreground">
+								<Info class="w-3.5 h-3.5 mt-0.5 shrink-0" />
+								<span>
+									Nothing is offered yet: passkeys need <code>ORIGIN</code> set to the address
+									people use to reach Dockhand, over HTTPS unless that address is localhost.
+								</span>
+							</div>
+						{/if}
+					</div>
 					{#if $canAccess('settings', 'edit')}
 						<Button size="sm" onclick={saveAuthSettings} disabled={authSaving}>
 							{#if authSaving}
@@ -314,28 +379,28 @@
 {/if}
 
 <!-- Local Users Subtab -->
-{#if authSubTab === 'local'}
+{#if authSubTab === 'local' && $canAccess('users', 'view')}
 	<div class="flex flex-col flex-1 min-h-0">
 		<UsersSubTab {roles} />
 	</div>
 {/if}
 
 <!-- LDAP / AD Subtab -->
-{#if authSubTab === 'ldap'}
+{#if authSubTab === 'ldap' && $isAdmin}
 	<div class="flex-1 min-h-0 overflow-y-auto">
 		<LdapSubTab {onTabChange} />
 	</div>
 {/if}
 
 <!-- SSO / OIDC Subtab -->
-{#if authSubTab === 'sso'}
+{#if authSubTab === 'sso' && $canAccess('settings', 'view')}
 	<div class="flex-1 min-h-0 overflow-y-auto">
 		<SsoSubTab {roles} />
 	</div>
 {/if}
 
 <!-- Roles Subtab -->
-{#if authSubTab === 'roles'}
+{#if authSubTab === 'roles' && $canAccess('users', 'view')}
 	<div class="flex-1 min-h-0 overflow-y-auto">
 		<RolesSubTab {onTabChange} />
 	</div>

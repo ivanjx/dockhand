@@ -17,6 +17,7 @@ import {
 	STACKDIR_VOLUME_KEY,
 	isReservedVolumeKey,
 	stackDirSource,
+	stackDirProbeFixHint,
 	type HostStackDirInput,
 } from '../../src/lib/server/backups/stackdir-plan';
 
@@ -314,5 +315,59 @@ describe('tagCapturedEntries — mark stack-dir entries that are also a bind', (
 	test('a name NOT in bindDirNames and NOT a bind source stays untagged', () => {
 		const out = tagCapturedEntries([{ name: 'readme.txt', type: 'file', size: 10 }], '/opt/app', [], ['memos']);
 		expect(out[0].capturedAs).toBeUndefined();
+	});
+});
+
+describe('stackDirProbeFixHint', () => {
+	test('direct-remote user-set: tells the user to REDEPLOY (path is set, files staged on up), never to change the path', () => {
+		const msg = stackDirProbeFixHint(
+			{ kind: 'user-set', transport: 'direct', hostPath: '/home/ubuntu/Docker/dockhand/cf-tunnel', envName: 'DOOBER' },
+			'/home/ubuntu/Docker/dockhand/cf-tunnel',
+		);
+		expect(msg).toContain("The Remote stack path is set, but this stack's files aren't on DOOBER yet");
+		expect(msg).toContain('redeploy the stack so Dockhand stages them at /home/ubuntu/Docker/dockhand/cf-tunnel');
+		expect(msg).toContain("down/start/restart don't copy; it must be a deploy");
+		// The confusing advice must be gone - the user already set the path.
+		expect(msg).not.toContain('Set "Remote stack path (for backup)"');
+	});
+
+	test('hawser user-set: keeps the "set the real host path" advice (agent keeps files under its own dir)', () => {
+		const msg = stackDirProbeFixHint(
+			{ kind: 'user-set', transport: 'hawser', hostPath: '/opt/agent/stacks/gitlab', envName: 'remote-1' },
+			'/opt/agent/stacks/gitlab',
+		);
+		expect(msg).toContain('Set "Remote stack path (for backup)" in Settings > Environments > remote-1');
+		expect(msg).not.toContain('redeploy');
+	});
+
+	test('hawser-defaulted: set the real host path', () => {
+		const msg = stackDirProbeFixHint(
+			{ kind: 'hawser-defaulted', hostPath: '/data/stacks/x', envName: 'prod' },
+			'/data/stacks/x',
+		);
+		expect(msg).toContain('Set "Remote stack path (for backup)" in Settings > Environments > prod');
+	});
+
+	test('no env name: falls back to plain "Settings > Environments" (never prints null)', () => {
+		const msg = stackDirProbeFixHint(
+			{ kind: 'hawser-defaulted', hostPath: '/data/stacks/x', envName: null },
+			'/data/stacks/x',
+		);
+		expect(msg).toContain('Settings > Environments to the real host path');
+		expect(msg).not.toContain('null');
+	});
+
+	test('direct-remote user-set with no env name: still says redeploy, no null', () => {
+		const msg = stackDirProbeFixHint(
+			{ kind: 'user-set', transport: 'direct', hostPath: '/x', envName: null },
+			'/x',
+		);
+		expect(msg).toContain("this stack's files aren't on the host yet");
+		expect(msg).toContain('redeploy the stack');
+		expect(msg).not.toContain('null');
+	});
+
+	test('local: redeploy stages the files', () => {
+		expect(stackDirProbeFixHint({ kind: 'local' }, '/srv/stacks/app')).toContain('Redeploy the stack to stage its files there');
 	});
 });

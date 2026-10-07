@@ -14,6 +14,7 @@
 	import { getLabelColors, COLOR_PALETTE, hexToRgba } from '$lib/utils/label-colors';
 	import { canAccess } from '$lib/stores/auth';
 	import { toast } from 'svelte-sonner';
+	import TagsManager from './TagsManager.svelte';
 
 	interface LabelInfo {
 		label: string;
@@ -379,6 +380,8 @@
 			{/if}
 		</Card.Content>
 	</Card.Root>
+
+	<TagsManager />
 </div>
 
 <!-- Rename Dialog -->

@@ -8,11 +8,13 @@
 	import * as Card from '$lib/components/ui/card';
 	import { Loader2, LogIn, Shield, AlertCircle, Network, User, KeyRound, TriangleAlert } from 'lucide-svelte';
 	import { authStore } from '$lib/stores/auth';
+	import { autoLoginTarget } from '$lib/utils/oidc-autologin';
 	import { environments } from '$lib/stores/environment';
 	import { appSettings } from '$lib/stores/settings';
 	import * as Alert from '$lib/components/ui/alert';
 	import { themeStore, applyTheme } from '$lib/stores/theme';
 	import { safeRedirectOrRoot } from '$lib/utils/safe-redirect';
+	import { startAuthentication } from '@simplewebauthn/browser';
 
 	interface AuthProvider {
 		id: string;
@@ -29,8 +31,13 @@
 	let error = $state<string | null>(null);
 	let requiresMfa = $state(false);
 	let providers = $state<AuthProvider[]>([]);
+	// Set by the server when OIDC_AUTOLOGIN is on and there is exactly one provider.
+	let autoLoginUrl = $state<string | null>(null);
 	let selectedProvider = $state('local');
 	let loadingProviders = $state(true);
+	let passkeyLoading = $state(false);
+	// Offered only when an administrator allows it and ORIGIN supports a ceremony.
+	let passkeysOffered = $state(false);
 
 	// Get redirect URL from query params (validated path-relative only)
 	const redirectUrl = $derived(safeRedirectOrRoot($page.url.searchParams.get('redirect')));
@@ -52,11 +59,14 @@
 			const response = await fetch('/api/auth/providers');
 			const data = await response.json();
 			providers = data.providers || [{ id: 'local', name: 'Local', type: 'local' }];
+			passkeysOffered = data.passkeys === true;
+			autoLoginUrl = data.autoLoginUrl ?? null;
 			// Set default to first credential provider or first provider
 			const defaultProvider = data.defaultProvider || 'local';
 			selectedProvider = credentialProviders.find(p => p.id === defaultProvider)?.id || credentialProviders[0]?.id || 'local';
 		} catch {
 			providers = [{ id: 'local', name: 'Local', type: 'local' }];
+			passkeysOffered = false;
 		} finally {
 			loadingProviders = false;
 		}
@@ -79,9 +89,12 @@
 		// Initialize theme from app settings (no user yet, so fetches from /api/settings/theme)
 		await themeStore.init();
 
-		// Set error from URL if present
+		// searchParams.get() has already decoded this. Decoding again throws on a
+		// literal '%' - which an identity provider is free to put in the reason it
+		// refused a sign-in - and that throw lands before the providers are fetched,
+		// leaving a login page with no way to sign in at all.
 		if (urlError) {
-			error = decodeURIComponent(urlError);
+			error = urlError;
 		}
 
 		// Fetch providers first
@@ -93,6 +106,20 @@
 		// If auth is disabled or already authenticated, redirect
 		if (!$authStore.authEnabled || $authStore.authenticated) {
 			goto(redirectUrl);
+			return;
+		}
+
+		// Go straight to the provider when the operator asked for it. The rules for
+		// when NOT to are the tested ones in autoLoginTarget, so the ways out of a
+		// broken provider live in one place rather than being restated here.
+		const target = autoLoginTarget({
+			enabled: !!autoLoginUrl,
+			oidcInitiateUrls: autoLoginUrl ? [autoLoginUrl] : [],
+			error,
+			localRequested: $page.url.searchParams.get('local') === '1'
+		});
+		if (target) {
+			window.location.href = `${target}?redirect=${encodeURIComponent(redirectUrl)}`;
 		}
 	});
 
@@ -142,6 +169,36 @@
 		}
 	}
 
+	async function handlePasskeyLogin() {
+		passkeyLoading = true;
+		error = null;
+		try {
+			const optionsResponse = await fetch('/api/auth/passkeys/login/options', { method: 'POST' });
+			const optionsData = await optionsResponse.json();
+			if (!optionsResponse.ok) throw new Error(optionsData.error || 'Passkey login is unavailable');
+
+			const authenticationResponse = await startAuthentication({ optionsJSON: optionsData.options });
+			const verifyResponse = await fetch('/api/auth/passkeys/login/verify', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ ceremonyId: optionsData.ceremonyId, response: authenticationResponse })
+			});
+			const verifyData = await verifyResponse.json();
+			if (!verifyResponse.ok || !verifyData.success) throw new Error(verifyData.error || 'Passkey login failed');
+
+			await authStore.check();
+			await appSettings.refresh();
+			await environments.refresh();
+			goto(redirectUrl);
+		} catch (e) {
+			error = e instanceof Error && e.name !== 'NotAllowedError'
+				? e.message
+				: 'Passkey sign-in was cancelled or timed out';
+		} finally {
+			passkeyLoading = false;
+		}
+	}
+
 	function getProviderIcon(type: 'local' | 'ldap' | 'oidc') {
 		if (type === 'ldap') return Network;
 		if (type === 'oidc') return KeyRound;
@@ -158,14 +215,9 @@
 		<Card.Header class="space-y-1 text-center">
 			<div class="flex justify-center mb-4">
 				<img
-					src="/logo-light.webp"
+					src="/logo.svg"
 					alt="Dockhand Logo"
-					class="h-16 w-auto object-contain dark:hidden"
-				/>
-				<img
-					src="/logo-dark.webp"
-					alt="Dockhand Logo"
-					class="h-16 w-auto object-contain hidden dark:block"
+					class="h-16 w-auto object-contain"
 				/>
 			</div>
 			<Card.Title class="text-2xl font-bold">Welcome back</Card.Title>
@@ -184,6 +236,22 @@
 					<TriangleAlert class="h-4 w-4" />
 					<Alert.Description>{error}</Alert.Description>
 				</Alert.Root>
+			{/if}
+
+			{#if passkeysOffered && !requiresMfa}
+				<Button
+					variant="outline"
+					class="w-full justify-center gap-3 mb-4"
+					onclick={handlePasskeyLogin}
+					disabled={passkeyLoading || loading || ssoLoading !== null}
+				>
+					{#if passkeyLoading}
+						<Loader2 class="h-5 w-5 animate-spin" />
+					{:else}
+						<KeyRound class="h-5 w-5" />
+					{/if}
+					<span>Sign in with passkey</span>
+				</Button>
 			{/if}
 
 			<!-- SSO Buttons -->

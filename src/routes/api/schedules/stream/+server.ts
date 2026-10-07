@@ -25,7 +25,7 @@ import { getGlobalScannerDefaults, getScannerSettingsWithDefaults } from '$lib/s
 import { authorize } from '$lib/server/authorize';
 import type { ScheduleInfo } from '../+server';
 
-async function getSchedulesData(): Promise<ScheduleInfo[]> {
+async function getSchedulesData(accessibleEnvIds: number[] | null): Promise<ScheduleInfo[]> {
 	const schedules: ScheduleInfo[] = [];
 
 	// Pre-fetch global scanner defaults ONCE (CLI args are global, not per-environment)
@@ -367,7 +367,9 @@ async function getSchedulesData(): Promise<ScheduleInfo[]> {
 		return a.name.localeCompare(b.name);
 	});
 
-	return schedules;
+	return accessibleEnvIds === null
+		? schedules
+		: schedules.filter(s => s.environmentId === null || accessibleEnvIds.includes(s.environmentId));
 }
 
 /**
@@ -384,6 +386,8 @@ export const GET: RequestHandler = async ({ cookies }) => {
 			headers: { 'Content-Type': 'application/json' }
 		});
 	}
+
+	const accessibleEnvIds = await auth.getAccessibleEnvironmentIds();
 
 	let controllerClosed = false;
 	let intervalId: ReturnType<typeof setInterval> | null = null;
@@ -425,7 +429,7 @@ export const GET: RequestHandler = async ({ cookies }) => {
 
 			while (!initialDataSent && retryCount <= maxRetries && !controllerClosed) {
 				try {
-					const schedules = await getSchedulesData();
+					const schedules = await getSchedulesData(accessibleEnvIds);
 
 					// Check if still connected before sending
 					if (controllerClosed) {
@@ -474,7 +478,7 @@ export const GET: RequestHandler = async ({ cookies }) => {
 
 				isPolling = true;
 				try {
-					const schedules = await getSchedulesData();
+					const schedules = await getSchedulesData(accessibleEnvIds);
 					safeEnqueue(`event: schedules\ndata: ${JSON.stringify({ schedules })}\n\n`);
 				} catch (error) {
 					console.error('[Schedules Stream] Failed to get schedules during poll:', error);

@@ -8,13 +8,15 @@ import {
 	createGitRepository,
 	upsertStackSource,
 	setStackEnvVars,
-	getStackSource
+	getStackSource,
+	secretProviderExists
 } from '$lib/server/db';
 import { deployGitStack } from '$lib/server/git';
 import { authorize } from '$lib/server/authorize';
 import { registerSchedule } from '$lib/server/scheduler';
 import { auditGitStack } from '$lib/server/audit';
 import { createJobResponse } from '$lib/server/sse';
+import { allowSecretlessWebhook, webhookConfigRequiresSecret } from '$lib/server/webhook-secret-policy';
 
 // Stack name validation: Docker Compose requires lowercase; must start with a
 // letter or number, and contain only lowercase letters, numbers, hyphens, underscores
@@ -97,6 +99,13 @@ export const POST: RequestHandler = async (event) => {
 			return json({ error: 'Permission denied: binding a secret provider requires the secrets permission' }, { status: 403 });
 		}
 
+		// A stale provider id (e.g. the provider was deleted/recreated while the editor
+		// held the old list) would otherwise hit a raw foreign-key error on save. Reject
+		// it cleanly so the user knows to reselect a provider (#1522).
+		if (typeof data.secretProviderId === 'number' && !(await secretProviderExists(data.secretProviderId))) {
+			return json({ error: 'The selected secret provider no longer exists. Reopen the stack and pick a current provider.' }, { status: 400 });
+		}
+
 		// Check for name conflicts with existing stacks (regular/external/git)
 		const existing = await getStackSource(trimmedStackName, data.environmentId || null);
 		if (existing) {
@@ -104,7 +113,7 @@ export const POST: RequestHandler = async (event) => {
 		}
 
 		// A secret is mandatory when the webhook is enabled.
-		if (data.webhookEnabled && !data.webhookSecret?.trim()) {
+		if (webhookConfigRequiresSecret(!!data.webhookEnabled, !!data.webhookSecret?.trim(), allowSecretlessWebhook())) {
 			return json({ error: 'A webhook secret is required when the webhook is enabled' }, { status: 400 });
 		}
 
@@ -214,7 +223,11 @@ export const POST: RequestHandler = async (event) => {
 		if (data.deployNow) {
 			return createJobResponse(async (send) => {
 				try {
-					const deployResult = await deployGitStack(gitStack.id);
+					const deployResult = await deployGitStack(gitStack.id, {
+						triggeredBy: 'manual',
+						userId: auth.user?.id,
+						onLine: (line) => send('progress', { type: 'line', line })
+					});
 					await auditGitStack(event, 'deploy', gitStack.id, gitStack.stackName, gitStack.environmentId);
 					send('result', {
 						...gitStack,

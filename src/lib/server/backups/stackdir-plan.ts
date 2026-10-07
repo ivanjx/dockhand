@@ -211,8 +211,37 @@ export function isLocalDaemon(connectionType: string | null, envTcpHost: string 
 // wrong. `local`: a socket/local-daemon stack -> redeploy staged its files.
 export type StackDirProbeHint =
 	| { kind: 'hawser-defaulted'; hostPath: string; envName: string | null }
-	| { kind: 'user-set'; hostPath: string; envName: string | null }
+	// `transport` distinguishes how the files reach the host: a hawser agent keeps them
+	// under its own STACKS_DIR (the path just needs to be the right HOST mapping), while a
+	// direct-remote env has Dockhand COPY them there on `up` - so a direct env whose path is
+	// set but empty needs a redeploy, not a path change.
+	| { kind: 'user-set'; transport: 'hawser' | 'direct'; hostPath: string; envName: string | null }
 	| { kind: 'local' };
+
+/**
+ * The operator-facing fix line for a STACKDIR PROBE FAILED, tailored to why the compose
+ * is missing under the mounted host dir. Pure so it can be unit-tested (the message is the
+ * only actionable thing the user sees when a stack backup can't find its files).
+ */
+export function stackDirProbeFixHint(hint: StackDirProbeHint | undefined, hostPath: string | undefined): string {
+	const envName = hint && 'envName' in hint ? hint.envName : null;
+	const settingsLoc = envName ? `Settings > Environments > ${envName}` : `Settings > Environments`;
+	const at = hostPath ? ` at ${hostPath}` : '';
+	// A direct-remote env stages the files on deploy: if the path is set but the folder is
+	// empty, the stack simply hasn't been deployed there yet - a redeploy stages it. Naming a
+	// path change here (as the other branches do) is the wrong advice and sends the user in
+	// circles when the path is already correct.
+	if (hint?.kind === 'user-set' && hint.transport === 'direct') {
+		return ` The Remote stack path is set, but this stack's files aren't on ${envName ?? 'the host'} yet - redeploy the stack so Dockhand stages them${at}. (down/start/restart don't copy; it must be a deploy.)`;
+	}
+	// Hawser (defaulted or user-set): the agent keeps stacks under its own dir, so an empty
+	// probe means the configured HOST path doesn't map to where the agent actually writes.
+	if (hint?.kind === 'hawser-defaulted' || hint?.kind === 'user-set') {
+		return ` Set "Remote stack path (for backup)" in ${settingsLoc} to the real host path where this stack's files live.`;
+	}
+	// Local stack: a redeploy stages the files into the managed stack dir.
+	return ` Redeploy the stack to stage its files there.`;
+}
 
 /** Result of resolving the candidate host stack folder (before the runtime probe). */
 export type HostStackDirResolution =

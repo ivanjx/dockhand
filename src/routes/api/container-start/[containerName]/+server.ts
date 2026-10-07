@@ -6,12 +6,29 @@ import {
 	deleteContainerStartSchedule
 } from '$lib/server/db';
 import { registerSchedule, unregisterSchedule } from '$lib/server/scheduler';
+import { authorize } from '$lib/server/authorize';
 
-export const GET: RequestHandler = async ({ params, url }) => {
+/**
+ * @openapi
+ * summary: Get a container's scheduled-start settings, or disabled defaults
+ * path: containerName:string! Container name (URL-encoded)
+ * query: env:integer Environment the container belongs to (from GET /api/environments)
+ * resp-200: {enabled:boolean!, scheduleType:string!, cronExpression:string}
+ * resp-403: Permission denied (schedules:view), or no access to the environment
+ * resp-500: Failed to get container start schedule
+ */
+export const GET: RequestHandler = async ({ params, url, cookies }) => {
+	const auth = await authorize(cookies);
+	const permDenied = await auth.requirePermission('schedules', 'view');
+	if (permDenied) return permDenied;
+
 	try {
 		const containerName = decodeURIComponent(params.containerName);
 		const envIdParam = url.searchParams.get('env');
 		const envId = envIdParam ? parseInt(envIdParam) : undefined;
+
+		const envDenied = await auth.requireEnvAccess(envId);
+		if (envDenied) return envDenied;
 
 		const setting = await getContainerStartSchedule(containerName, envId);
 
@@ -34,11 +51,28 @@ export const GET: RequestHandler = async ({ params, url }) => {
 	}
 };
 
-export const POST: RequestHandler = async ({ params, url, request }) => {
+/**
+ * @openapi
+ * summary: Save a container's scheduled-start settings; enabled=false deletes the schedule
+ * path: containerName:string! Container name (URL-encoded)
+ * query: env:integer Environment the container belongs to (from GET /api/environments)
+ * body: {enabled:boolean, cronExpression:string, cron_expression:string}
+ * resp-200: {success:boolean, deleted:boolean, id:integer, enabled:boolean, scheduleType:string, cronExpression:string}
+ * resp-403: Permission denied (schedules:edit), or no access to the environment
+ * resp-500: Failed to save container start schedule
+ */
+export const POST: RequestHandler = async ({ params, url, request, cookies }) => {
+	const auth = await authorize(cookies);
+	const permDenied = await auth.requirePermission('schedules', 'edit');
+	if (permDenied) return permDenied;
+
 	try {
 		const containerName = decodeURIComponent(params.containerName);
 		const envIdParam = url.searchParams.get('env');
 		const envId = envIdParam ? parseInt(envIdParam) : undefined;
+
+		const envDenied = await auth.requireEnvAccess(envId);
+		if (envDenied) return envDenied;
 
 		const body = await request.json();
 		const enabled = body.enabled;
@@ -93,11 +127,27 @@ export const POST: RequestHandler = async ({ params, url, request }) => {
 	}
 };
 
-export const DELETE: RequestHandler = async ({ params, url }) => {
+/**
+ * @openapi
+ * summary: Delete a container's scheduled-start settings and unregister its cron job
+ * path: containerName:string! Container name (URL-encoded)
+ * query: env:integer Environment the container belongs to (from GET /api/environments)
+ * resp-200: {success:boolean!}
+ * resp-403: Permission denied (schedules:edit), or no access to the environment
+ * resp-500: Failed to delete container start schedule
+ */
+export const DELETE: RequestHandler = async ({ params, url, cookies }) => {
+	const auth = await authorize(cookies);
+	const permDenied = await auth.requirePermission('schedules', 'edit');
+	if (permDenied) return permDenied;
+
 	try {
 		const containerName = decodeURIComponent(params.containerName);
 		const envIdParam = url.searchParams.get('env');
 		const envId = envIdParam ? parseInt(envIdParam) : undefined;
+
+		const envDenied = await auth.requireEnvAccess(envId);
+		if (envDenied) return envDenied;
 
 		const setting = await getContainerStartSchedule(containerName, envId);
 		const settingId = setting?.id;

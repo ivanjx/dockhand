@@ -209,7 +209,8 @@ export function discoverRoutes(rootDirs: string[], routesRoot: string): { routes
 //    * resp-<code>-example: <json>
 //    */
 //
-// mini-schema := 'string'|'integer'|'number'|'boolean' | '{' (name':'type'!'?','?)* '}' | 'array<' type '>'
+// mini-schema := 'string'|'integer'|'number'|'boolean'|'object' | '{' (name':'type'!'?','?)* '}' | 'array<' type '>'
+// (bare 'object' = an opaque object with no declared properties; use '{...}' for a documented shape)
 
 export function parseMiniSchema(str: string): MiniSchema {
 	let i = 0;
@@ -244,6 +245,15 @@ export function parseMiniSchema(str: string): MiniSchema {
 		if (i === start) i++;
 		const word = s.slice(start, i) || 'string';
 		if (word === 'integer' || word === 'number' || word === 'boolean' || word === 'string') return { kind: word };
+		// Bare `object` (no `{...}` shape given) — an opaque/untyped object, used
+		// throughout the codebase for fields whose internal shape isn't part of
+		// the documented contract (e.g. `severity:object`, `envVars:object`,
+		// `config:object`). Without this branch it silently fell through to the
+		// generic `string` fallback below, so every one of these fields was
+		// documented in static/openapi.json as `{ "type": "string" }` instead of
+		// `{ "type": "object" }` — wrong for any client generated strictly from
+		// the spec (a typed SDK, an MCP server mirroring the schema, ...).
+		if (word === 'object') return { kind: 'object', properties: {}, required: [] };
 		return { kind: 'string' };
 	}
 
@@ -537,13 +547,42 @@ export function analyzeHandlerBody(body: string, pathParamNames: string[] = []):
 	const redirectRe = /\bredirect\(\s*(\d{3})/g;
 	let rm;
 	while ((rm = redirectRe.exec(body)) !== null) statusCodes.add(rm[1]);
+	// The authorize() guards return a ready-made 403 instead of building one inline, so
+	// a handler that uses them emits a status no literal in its body mentions. Without
+	// this the gate calls the documented 403 stale and argues against the shared guard.
+	// Comment lines are skipped: a handler that merely mentions the guard in its JSDoc
+	// would otherwise be credited with a 403 it never returns, and the drift gate would
+	// stop noticing when one goes missing.
+	const callsGuard = body
+		.split('\n')
+		.filter((line) => !/^\s*(\*|\/\/)/.test(line))
+		.some((line) => /\b(auth\.)?require(Permission|EnvAccess)\s*\(/.test(line));
+	if (callsGuard) statusCodes.add('403');
 
 	const bodyFields = new Set<string>();
 	// `const { a, b } = await request.json();` and `const { a, b } = body;`
-	const destructureRe = /const\s*\{([^}]*)\}\s*=\s*(?:await\s+)?(?:request\.json\(\)|body)\b/g;
+	// The `\b(?!\.)` guards the bare `body` alternative: it must not match `bodyText`
+	// (\b) NOR `body.config` (the (?!\.) - destructuring a NESTED object off the body
+	// would otherwise record its keys as top-level fields). `request.json()` ends in
+	// `)`, where a trailing boundary would never match, so it needs no guard.
+	const destructureRe = /const\s*\{([^}]*)\}\s*=\s*(?:await\s+)?(?:request\.json\(\)|body\b(?!\.))/g;
 	let dm;
 	while ((dm = destructureRe.exec(body)) !== null) {
 		for (const f of parseDestructuredFields(dm[1])) bodyFields.add(f);
+	}
+	// Member access: `body.foo` / `body?.foo`. Many handlers read the parsed body
+	// field-by-field instead of destructuring, so without this a documented `body:`
+	// annotation could omit a field the code actually reads and drift silently.
+	// Skip a WRITE (`body.foo = ...` and compound `+= ??= ||= &&= *= ...`): the request
+	// body is only ever read, so an assignment means `body` is a local variable (e.g. a
+	// response object literally named `body`), not the parsed request - counting it is a
+	// false positive. The write group matches an optional assignment operator (any op
+	// suffix ending in a single `=`) but NOT a comparison `==`/`===`.
+	const memberRe = /\bbody\??\.([A-Za-z_$][\w$]*)\s*((?:\*\*|<<|>>>?|\?\?|\|\||&&|[+\-*/%&|^])?=(?!=))?/g;
+	let mm;
+	while ((mm = memberRe.exec(body)) !== null) {
+		if (mm[2]) continue; // an assignment (plain or compound) -> a write, skip
+		bodyFields.add(mm[1]);
 	}
 
 	return {
@@ -558,9 +597,8 @@ export function analyzeHandlerBody(body: string, pathParamNames: string[] = []):
 // PUBLIC_PATHS extraction (from hooks.server.ts) — auth-exemption discovery
 // ---------------------------------------------------------------------------
 
-export function extractPublicPaths(hooksFile: string): string[] {
-	const content = readFileSync(hooksFile, 'utf-8');
-	const m = content.match(/const PUBLIC_PATHS\s*=\s*\[([\s\S]*?)\];/);
+function literalsIn(content: string, listName: string): string[] {
+	const m = content.match(new RegExp(`const ${listName}\\s*=\\s*\\[([\\s\\S]*?)\\];`));
 	if (!m) return [];
 	const paths: string[] = [];
 	const strRe = /'([^']+)'/g;
@@ -569,14 +607,34 @@ export function extractPublicPaths(hooksFile: string): string[] {
 	return paths;
 }
 
+/**
+ * The paths hooks.server.ts lets through unauthenticated.
+ *
+ * Kept as two lists because they match differently: an exact entry covers only itself,
+ * a prefix entry covers its subtree. Flattening them would mark a protected route
+ * beneath an exact entry as public in the spec.
+ */
+export function extractPublicPaths(hooksFile: string): { exact: string[]; prefixes: string[] } {
+	const content = readFileSync(hooksFile, 'utf-8');
+	return {
+		exact: literalsIn(content, 'PUBLIC_EXACT'),
+		prefixes: literalsIn(content, 'PUBLIC_PREFIXES')
+	};
+}
+
 // Two exceptions hardcoded directly in isPublicPath() as regexes (webhook
 // signature/secret auth instead of session/token) — not expressible as a
 // simple PUBLIC_PATHS prefix string. The one manual special-case this
 // generator needs; documented in the research doc's coverage-gap section.
 export const PUBLIC_PATH_REGEXES = [/^\/api\/git\/stacks\/\d+\/webhook$/, /^\/api\/git\/webhook\/\d+$/];
 
-export function isPublic(openapiPath: string, publicPaths: string[]): boolean {
-	if (publicPaths.some((p) => openapiPath === p || openapiPath.startsWith(p + '/'))) return true;
+export function isPublic(
+	openapiPath: string,
+	publicPaths: { exact: string[]; prefixes: string[] }
+): boolean {
+	if (publicPaths.exact.includes(openapiPath)) return true;
+	if (publicPaths.prefixes.some((p) => openapiPath === p || openapiPath.startsWith(p + '/')))
+		return true;
 	const asConcretePath = openapiPath.replace(/\{[^}]+\}/g, '1');
 	return PUBLIC_PATH_REGEXES.some((re) => re.test(asConcretePath));
 }

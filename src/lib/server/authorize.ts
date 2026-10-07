@@ -40,7 +40,7 @@ import { json } from '@sveltejs/kit';
 import type { Permissions } from './db';
 import { getUserAccessibleEnvironments, userCanAccessEnvironment, userHasAdminRole } from './db';
 import { validateSession, isAuthEnabled, checkPermission, type AuthenticatedUser } from './auth';
-import { isEnterprise } from './license';
+import { isEnterprise, hasValidEnterpriseLicense } from './license';
 import { getRequestContext } from './request-context';
 
 export interface AuthorizationContext {
@@ -56,8 +56,18 @@ export interface AuthorizationContext {
 	/** Whether the user has admin privileges */
 	isAdmin: boolean;
 
-	/** Whether an enterprise license is active */
+	/**
+	 * Whether this instance runs the enterprise model: roles exist and are enforced.
+	 * Stays true when the license lapses, so authorization keeps behaving as it did.
+	 */
 	isEnterprise: boolean;
+
+	/**
+	 * Whether the enterprise license currently validates. Gate paid FEATURES on this
+	 * (LDAP, audit log, role editing) rather than on isEnterprise, which an expiry
+	 * deliberately leaves alone.
+	 */
+	hasValidLicense: boolean;
 
 	/**
 	 * Check if the user has a specific permission.
@@ -136,6 +146,7 @@ export interface AuthorizationContext {
 export async function authorize(cookies: Cookies): Promise<AuthorizationContext> {
 	const authEnabled = await isAuthEnabled();
 	const enterprise = await isEnterprise();
+	const validLicense = await hasValidEnterpriseLicense();
 
 	// Try request context first (set by hook — handles both cookie and Bearer)
 	const reqCtx = getRequestContext();
@@ -161,6 +172,7 @@ export async function authorize(cookies: Cookies): Promise<AuthorizationContext>
 		user,
 		isAdmin,
 		isEnterprise: enterprise,
+		hasValidLicense: validLicense,
 
 		async can(resource: keyof Permissions, action: string, environmentId?: number): Promise<boolean> {
 			// If auth is disabled, allow everything (initial setup)
@@ -240,8 +252,11 @@ export async function authorize(cookies: Cookies): Promise<AuthorizationContext>
 		},
 
 		async canViewAuditLog(): Promise<boolean> {
-			// Audit logs are enterprise-only
-			if (!enterprise) return false;
+			// Reading the audit log is a paid feature, so it follows the license rather
+			// than the roles. Writing to it does not: entries keep being recorded during
+			// a lapse, or the period nobody can see would also be the period nobody
+			// wrote down.
+			if (!validLicense) return false;
 
 			// If auth is disabled, allow access (enterprise-only protection is enough)
 			if (!authEnabled) return true;

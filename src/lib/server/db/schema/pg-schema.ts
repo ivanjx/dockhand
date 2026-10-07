@@ -15,7 +15,8 @@ import {
 	bigint,
 	timestamp,
 	unique,
-	index
+	index,
+	uniqueIndex
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
@@ -399,6 +400,41 @@ export const containerIconOverrides = pgTable('container_icon_overrides', {
 	containerIconEnvUnique: unique().on(table.containerName, table.environmentId)
 }));
 
+// User-defined organizational tags for containers and stacks. Distinct
+// from Docker labels. GLOBAL tag catalog (unique on name, not env-scoped); assignment
+// rows (container_tags/stack_tags) are keyed by name and stay env-scoped.
+export const tags = pgTable('tags', {
+	id: serial('id').primaryKey(),
+	name: text('name').notNull(),
+	color: text('color').notNull().default('slate'),
+	icon: text('icon'),
+	createdAt: timestamp('created_at', { mode: 'string' }).defaultNow()
+}, (table) => ({
+	// Case-INSENSITIVE unique on name (lower(name) in the migration) so "Prod" and
+	// "prod" collide; preserve this expression when regenerating migrations.
+	tagNameUnique: unique().on(table.name)
+}));
+
+export const containerTags = pgTable('container_tags', {
+	id: serial('id').primaryKey(),
+	containerName: text('container_name').notNull(),
+	environmentId: integer('environment_id').references(() => environments.id, { onDelete: 'cascade' }),
+	tagId: integer('tag_id').notNull().references(() => tags.id, { onDelete: 'cascade' }),
+	createdAt: timestamp('created_at', { mode: 'string' }).defaultNow()
+}, (table) => ({
+	containerTagUnique: unique().on(table.containerName, table.environmentId, table.tagId)
+}));
+
+export const stackTags = pgTable('stack_tags', {
+	id: serial('id').primaryKey(),
+	stackName: text('stack_name').notNull(),
+	environmentId: integer('environment_id').references(() => environments.id, { onDelete: 'cascade' }),
+	tagId: integer('tag_id').notNull().references(() => tags.id, { onDelete: 'cascade' }),
+	createdAt: timestamp('created_at', { mode: 'string' }).defaultNow()
+}, (table) => ({
+	stackTagUnique: unique().on(table.stackName, table.environmentId, table.tagId)
+}));
+
 export const stackEnvironmentVariables = pgTable('stack_environment_variables', {
 	id: serial('id').primaryKey(),
 	stackName: text('stack_name').notNull(),
@@ -504,7 +540,9 @@ export const scheduleExecutions = pgTable('schedule_executions', {
 	logs: text('logs'), // Execution logs/output
 	createdAt: timestamp('created_at', { mode: 'string' }).defaultNow()
 }, (table) => ({
-	typeIdIdx: index('schedule_executions_type_id_idx').on(table.scheduleType, table.scheduleId)
+	typeIdIdx: index('schedule_executions_type_id_idx').on(table.scheduleType, table.scheduleId),
+	// Powers "runs for this stack/container" lookups without a full table scan.
+	entityEnvIdx: index('schedule_executions_entity_env_idx').on(table.entityName, table.environmentId)
 }));
 
 // =============================================================================
@@ -523,6 +561,9 @@ export const pendingContainerUpdates = pgTable('pending_container_updates', {
 	// A newer VERSION tag (semver) for a pinned image, as JSON {tag,bump,skipped}.
 	// Null when there's no semver suggestion. Advisory - never auto-applied.
 	newerVersion: text('newer_version'),
+	// Hours left before a held update may be applied. Null when no cooldown applies,
+	// so a row can record "waiting" without claiming the update is ready.
+	releaseAgeRemainingHours: integer('release_age_remaining_hours'),
 	checkedAt: timestamp('checked_at', { mode: 'string' }).defaultNow(),
 	createdAt: timestamp('created_at', { mode: 'string' }).defaultNow()
 }, (table) => ({
@@ -622,3 +663,35 @@ export const templateSources = pgTable('template_sources', {
 	createdAt: timestamp('created_at', { mode: 'string' }).defaultNow(),
 	updatedAt: timestamp('updated_at', { mode: 'string' }).defaultNow()
 });
+
+
+// =============================================================================
+// PASSKEYS (WebAuthn)
+// =============================================================================
+
+/**
+ * A registered WebAuthn credential.
+ *
+ * `counter` is the authenticator's signature counter: it must only ever move
+ * forward, so a replayed or cloned credential is refused at login. It is a bigint
+ * because the counter is an unsigned 32-bit value. `aaguid` identifies the
+ * authenticator model, which is what lets a credential be named after the manager
+ * it lives in.
+ */
+export const passkeyCredentials = pgTable('passkey_credentials', {
+	id: serial('id').primaryKey(),
+	userId: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+	credentialId: text('credential_id').notNull().unique(),
+	webauthnUserId: text('webauthn_user_id').notNull(),
+	publicKey: text('public_key').notNull(),
+	counter: bigint('counter', { mode: 'number' }).notNull().default(0),
+	deviceType: text('device_type').notNull(),
+	backedUp: boolean('backed_up').notNull().default(false),
+	transports: text('transports'),
+	aaguid: text('aaguid'),
+	name: text('name'),
+	createdAt: timestamp('created_at', { mode: 'string' }).notNull().defaultNow()
+}, (table) => ({
+	userIdIdx: index('passkey_credentials_user_id_idx').on(table.userId),
+	userNameUnique: uniqueIndex('passkey_credentials_user_name_unique').on(table.userId, sql`lower(${table.name})`)
+}));

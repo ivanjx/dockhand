@@ -58,13 +58,11 @@
 			<AlertTriangle class="w-4 h-4 text-blue-500 mt-0.5 shrink-0" />
 			<div class="space-y-2 text-xs">
 				{#if systemContainer === 'dockhand'}
-					<p class="font-medium text-blue-600 dark:text-blue-400">Auto-updates not available</p>
+					<p class="font-medium text-blue-600 dark:text-blue-400">Scheduled auto-updates not available</p>
 					<p class="text-muted-foreground">
-						Dockhand cannot update itself. To update, run on the host:
+						Dockhand does not auto-update on a schedule. When a new version is out,
+						update it from <a href="/settings?tab=about" class="text-primary hover:underline">Settings &gt; About</a>.
 					</p>
-					<code class="block bg-muted rounded px-2 py-1 font-mono text-2xs">
-						docker compose pull && docker compose up -d
-					</code>
 				{:else}
 					<p class="font-medium text-blue-600 dark:text-blue-400">Auto-updates not available</p>
 					<p class="text-muted-foreground">

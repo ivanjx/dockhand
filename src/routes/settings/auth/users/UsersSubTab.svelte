@@ -5,7 +5,7 @@
 	import * as Card from '$lib/components/ui/card';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import { Badge } from '$lib/components/ui/badge';
-	import { Input } from '$lib/components/ui/input';
+	import { SearchInput } from '$lib/components/ui/search-input';
 	import {
 		Users,
 		User,
@@ -281,15 +281,7 @@
 			{:else}
 				<!-- Filter bar -->
 				<div class="flex items-center gap-2 mb-3">
-					<div class="relative flex-1 max-w-xs">
-						<Search class="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-						<Input
-							type="text"
-							placeholder="Search users..."
-							bind:value={searchQuery}
-							class="pl-8 h-8 text-sm"
-						/>
-					</div>
+					<SearchInput bind:value={searchQuery} placeholder="Search users..." class="h-8 text-sm" containerClass="flex-1 max-w-xs" />
 					<div class="flex items-center gap-1 text-xs text-muted-foreground ml-auto">
 						<span>{filteredAndSortedUsers.length} of {localUsers.length} users</span>
 					</div>

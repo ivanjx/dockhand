@@ -5,7 +5,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { browser } from '$app/environment';
-	import { RefreshCw, LayoutGrid, Loader2, Server, Tags, Square, RectangleVertical, Rows3, LayoutTemplate, Maximize2, Plus, Lock, LockOpen, List, Search, Plug, Route, UndoDot } from 'lucide-svelte';
+	import { RefreshCw, LayoutGrid, Loader2, Server, Tags, Square, RectangleVertical, Rows3, LayoutTemplate, Maximize2, Plus, Lock, LockOpen, List, Plug, Route, UndoDot } from 'lucide-svelte';
 	import { toast } from 'svelte-sonner';
 	import PageHeader from '$lib/components/PageHeader.svelte';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
@@ -21,9 +21,11 @@
 	import type { EnvironmentStats } from './api/dashboard/stats/+server';
 	import { getLabelColor, getLabelBgColor } from '$lib/utils/label-colors';
 	import { labelColorOverrides } from '$lib/stores/label-colors';
-	import { Input } from '$lib/components/ui/input';
+	import { SearchInput } from '$lib/components/ui/search-input';
 	import MultiSelectFilter from '$lib/components/MultiSelectFilter.svelte';
 	import { appSettings } from '$lib/stores/settings';
+	import { mergePartialStats, definedPartialForStore } from '$lib/utils/merge-partial-stats';
+	import { diskSegmentPath, type DiskSegmentKey } from '$lib/utils/disk-segment-path';
 
 	const LABEL_FILTER_STORAGE_KEY = 'dockhand-dashboard-label-filter';
 
@@ -521,34 +523,18 @@
 										});
 									}
 								} else if (eventType === 'partial') {
-									// Progressive update - merge partial data into existing stats
-									// Use deep merge for nested objects to preserve existing values
+									// Progressive update - merge partial data into existing stats in place
+									// (Svelte 5 reactivity), skipping SKELETON placeholder sections so a
+									// re-opened stream's zeroed loading partial can't blank a populated tile.
 									const partialStats = data as Partial<EnvironmentStats> & { id: number };
 									const tile = tiles.find(t => t.id === partialStats.id);
 									if (tile?.stats) {
-										// Use direct mutation for Svelte 5 reactivity
-										// Deep merge for nested objects like containers, images, etc.
-										for (const [key, value] of Object.entries(partialStats)) {
-											if (value !== undefined && key !== 'id') {
-												const existing = (tile.stats as any)[key];
-												// Deep merge for plain objects (not arrays or null)
-												if (existing && typeof existing === 'object' && !Array.isArray(existing) &&
-												    value && typeof value === 'object' && !Array.isArray(value)) {
-													Object.assign(existing, value);
-												} else {
-													(tile.stats as any)[key] = value;
-												}
-											}
-										}
+										mergePartialStats(tile.stats as any, partialStats as any);
 									}
-									// Also update the store with deep merge
-									const definedStats: Partial<EnvironmentStats> = {};
-									for (const [key, value] of Object.entries(partialStats)) {
-										if (value !== undefined) {
-											(definedStats as any)[key] = value;
-										}
-									}
-									dashboardData.updateTilePartial(partialStats.id, definedStats);
+									dashboardData.updateTilePartial(
+										partialStats.id,
+										definedPartialForStore(partialStats as any) as Partial<EnvironmentStats>
+									);
 								} else if (eventType === 'stats') {
 									// Update the tile with actual stats (legacy/fallback)
 									const stats = data as EnvironmentStats;
@@ -676,6 +662,16 @@
 		if (tile?.stats) {
 			currentEnvironment.set({ id: envId, name: tile.stats.name });
 			goto(`/activity?env=${envId}`);
+		}
+	}
+
+	// Handle disk usage segment click - select environment and open that resource's page
+	function handleDiskClick(envId: number, key: DiskSegmentKey) {
+		const tile = getTileById(envId);
+		const route = diskSegmentPath(key);
+		if (tile?.stats && route) {
+			currentEnvironment.set({ id: envId, name: tile.stats.name });
+			goto(route);
 		}
 	}
 
@@ -814,12 +810,18 @@
 
 			const stats = await response.json() as EnvironmentStats;
 
-			tiles = tiles.map(t =>
-				t.id === envId
-					? { ...t, stats, loading: false }
-					: t
-			);
-			dashboardData.updateTile(envId, { stats, loading: false });
+			// MERGE, don't replace: this endpoint doesn't compute topContainers/recentEvents
+			// (only the SSE stream does), so replacing the whole stats object would blank the
+			// richer lists the tile already got from the stream. Merge keeps them (it skips
+			// undefined fields) while still applying the fresh counts this refresh carries.
+			tiles = tiles.map(t => {
+				if (t.id !== envId) return t;
+				const merged = { ...t.stats } as Record<string, any>;
+				mergePartialStats(merged, stats as any);
+				return { ...t, stats: merged as EnvironmentStats, loading: false };
+			});
+			dashboardData.updateTilePartial(envId, definedPartialForStore(stats as any));
+			dashboardData.updateTile(envId, { loading: false });
 		} catch {
 			// Ignore errors - next full refresh will catch up
 		}
@@ -1058,16 +1060,7 @@
 			<!-- List view filters (search + connection type) -->
 			{#if viewMode === 'list'}
 				<div class="flex items-center gap-2 mr-2">
-					<div class="relative">
-						<Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-						<Input
-							type="text"
-							placeholder="Search environments..."
-							bind:value={listSearchQuery}
-							onkeydown={(e) => e.key === 'Escape' && (listSearchQuery = '')}
-							class="pl-8 h-8 w-52 text-sm"
-						/>
-					</div>
+					<SearchInput bind:value={listSearchQuery} placeholder="Search environments..." class="h-8 w-52 text-sm" />
 					<MultiSelectFilter
 						bind:value={listConnectionFilter}
 						options={connectionOptions}
@@ -1218,6 +1211,7 @@
 									width={2}
 									height={Math.max(item.h, 2)}
 									oneventsclick={() => handleEventsClick(tile.stats!.id)}
+									ondiskclick={(key) => handleDiskClick(tile.stats!.id, key)}
 									showStacksBreakdown={false}
 								/>
 							</div>
@@ -1253,7 +1247,7 @@
 							/>
 						{:else if tile.stats}
 							<!-- Show actual tile with data -->
-							<EnvironmentTile stats={tile.stats} width={item.w} height={item.h} oneventsclick={() => handleEventsClick(tile.stats!.id)} />
+							<EnvironmentTile stats={tile.stats} width={item.w} height={item.h} oneventsclick={() => handleEventsClick(tile.stats!.id)} ondiskclick={(key) => handleDiskClick(tile.stats!.id, key)} />
 						{/if}
 					{/if}
 				{/snippet}

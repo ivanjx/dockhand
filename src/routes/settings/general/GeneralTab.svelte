@@ -8,7 +8,8 @@
 	import { TogglePill, ToggleSwitch } from '$lib/components/ui/toggle-pill';
 	import CronEditor from '$lib/components/cron-editor.svelte';
 	import TimezoneSelector from '$lib/components/TimezoneSelector.svelte';
-	import { Eye, Bell, Database, Calendar, ShieldCheck, FileText, AlertTriangle, HelpCircle, Globe, Activity, Clock, Info, Save, RotateCcw, LayoutDashboard, Tags, Archive, ChevronRight, ChevronDown, Compass } from 'lucide-svelte';
+	import { Eye, Bell, Database, Calendar, ShieldCheck, FileText, AlertTriangle, HelpCircle, Globe, Activity, Clock, Info, Save, RotateCcw, LayoutDashboard, Tags, Archive, ChevronRight, ChevronDown, Compass, Layers } from 'lucide-svelte';
+	import { STACK_LOG_OPERATIONS, type StackLogOperation } from '$lib/utils/stack-log-operations';
 	import CodeEditor from '$lib/components/CodeEditor.svelte';
 	import { appSettings, type DateFormat, type DownloadFormat, type EventCollectionMode, type LabelFilterMode } from '$lib/stores/settings';
 	import { canAccess, authStore } from '$lib/stores/auth';
@@ -17,8 +18,16 @@
 	import NavigationSelector from '$lib/components/NavigationSelector.svelte';
 	import AnimateIconsToggle from '$lib/components/AnimateIconsToggle.svelte';
 	import IndentGuidesToggle from '$lib/components/IndentGuidesToggle.svelte';
+	import EditorThemeSelector from '$lib/components/EditorThemeSelector.svelte';
 	import ColoredActionsToggle from '$lib/components/ColoredActionsToggle.svelte';
 	import SemverCheckConfig from '$lib/components/SemverCheckConfig.svelte';
+	import {
+		DEFAULT_GRYPE_IMAGE,
+		DEFAULT_TRIVY_IMAGE,
+		DEFAULT_GRYPE_ARGS,
+		DEFAULT_TRIVY_ARGS,
+		imageRepo
+	} from '$lib/utils/scanner-images';
 	import { onMount } from 'svelte';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 
@@ -42,6 +51,14 @@
 	let defaultTrivyImage = $derived($appSettings.defaultTrivyImage);
 	let defaultScannerNetworkMode = $derived($appSettings.defaultScannerNetworkMode);
 	let defaultScannerDns = $derived($appSettings.defaultScannerDns);
+	let stackLogOperations = $derived($appSettings.stackLogOperations);
+
+	function toggleStackLogOperation(op: StackLogOperation, show: boolean) {
+		const next = show
+			? [...stackLogOperations, op]
+			: stackLogOperations.filter((o) => o !== op);
+		appSettings.setStackLogOperations(next);
+	}
 	let showAdvancedScannerSettings = $state(false);
 	let defaultComposeTemplate = $derived($appSettings.defaultComposeTemplate);
 	let labelFilterMode = $derived($appSettings.labelFilterMode);
@@ -89,8 +106,14 @@ services:
 	let eventCleanupCron = $derived($appSettings.eventCleanupCron);
 	let scheduleCleanupEnabled = $derived($appSettings.scheduleCleanupEnabled);
 	let eventCleanupEnabled = $derived($appSettings.eventCleanupEnabled);
+	let scanRetentionCron = $derived($appSettings.scanRetentionCron);
+	let scanRetentionEnabled = $derived($appSettings.scanRetentionEnabled);
+	let scanRetentionKeep = $derived($appSettings.scanRetentionKeep);
+	let scanRetentionGraceDays = $derived($appSettings.scanRetentionGraceDays);
 	let scannerCleanupCron = $derived($appSettings.scannerCleanupCron);
 	let scannerCleanupEnabled = $derived($appSettings.scannerCleanupEnabled);
+	let deployLogReconcileCron = $derived($appSettings.deployLogReconcileCron);
+	let deployLogReconcileEnabled = $derived($appSettings.deployLogReconcileEnabled);
 	let logMaxLines = $derived($appSettings.logMaxLines);
 	let formatLogTimestamps = $derived($appSettings.formatLogTimestamps);
 	let defaultTimezone = $derived($appSettings.defaultTimezone);
@@ -176,6 +199,31 @@ services:
 		toast.success(newState ? 'Event cleanup enabled' : 'Event cleanup disabled');
 	}
 
+	function handleScanRetentionEnabledChange() {
+		const newState = !scanRetentionEnabled;
+		appSettings.setScanRetentionEnabled(newState);
+		toast.success(newState ? 'Scan retention enabled' : 'Scan retention disabled');
+	}
+
+	function handleScanRetentionCronChange(cron: string) {
+		appSettings.setScanRetentionCron(cron);
+		toast.success('Scan retention schedule updated');
+	}
+
+	function handleScanRetentionKeepChange(event: Event) {
+		const value = parseInt((event.target as HTMLInputElement).value, 10);
+		if (!Number.isFinite(value) || value < 1) return;
+		appSettings.setScanRetentionKeep(value);
+		toast.success('Scan retention updated');
+	}
+
+	function handleScanRetentionGraceChange(event: Event) {
+		const value = parseInt((event.target as HTMLInputElement).value, 10);
+		if (!Number.isFinite(value) || value < 0) return;
+		appSettings.setScanRetentionGraceDays(value);
+		toast.success('Scan retention updated');
+	}
+
 	function handleScannerCleanupCronChange(cron: string) {
 		appSettings.setScannerCleanupCron(cron);
 		toast.success('Scanner cleanup cron updated');
@@ -185,6 +233,17 @@ services:
 		const newState = !scannerCleanupEnabled;
 		appSettings.setScannerCleanupEnabled(newState);
 		toast.success(newState ? 'Scanner cleanup enabled' : 'Scanner cleanup disabled');
+	}
+
+	function handleDeployLogReconcileCronChange(cron: string) {
+		appSettings.setDeployLogReconcileCron(cron);
+		toast.success('Deploy log reconcile cron updated');
+	}
+
+	function handleDeployLogReconcileEnabledChange() {
+		const newState = !deployLogReconcileEnabled;
+		appSettings.setDeployLogReconcileEnabled(newState);
+		toast.success(newState ? 'Deploy log reconcile enabled' : 'Deploy log reconcile disabled');
 	}
 
 	function handleGrypeImageBlur(e: Event) {
@@ -201,6 +260,48 @@ services:
 			appSettings.setDefaultTrivyImage(value);
 			toast.success('Trivy image updated');
 		}
+	}
+
+	// Newer scanner releases, asked for on demand: the check reaches the registry,
+	// and the image stays pinned until someone applies the suggestion.
+	let checkingScannerVersions = $state(false);
+	let newerScanners = $state<{ grype: string | null; trivy: string | null }>({ grype: null, trivy: null });
+	// Per scanner: the check ran and found nothing newer. Applying a suggestion
+	// does NOT set this - that image has not been re-checked.
+	let scannerUpToDate = $state<{ grype: boolean; trivy: boolean }>({ grype: false, trivy: false });
+
+	async function checkScannerVersions() {
+		checkingScannerVersions = true;
+		try {
+			const res = await fetch('/api/settings/scanner?checkNewerVersions=true');
+			const data = await res.json();
+			newerScanners = {
+				grype: data.newerVersions?.grype?.latest ?? null,
+				trivy: data.newerVersions?.trivy?.latest ?? null
+			};
+			scannerUpToDate = { grype: !newerScanners.grype, trivy: !newerScanners.trivy };
+		} catch {
+			toast.error('Could not reach the registry to check scanner versions');
+		} finally {
+			checkingScannerVersions = false;
+		}
+	}
+
+	function applyScannerVersion(scanner: 'grype' | 'trivy') {
+		const tag = scanner === 'grype' ? newerScanners.grype : newerScanners.trivy;
+		if (!tag) return;
+		const current = scanner === 'grype' ? defaultGrypeImage : defaultTrivyImage;
+		const image = `${imageRepo(current)}:${tag}`;
+		if (scanner === 'grype') {
+			appSettings.setDefaultGrypeImage(image);
+			newerScanners = { ...newerScanners, grype: null };
+			scannerUpToDate = { ...scannerUpToDate, grype: false };
+		} else {
+			appSettings.setDefaultTrivyImage(image);
+			newerScanners = { ...newerScanners, trivy: null };
+			scannerUpToDate = { ...scannerUpToDate, trivy: false };
+		}
+		toast.success(`Scanner image set to ${image} - pull it to start using it`);
 	}
 
 	function handleGrypeArgsBlur(e: Event) {
@@ -285,15 +386,52 @@ services:
 		}
 	}
 
-	// Global newer-version-tag (semver) detection - one setting every update check
-	// (scheduled and manual) reads.
+	let releaseAgeHours = $state(0);
+	let releaseAgeOverridden = $state(false);
+	let releaseAgeSaving = $state(false);
+
+	async function saveReleaseAge() {
+		releaseAgeSaving = true;
+		try {
+			const res = await fetch('/api/settings/minimum-release-age', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ hours: releaseAgeHours })
+			});
+			const data = await res.json();
+			if (!res.ok) throw new Error(data.error || 'Failed to save minimum image age');
+			toast.success('Minimum image age updated');
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : 'Failed to save minimum image age');
+		} finally { releaseAgeSaving = false; }
+	}
+
+	// Global newer-version-tag (semver) detection.
 	let semverEnabled = $state(false);
 	let semverMaxBump = $state<'patch' | 'minor' | 'major'>('major');
 	let semverMatchFlavor = $state(true);
 	let semverIncludePrerelease = $state(false);
+	let semverRejectOlderImages = $state(true);
 	let semverLoaded = $state(false);
 
+	// The global theme defaults (what a new user starts with). With auth on the theme
+	// toggles here edit these, not the admin's own profile. Rendering waits on
+	// globalThemeLoaded: until the fetch fills these, a toggle handed globalValue=undefined
+	// would fall back to the admin's personal store value and show it.
+	let globalColoredActions = $state<boolean | undefined>(undefined);
+	let globalAnimateIcons = $state<boolean | undefined>(undefined);
+	let globalIndentGuides = $state<boolean | undefined>(undefined);
+	let globalThemeLoaded = $state(false);
+
 	onMount(async () => {
+		try {
+			const res = await fetch('/api/settings/minimum-release-age');
+			if (res.ok) {
+				const config = await res.json();
+				releaseAgeHours = config.hours;
+				releaseAgeOverridden = config.overridden;
+			}
+		} catch { /* keep default */ }
 		try {
 			const res = await fetch('/api/settings/semver');
 			if (res.ok) {
@@ -302,9 +440,28 @@ services:
 				semverMaxBump = c.maxBump ?? 'major';
 				semverMatchFlavor = c.matchFlavor ?? true;
 				semverIncludePrerelease = c.includePrerelease ?? false;
+				semverRejectOlderImages = c.rejectOlderImages ?? true;
 			}
-		} catch { /* keep defaults */ }
-		semverLoaded = true;
+			// A refusal means the values on screen are the built-in defaults, never the
+			// configuration, so the save effect stays disarmed rather than writing a
+			// guess over it. Any other failure still arms it: the controls are visible
+			// and edits have to reach the server rather than vanish.
+			semverLoaded = res.status !== 401 && res.status !== 403;
+		} catch {
+			// The request never landed, so nothing says this account may not save.
+			semverLoaded = true;
+		}
+
+		try {
+			const res = await fetch('/api/settings/general');
+			if (res.ok) {
+				const g = await res.json();
+				globalColoredActions = !!g.coloredActionButtons;
+				globalAnimateIcons = g.animateIcons ?? true;
+				globalIndentGuides = !!g.editorIndentGuides;
+			}
+		} catch { /* toggles fall back to store when global value is unknown */ }
+		globalThemeLoaded = true;
 	});
 
 	async function saveSemverConfig() {
@@ -316,7 +473,8 @@ services:
 					enabled: semverEnabled,
 					maxBump: semverMaxBump,
 					matchFlavor: semverMatchFlavor,
-					includePrerelease: semverIncludePrerelease
+					includePrerelease: semverIncludePrerelease,
+					rejectOlderImages: semverRejectOlderImages
 				})
 			});
 		} catch {
@@ -528,71 +686,89 @@ services:
 								</div>
 								<p class="text-xs text-muted-foreground">Show URLs inferred from Traefik and Pangolin labels alongside dockhand.url</p>
 							</div>
-							<div class="space-y-1">
-								<div class="flex items-center gap-3">
-									<Label>Time format</Label>
-									<ToggleSwitch
-										value={timeFormat}
-										leftValue="24h"
-										rightValue="12h"
-										onchange={(newFormat) => {
-											appSettings.setTimeFormat(newFormat as '12h' | '24h');
-											toast.success(`Time format set to ${newFormat === '12h' ? '12-hour (AM/PM)' : '24-hour'}`);
-										}}
-										disabled={!$canAccess('settings', 'edit')}
-									/>
-								</div>
-								<p class="text-xs text-muted-foreground">Display timestamps in 12-hour (AM/PM) or 24-hour format</p>
-							</div>
-							<div class="space-y-1">
-								<div class="flex items-center gap-3">
-									<Label>Date format</Label>
-									<Select.Root
-										type="single"
-										value={dateFormat}
-										onValueChange={(value) => {
-											if (value) {
-												appSettings.setDateFormat(value as DateFormat);
-												toast.success(`Date format set to ${value}`);
-											}
-										}}
-										disabled={!$canAccess('settings', 'edit')}
-									>
-										<Select.Trigger class="w-[180px]">
-											<Calendar class="w-4 h-4 mr-2" />
-											<span>{dateFormat}</span>
-										</Select.Trigger>
-										<Select.Content>
-											{#each dateFormatOptions as option}
-												<Select.Item value={option.value}>
-													<div class="flex items-center justify-between w-full gap-4">
-														<span>{option.label}</span>
-														<span class="text-xs text-muted-foreground">{option.example}</span>
-													</div>
-												</Select.Item>
-											{/each}
-										</Select.Content>
-									</Select.Root>
-								</div>
-								<p class="text-xs text-muted-foreground">How dates are displayed throughout the app</p>
-							</div>
 						</div>
 						<!-- Right column: Theme settings (always shown, with hint when auth enabled) -->
 						<div class="space-y-4">
 							<ThemeSelector />
-							<ColoredActionsToggle />
-							<AnimateIconsToggle />
-							<IndentGuidesToggle />
+							<!-- With auth on the toggles edit the GLOBAL defaults, so they wait for
+							     those to load; binding globalValue=undefined first would show the
+							     admin's own profile value. With auth off the store IS the global
+							     value, so they render immediately. -->
+							{#if !$authStore.authEnabled || globalThemeLoaded}
+								<ColoredActionsToggle globalValue={$authStore.authEnabled ? globalColoredActions : undefined} />
+								<AnimateIconsToggle globalValue={$authStore.authEnabled ? globalAnimateIcons : undefined} />
+								<IndentGuidesToggle globalValue={$authStore.authEnabled ? globalIndentGuides : undefined} />
+							{/if}
 							{#if $authStore.authEnabled}
 								<div class="text-xs text-muted-foreground flex items-start gap-1.5 mt-2 p-2 bg-muted/50 rounded-md">
 									<HelpCircle class="w-3.5 h-3.5 shrink-0 mt-0.5" />
 									<div>
-										<p>Personal theme preferences can be configured in your <a href="/profile" class="text-primary hover:underline">profile</a>.</p>
+										<p>These are the <strong>defaults for new users</strong> - they don't change your own view. To customise how <em>you</em> see the app, use the theme settings in your <a href="/profile" class="text-primary hover:underline">profile</a>.</p>
 									</div>
 								</div>
 							{/if}
 						</div>
 					</div>
+				<!-- Time + date format span the full card width, two columns, so they get
+				     room instead of crowding inside the narrow settings column. -->
+				<div class="mt-4 border-t pt-4">
+					<div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+						<div class="space-y-1">
+							<div class="flex items-center gap-3">
+								<Label>Time format</Label>
+								<ToggleSwitch
+									value={timeFormat}
+									leftValue="24h"
+									rightValue="12h"
+									onchange={(newFormat) => {
+										appSettings.setTimeFormat(newFormat as '12h' | '24h');
+										toast.success(`Time format set to ${newFormat === '12h' ? '12-hour (AM/PM)' : '24-hour'}`);
+									}}
+									disabled={!$canAccess('settings', 'edit')}
+								/>
+							</div>
+							<p class="text-xs text-muted-foreground">Clock display used throughout the app</p>
+						</div>
+						<div class="space-y-1">
+							<div class="flex items-center gap-3">
+								<Label>Date format</Label>
+								<Select.Root
+									type="single"
+									value={dateFormat}
+									onValueChange={(value) => {
+										if (value) {
+											appSettings.setDateFormat(value as DateFormat);
+											toast.success(`Date format set to ${value}`);
+										}
+									}}
+									disabled={!$canAccess('settings', 'edit')}
+								>
+									<Select.Trigger class="w-[180px]">
+										<Calendar class="w-4 h-4 mr-2" />
+										<span>{dateFormat}</span>
+									</Select.Trigger>
+									<Select.Content>
+										{#each dateFormatOptions as option}
+											<Select.Item value={option.value}>
+												<div class="flex items-center justify-between w-full gap-4">
+													<span>{option.label}</span>
+													<span class="text-xs text-muted-foreground">{option.example}</span>
+												</div>
+											</Select.Item>
+										{/each}
+									</Select.Content>
+								</Select.Root>
+							</div>
+							<p class="text-xs text-muted-foreground">Date display used throughout the app</p>
+						</div>
+					</div>
+				</div>
+				<!-- Editor theme spans the full card width so the live preview isn't cramped. -->
+				{#if !$authStore.authEnabled || globalThemeLoaded}
+					<div class="mt-4 border-t pt-4">
+						<EditorThemeSelector />
+					</div>
+				{/if}
 				</Card.Content>
 			</Card.Root>
 
@@ -745,6 +921,30 @@ services:
 			<Card.Root>
 				<Card.Header>
 					<Card.Title class="text-sm font-medium flex items-center gap-2">
+						<Layers class="w-4 h-4" />
+						Stack operation logs
+					</Card.Title>
+					<p class="text-xs text-muted-foreground">Choose which stack operations open the full compose-log popover. Unchecked operations run quietly with just a toast; their log still opens automatically if the operation fails.</p>
+				</Card.Header>
+				<Card.Content>
+					<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-3">
+						{#each STACK_LOG_OPERATIONS as op}
+							<div class="flex items-center gap-3">
+								<TogglePill
+									checked={stackLogOperations.includes(op.key)}
+									onchange={(checked) => toggleStackLogOperation(op.key, checked)}
+									disabled={!$canAccess('settings', 'edit')}
+								/>
+								<Label>{op.label}</Label>
+							</div>
+						{/each}
+					</div>
+				</Card.Content>
+			</Card.Root>
+
+			<Card.Root>
+				<Card.Header>
+					<Card.Title class="text-sm font-medium flex items-center gap-2">
 						<FileText class="w-4 h-4" />
 						Compose template
 					</Card.Title>
@@ -779,6 +979,10 @@ services:
 
 		<!-- Right column -->
 		<div class="space-y-4">
+			<!-- Held to settings:view: these describe how this installation is built
+			     and run, and showing the built-in defaults to somebody who may not read
+			     them would present a guess as the configuration. -->
+			{#if $canAccess('settings', 'view')}
 			<Card.Root>
 				<Card.Header>
 					<Card.Title class="text-sm font-medium flex items-center gap-2">
@@ -794,9 +998,23 @@ services:
 							value={defaultGrypeImage}
 							onblur={handleGrypeImageBlur}
 							disabled={!$canAccess('settings', 'edit')}
-							placeholder={"anchore/grype:v0.110.0"}
+							placeholder={DEFAULT_GRYPE_IMAGE}
 						/>
-						<p class="text-xs text-muted-foreground">Docker image for Grype scanner. Pin to a specific version for supply chain security.</p>
+						<div class="flex items-center gap-2 flex-wrap">
+							<p class="text-xs text-muted-foreground">Docker image for Grype scanner. Pin to a specific version for supply chain security.</p>
+							{#if newerScanners.grype}
+								<button
+									type="button"
+									class="inline-flex items-center gap-1 text-2xs px-1.5 py-0.5 rounded-full border border-green-500/30 bg-green-500/10 text-green-600 hover:bg-green-500/20 transition-colors"
+									onclick={() => applyScannerVersion('grype')}
+									disabled={!$canAccess('settings', 'edit')}
+								>
+									Use {newerScanners.grype}
+								</button>
+							{:else if scannerUpToDate.grype}
+								<span class="text-2xs text-muted-foreground">Up to date</span>
+							{/if}
+						</div>
 					</div>
 					<div class="space-y-2">
 						<Label for="trivy-image">Trivy image</Label>
@@ -805,9 +1023,28 @@ services:
 							value={defaultTrivyImage}
 							onblur={handleTrivyImageBlur}
 							disabled={!$canAccess('settings', 'edit')}
-							placeholder={"aquasec/trivy:0.69.3"}
+							placeholder={DEFAULT_TRIVY_IMAGE}
 						/>
-						<p class="text-xs text-muted-foreground">Docker image for Trivy scanner. Pin to a specific version for supply chain security.</p>
+						<div class="flex items-center gap-2 flex-wrap">
+							<p class="text-xs text-muted-foreground">Docker image for Trivy scanner. Pin to a specific version for supply chain security.</p>
+							{#if newerScanners.trivy}
+								<button
+									type="button"
+									class="inline-flex items-center gap-1 text-2xs px-1.5 py-0.5 rounded-full border border-green-500/30 bg-green-500/10 text-green-600 hover:bg-green-500/20 transition-colors"
+									onclick={() => applyScannerVersion('trivy')}
+									disabled={!$canAccess('settings', 'edit')}
+								>
+									Use {newerScanners.trivy}
+								</button>
+							{:else if scannerUpToDate.trivy}
+								<span class="text-2xs text-muted-foreground">Up to date</span>
+							{/if}
+						</div>
+						<div class="pt-1">
+							<Button variant="outline" size="sm" onclick={checkScannerVersions} disabled={checkingScannerVersions}>
+								{checkingScannerVersions ? 'Checking...' : 'Check for newer scanner versions'}
+							</Button>
+						</div>
 					</div>
 					<div class="space-y-2">
 						<Label for="grype-args">Default Grype arguments</Label>
@@ -816,7 +1053,7 @@ services:
 							value={defaultGrypeArgs}
 							onblur={handleGrypeArgsBlur}
 							disabled={!$canAccess('settings', 'edit')}
-							placeholder={"-o json -v {image}"}
+							placeholder={DEFAULT_GRYPE_ARGS}
 						/>
 						<p class="text-xs text-muted-foreground">Use <code class="bg-muted px-1 rounded">{'{image}'}</code> as placeholder for the image name</p>
 					</div>
@@ -827,7 +1064,7 @@ services:
 							value={defaultTrivyArgs}
 							onblur={handleTrivyArgsBlur}
 							disabled={!$canAccess('settings', 'edit')}
-							placeholder={"image --format json {image}"}
+							placeholder={DEFAULT_TRIVY_ARGS}
 						/>
 						<p class="text-xs text-muted-foreground">Use <code class="bg-muted px-1 rounded">{'{image}'}</code> as placeholder for the image name</p>
 					</div>
@@ -898,6 +1135,47 @@ services:
 					</div>
 				</Card.Content>
 			</Card.Root>
+			{/if}
+
+			<!-- Held to settings:view with the rest: it decides how every update check
+			     compares versions, and the defaults shown to somebody who may not read
+			     it would be saved over the real configuration on the first change. -->
+			{#if $canAccess('settings', 'view')}
+			<Card.Root>
+				<Card.Header>
+					<Card.Title class="text-sm font-medium flex items-center gap-2">
+						<Clock class="w-4 h-4" />
+						Minimum image age
+						<Tooltip.Provider delayDuration={100}>
+							<Tooltip.Root>
+								<Tooltip.Trigger>
+									<HelpCircle class="w-4 h-4 text-muted-foreground cursor-help" />
+								</Tooltip.Trigger>
+								<Tooltip.Portal>
+									<Tooltip.Content side="right" sideOffset={8} class="!w-96 space-y-2">
+										<p>The age comes from the image's creation time in the registry, which records the build rather than the publication. When the registry gives no usable time, Dockhand counts from when it first saw that digest.</p>
+										<p>An environment can override this value. Manual pulls warn and proceed; stack deployments, including scheduled Git ones, are exempt.</p>
+										<p>A newer image restarts the wait on itself, so a project publishing faster than this age never updates automatically.</p>
+									</Tooltip.Content>
+								</Tooltip.Portal>
+							</Tooltip.Root>
+						</Tooltip.Provider>
+					</Card.Title>
+					<Card.Description>
+						Hold automatic container updates until a new image has been out for a while.
+					</Card.Description>
+				</Card.Header>
+				<Card.Content class="flex items-end gap-3">
+					<div class="space-y-2 flex-1">
+						<Label for="minimum-release-age">Hours (0–720)</Label>
+						<Input id="minimum-release-age" type="number" min="0" max="720" step="1" bind:value={releaseAgeHours} disabled={releaseAgeOverridden || !$canAccess('settings', 'edit')} />
+					</div>
+					<Button onclick={saveReleaseAge} disabled={releaseAgeSaving || releaseAgeOverridden || !$canAccess('settings', 'edit')}>Save</Button>
+				</Card.Content>
+				{#if releaseAgeOverridden}
+					<p class="px-6 pb-4 text-xs text-muted-foreground">Set by MINIMUM_RELEASE_AGE_HOURS.</p>
+				{/if}
+			</Card.Root>
 
 			<Card.Root>
 				<Card.Header>
@@ -917,10 +1195,16 @@ services:
 						bind:maxBump={semverMaxBump}
 						bind:matchFlavor={semverMatchFlavor}
 						bind:includePrerelease={semverIncludePrerelease}
+						bind:rejectOlderImages={semverRejectOlderImages}
 					/>
 				</Card.Content>
 			</Card.Root>
+			{/if}
 
+			<!-- Held to settings:view: these describe how this installation is built
+			     and run, and showing the built-in defaults to somebody who may not read
+			     them would present a guess as the configuration. -->
+			{#if $canAccess('settings', 'view')}
 			<Card.Root>
 				<Card.Header>
 					<Card.Title class="text-sm font-medium flex items-center gap-2">
@@ -1091,6 +1375,50 @@ services:
 							</div>
 						</div>
 					</div>
+					<div class="space-y-1">
+						<div class="flex items-center gap-3">
+							<Label for="scan-retention-keep">Vulnerability scan retention</Label>
+							<TogglePill
+								checked={scanRetentionEnabled}
+								onchange={handleScanRetentionEnabledChange}
+								disabled={!$canAccess('settings', 'edit')}
+							/>
+						</div>
+						<p class="text-xs text-muted-foreground">
+							Keep the newest scans per image and drop scans for images the host no longer has
+						</p>
+						<div class="flex items-center gap-2 mt-2">
+							<Input
+								id="scan-retention-keep"
+								type="number"
+								min="1"
+								max="100"
+								value={scanRetentionKeep}
+								onchange={handleScanRetentionKeepChange}
+								disabled={!$canAccess('settings', 'edit') || !scanRetentionEnabled}
+								class="w-20"
+							/>
+							<span class="text-sm text-muted-foreground">newest per image</span>
+							<Input
+								id="scan-retention-grace"
+								type="number"
+								min="0"
+								max="365"
+								value={scanRetentionGraceDays}
+								onchange={handleScanRetentionGraceChange}
+								disabled={!$canAccess('settings', 'edit') || !scanRetentionEnabled}
+								class="w-20 ml-3"
+							/>
+							<span class="text-sm text-muted-foreground">days grace</span>
+							<div class="ml-auto">
+								<CronEditor
+									value={scanRetentionCron}
+									onchange={handleScanRetentionCronChange}
+									disabled={!$canAccess('settings', 'edit') || !scanRetentionEnabled}
+								/>
+							</div>
+						</div>
+					</div>
 					<div class="space-y-1 pt-2 border-t">
 						<div class="flex items-center gap-3">
 							<Label>Volume helper cleanup</Label>
@@ -1123,28 +1451,65 @@ services:
 					</div>
 					<div class="space-y-1 pt-2 border-t">
 						<div class="flex items-center gap-3">
-							<Label>Protect scanner images from prune</Label>
+							<Label>Deploy log reconcile</Label>
+							<Tooltip.Provider delayDuration={100}>
+								<Tooltip.Root>
+									<Tooltip.Trigger>
+										<HelpCircle class="w-4 h-4 text-muted-foreground cursor-help" />
+									</Tooltip.Trigger>
+									<Tooltip.Portal>
+										<Tooltip.Content side="right" sideOffset={8} class="!w-80">
+											Every deploy from Dockhand keeps a log file on disk, linked to its run in the
+											Deploys tab. This job runs on a schedule to keep the two in sync: it deletes
+											orphaned log files whose deploy run was already removed, and marks a run whose
+											log file has gone missing (so the Deploys tab shows "log unavailable" instead
+											of a blank). It never deletes a deploy run itself.
+										</Tooltip.Content>
+									</Tooltip.Portal>
+								</Tooltip.Root>
+							</Tooltip.Provider>
+							<TogglePill
+								checked={deployLogReconcileEnabled}
+								onchange={handleDeployLogReconcileEnabledChange}
+								disabled={!$canAccess('settings', 'edit')}
+							/>
+						</div>
+						<p class="text-xs text-muted-foreground">Keeps deploy-log files in sync with their deploy records: removes logs whose run is gone, and flags runs whose log went missing (never deletes a run).</p>
+						{#if deployLogReconcileEnabled}
+							<div class="mt-2">
+								<CronEditor
+									value={deployLogReconcileCron}
+									onchange={handleDeployLogReconcileCronChange}
+									disabled={!$canAccess('settings', 'edit')}
+								/>
+							</div>
+						{/if}
+					</div>
+					<div class="space-y-1 pt-2 border-t">
+						<div class="flex items-center gap-3">
+							<Label>Protect helper images from prune</Label>
 							<Tooltip.Root>
 								<Tooltip.Trigger>
 									<HelpCircle class="w-3.5 h-3.5 text-muted-foreground" />
 								</Tooltip.Trigger>
 								<Tooltip.Content side="top" class="w-96 max-w-[90vw]">
-									<p>When ON, "Prune all unused" skips Dockhand's grype and trivy scanner images so the next scan doesn't have to re-pull them (and re-download the ~100MB vuln database). When OFF, prune behaves like vanilla Docker and may remove them.</p>
+									<p>When ON, "Prune all unused" skips the images Dockhand runs its own jobs from: the grype and trivy scanners, and the backup helper. Each is pulled once and reused, so keeping them saves the next scan re-downloading the ~100MB vulnerability database, and the next backup re-pulling the helper - which on a host without internet access would fail outright. When OFF, prune behaves like vanilla Docker and may remove them.</p>
 								</Tooltip.Content>
 							</Tooltip.Root>
 							<TogglePill
 								checked={$appSettings.protectScannerImages}
 								onchange={(checked) => {
 									appSettings.setProtectScannerImages(checked);
-									toast.success(checked ? 'Scanner images will be skipped during prune' : 'Scanner images will be pruned with everything else');
+									toast.success(checked ? 'Helper images will be skipped during prune' : 'Helper images will be pruned with everything else');
 								}}
 								disabled={!$canAccess('settings', 'edit')}
 							/>
 						</div>
-						<p class="text-xs text-muted-foreground">Skip grype and trivy images during "Prune all unused"</p>
+						<p class="text-xs text-muted-foreground">Skip the grype, trivy and backup-helper images during "Prune all unused"</p>
 					</div>
 				</Card.Content>
 			</Card.Root>
+			{/if}
 
 			<Card.Root>
 				<Card.Header>
@@ -1157,14 +1522,14 @@ services:
 					<div class="space-y-3">
 						<div class="space-y-1">
 							<div class="flex items-center gap-3">
-								<Label>Label filter matching</Label>
+								<Label>Environment label filter matching</Label>
 								<Tooltip.Root>
 									<Tooltip.Trigger>
 										<HelpCircle class="w-3.5 h-3.5 text-muted-foreground" />
 									</Tooltip.Trigger>
 									<Tooltip.Content class="w-80">
 										<p class="text-xs">
-											Controls how multiple selected labels filter environments on the dashboard.
+											Controls how multiple selected environment labels filter environments on the dashboard.
 											<strong>"Any"</strong>: shows environments that have at least one of the selected labels.
 											<strong>"All"</strong>: shows only environments that have every selected label.
 										</p>

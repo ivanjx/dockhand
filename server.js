@@ -66,25 +66,44 @@ if (useHttps) {
 		process.exit(1);
 	}
 
-	// Parse cert metadata so operators can confirm they mounted the right file.
+	// Keep in sync with src/lib/server/x509-display-core.ts (this file runs against
+	// ./build and cannot import from src). Node leaves subject/issuer undefined when
+	// the cert has an empty distinguished name, as newer Let's Encrypt profiles do.
+	const formatCertName = (name) => {
+		if (typeof name !== 'string') return '(none)';
+		const trimmed = name.trim();
+		return trimmed === '' ? '(none)' : trimmed.replace(/\n/g, ', ');
+	};
+	const daysUntilExpiry = (validTo, now) => {
+		if (typeof validTo !== 'string') return null;
+		const expiresAt = new Date(validTo).getTime();
+		if (Number.isNaN(expiresAt)) return null;
+		return Math.floor((expiresAt - now) / 86400000);
+	};
+	const expiryLine = (daysLeft) => {
+		if (daysLeft === null) return { text: 'cert expiry:  (unknown)', warn: false };
+		if (daysLeft < 0) {
+			return { text: `WARNING: certificate expired ${-daysLeft} day(s) ago`, warn: true };
+		}
+		if (daysLeft < 30) {
+			return { text: `WARNING: certificate expires in ${daysLeft} day(s)`, warn: true };
+		}
+		return { text: `cert expires in ${daysLeft} day(s)`, warn: false };
+	};
+
+	// Cert metadata is logged so operators can confirm they mounted the right file.
+	// It is diagnostics only, so a cert TLS itself accepts must still start the
+	// server - hence the log failure is reported and swallowed, not fatal.
 	try {
 		const x509 = new X509Certificate(certPem);
-		console.log(`[HTTPS] cert subject: ${x509.subject.replace(/\n/g, ', ')}`);
-		console.log(`[HTTPS] cert issuer:  ${x509.issuer.replace(/\n/g, ', ')}`);
+		console.log(`[HTTPS] cert subject: ${formatCertName(x509.subject)}`);
+		console.log(`[HTTPS] cert issuer:  ${formatCertName(x509.issuer)}`);
 		console.log(`[HTTPS] cert SAN:     ${x509.subjectAltName || '(none)'}`);
-		console.log(`[HTTPS] cert valid:   ${x509.validFrom} → ${x509.validTo}`);
-		const expiresAt = new Date(x509.validTo).getTime();
-		const daysLeft = Math.floor((expiresAt - Date.now()) / 86400000);
-		if (daysLeft < 0) {
-			console.warn(`[HTTPS] WARNING: certificate expired ${-daysLeft} day(s) ago`);
-		} else if (daysLeft < 30) {
-			console.warn(`[HTTPS] WARNING: certificate expires in ${daysLeft} day(s)`);
-		} else {
-			console.log(`[HTTPS] cert expires in ${daysLeft} day(s)`);
-		}
+		console.log(`[HTTPS] cert valid:   ${x509.validFrom} -> ${x509.validTo}`);
+		const expiry = expiryLine(daysUntilExpiry(x509.validTo, Date.now()));
+		(expiry.warn ? console.warn : console.log)(`[HTTPS] ${expiry.text}`);
 	} catch (e) {
-		console.error(`[HTTPS] Failed to parse certificate: ${e.message}`);
-		process.exit(1);
+		console.warn(`[HTTPS] Could not read certificate metadata: ${e.message}`);
 	}
 
 	const tlsOptions = { cert: certPem, key: keyPem };
@@ -153,8 +172,16 @@ globalThis.__terminalHandleExecMessage = (msg) => {
 	}
 
 	if (msg.type === 'exec_output') {
-		const data = Buffer.from(msg.data, 'base64').toString('utf-8');
-		session.ws.send(JSON.stringify({ type: 'output', data }));
+		const bytes = Buffer.from(msg.data, 'base64');
+		// Attach sessions carry a stream state: demultiplex non-TTY frames before
+		// forwarding. Exec sessions are raw TTY text and pass straight through.
+		if (session.streamState) {
+			for (const text of processDockerStreamChunk(bytes, session.streamState)) {
+				if (text) session.ws.send(JSON.stringify({ type: 'output', data: text }));
+			}
+		} else {
+			session.ws.send(JSON.stringify({ type: 'output', data: bytes.toString('utf-8') }));
+		}
 		return;
 	}
 
@@ -174,6 +201,11 @@ globalThis.__terminalHandleExecMessage = (msg) => {
 
 // Handle WebSocket upgrade
 server.on('upgrade', async (req, socket, head) => {
+	// The socket is bare until ws adopts it in handleUpgrade below, and authentication
+	// awaits a database lookup first. A peer that resets during that window makes the
+	// write of our own 401/500 throw ECONNRESET with no listener, which is fatal.
+	socket.on('error', () => {});
+
 	const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
 	// Only handle our specific WebSocket paths
@@ -239,6 +271,10 @@ wss.on('connection', (ws, req) => {
  * - __terminalResizeContainer(containerId, cols, rows, envId) - resizes an attached TTY
  */
 
+// NOTE: createDockerStreamState/decodeChunkedDockerBody/processDockerStreamChunk below
+// mirror src/lib/server/docker-stream-core.ts (the tested source of truth). server.js
+// runs against ./build and cannot import the TS core at runtime, so the logic is kept
+// inline here; keep the two in sync (vite.config.ts imports the core directly).
 function buildDockerStreamRequest(path, target, body = '') {
 	const host = target.host || 'localhost';
 	const tokenHeader = target.hawserToken ? `X-Hawser-Token: ${target.hawserToken}\r\n` : '';
@@ -255,6 +291,12 @@ function buildDockerStreamRequest(path, target, body = '') {
 	);
 }
 
+// Mirrors translateAttachInput in docker-stream-core.ts: for non-TTY attach map a lone
+// \r (xterm Enter) to \n (no pty to do it); exec / TTY attach pass through. Keep in sync.
+function translateAttachInput(data, nonTtyAttach) {
+	if (!nonTtyAttach) return data;
+	return data.replace(/\r(?!\n)/g, '\n');
+}
 function createDockerStreamState(multiplexed = false) {
 	return {
 		headersStripped: false,
@@ -360,6 +402,14 @@ function processDockerStreamChunk(data, state) {
 }
 
 async function handleTerminalConnection(ws, url, connId) {
+	// Registered before the first await: this runs unawaited, so every await below is a
+	// window in which a closed tab emits 'error' on a socket with no listener, which is
+	// fatal rather than a dropped connection.
+	ws.on('error', (err) => {
+		console.error('[Terminal WS] Connection error:', err.message);
+		wsConnections.delete(connId);
+	});
+
 	const pathParts = url.pathname.split('/');
 	const containerIdIndex = pathParts.indexOf('containers') + 1;
 	const containerId = pathParts[containerIdIndex];
@@ -375,7 +425,23 @@ async function handleTerminalConnection(ws, url, connId) {
 		return;
 	}
 
-	if (ws.__auth && typeof globalThis.__canAccessEnvForUser === 'function') {
+	// Fail closed: a terminal upgrade is rejected with 401 before it reaches here unless
+	// authenticated, so ws.__auth is always set. Assert it explicitly so the env/exec
+	// gates below never run on a null auth (never rely on the handshake invariant alone).
+	if (!ws.__auth) {
+		ws.close(1008, 'unauthenticated');
+		return;
+	}
+	if (
+		typeof globalThis.__canAccessEnvForUser !== 'function' ||
+		typeof globalThis.__canExecForUser !== 'function'
+	) {
+		ws.close(1011, 'service unavailable');
+		return;
+	}
+
+
+	if (typeof globalThis.__canAccessEnvForUser === 'function') {
 		try {
 			const ok = await globalThis.__canAccessEnvForUser(ws.__auth, envId);
 			if (!ok) {
@@ -391,8 +457,8 @@ async function handleTerminalConnection(ws, url, connId) {
 		}
 	}
 
-	// Opening a shell requires the containers:exec permission, same as the REST exec endpoint.
-	if (ws.__auth && typeof globalThis.__canExecForUser === 'function') {
+	// Both exec and attach require containers:exec, same as the REST exec endpoint.
+	if (typeof globalThis.__canExecForUser === 'function') {
 		try {
 			const allowed = await globalThis.__canExecForUser(ws.__auth, envId);
 			if (!allowed) {
@@ -418,14 +484,22 @@ async function handleTerminalConnection(ws, url, connId) {
 			target = { type: 'socket', connectionType: 'socket', socketPath: process.env.DOCKER_SOCKET || '/var/run/docker.sock' };
 		}
 
-		// Hawser Edge currently exposes an exec-only terminal protocol.
+		// Hawser Edge relays exec and (for capable agents) attach through the agent.
 		if (target.connectionType === 'hawser-edge') {
+			let multiplexed = false;
 			if (mode === 'attach') {
-				ws.send(JSON.stringify({ type: 'error', message: 'Container attach is not supported for Edge environments' }));
-				ws.close();
-				return;
+				let containerTty = false;
+				if (typeof globalThis.__terminalGetContainerTty === 'function') {
+					try {
+						containerTty = await globalThis.__terminalGetContainerTty(containerId, envId);
+					} catch {
+						// Keep multiplexing enabled if the TTY setting cannot be read.
+					}
+				}
+				multiplexed = !containerTty;
 			}
-			handleEdgeExec(ws, connId, containerId, shell, user, target.environmentId);
+			if (ws.readyState !== 1) return;
+			handleEdgeExec(ws, connId, containerId, shell, user, target.environmentId, mode, multiplexed);
 			return;
 		}
 
@@ -455,6 +529,8 @@ async function handleTerminalConnection(ws, url, connId) {
 			streamPath = `/exec/${execId}/start`;
 			streamBody = JSON.stringify({ Detach: false, Tty: true });
 		}
+
+		if (ws.readyState !== 1) return;
 
 		// Open raw bidirectional stream to Docker for the attach or exec session.
 		let dockerStream;
@@ -511,7 +587,8 @@ async function handleTerminalConnection(ws, url, connId) {
 			try {
 				const msg = JSON.parse(data.toString());
 				if (msg.type === 'input' && msg.data) {
-					dockerStream.write(msg.data);
+					// Non-TTY attach has no pty to convert Enter (\r) to a newline.
+					dockerStream.write(translateAttachInput(msg.data, mode === 'attach' && streamState.multiplexed));
 				} else if (msg.type === 'resize' && msg.cols && msg.rows) {
 					if (mode === 'attach') {
 						if (typeof globalThis.__terminalResizeContainer === 'function') {
@@ -562,30 +639,30 @@ async function handleTerminalConnection(ws, url, connId) {
 	ws.on('close', () => {
 		wsConnections.delete(connId);
 	});
-
-	// Without an 'error' listener, an emitted socket error (abrupt disconnect,
-	// ECONNRESET) is re-thrown as an uncaught exception and crashes the process.
-	ws.on('error', (err) => {
-		console.error('[Terminal WS] Connection error:', err.message);
-		wsConnections.delete(connId);
-	});
 }
 
 /**
- * Handle Hawser Edge exec session.
- * Sends exec commands through the Hawser WebSocket relay.
+ * Handle Hawser Edge exec or attach session.
+ * Sends exec/attach commands through the Hawser WebSocket relay. Attach reuses the
+ * exec_* protocol with attach:true; for non-TTY containers the agent pipes a
+ * multiplexed stream, demultiplexed here via the session's stream state.
  */
-function handleEdgeExec(ws, connId, containerId, shell, user, environmentId) {
+function handleEdgeExec(ws, connId, containerId, shell, user, environmentId, mode = 'exec', multiplexed = false) {
 	if (typeof globalThis.__hawserSendMessage !== 'function') {
 		ws.send(JSON.stringify({ type: 'error', message: 'Edge agent handler not ready' }));
 		ws.close();
 		return;
 	}
 
+	const attach = mode === 'attach';
 	const execId = randomUUID();
-	edgeExecSessions.set(execId, { ws, execId, environmentId });
+	// Attach output is a raw hijacked stream (no HTTP headers); only the multiplexing
+	// demux is needed, so seed the state with headersStripped already true.
+	const streamState = attach ? createDockerStreamState(multiplexed) : null;
+	if (streamState) streamState.headersStripped = true;
+	edgeExecSessions.set(execId, { ws, execId, environmentId, streamState });
 
-	// Send exec_start to the Hawser agent
+	// Send exec_start (attach:true reuses the exec relay) to the Hawser agent
 	const execStartMsg = JSON.stringify({
 		type: 'exec_start',
 		execId,
@@ -593,7 +670,8 @@ function handleEdgeExec(ws, connId, containerId, shell, user, environmentId) {
 		cmd: shell,
 		user,
 		cols: 120,
-		rows: 30
+		rows: 30,
+		attach
 	});
 
 	const sent = globalThis.__hawserSendMessage(environmentId, execStartMsg);
@@ -609,10 +687,12 @@ function handleEdgeExec(ws, connId, containerId, shell, user, environmentId) {
 		try {
 			const msg = JSON.parse(data.toString());
 			if (msg.type === 'input' && msg.data) {
+				// Non-TTY attach has no pty to convert Enter (\r) to a newline.
+				const inputData = translateAttachInput(msg.data, attach && multiplexed);
 				const inputMsg = JSON.stringify({
 					type: 'exec_input',
 					execId,
-					data: Buffer.from(msg.data).toString('base64')
+					data: Buffer.from(inputData).toString('base64')
 				});
 				globalThis.__hawserSendMessage(environmentId, inputMsg);
 			} else if (msg.type === 'resize' && msg.cols && msg.rows) {

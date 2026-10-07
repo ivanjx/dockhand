@@ -1,14 +1,9 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { authorize } from '$lib/server/authorize';
+import { parseEnvParam } from '$lib/server/env-param';
 import { updateStackSource, getStackSource } from '$lib/server/db';
 import { saveStackIcon, deleteStackIcon, getStackIconBuffer, looksLikeImage } from '$lib/server/stack-icons';
-
-function parseEnv(raw: string | null): number | null {
-	if (!raw) return null;
-	const n = parseInt(raw, 10);
-	return Number.isNaN(n) ? null : n;
-}
 
 /**
  * @openapi
@@ -21,10 +16,12 @@ function parseEnv(raw: string | null): number | null {
  */
 export const GET: RequestHandler = async ({ params, url, cookies }) => {
 	const auth = await authorize(cookies);
-	const envId = parseEnv(url.searchParams.get('env'));
+	const envId = parseEnvParam(url.searchParams.get('env'));
 	if (auth.authEnabled && !(await auth.can('stacks', 'view', envId ?? undefined))) {
 		return json({ error: 'Permission denied' }, { status: 403 });
 	}
+	const envAccessDenied = await auth.requireEnvAccess(envId);
+	if (envAccessDenied) return envAccessDenied;
 	const buffer = getStackIconBuffer(params.name, envId);
 	if (!buffer) return json({ error: 'No custom icon' }, { status: 404 });
 	return new Response(new Uint8Array(buffer), {
@@ -50,10 +47,12 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
  */
 export const POST: RequestHandler = async ({ params, url, request, cookies }) => {
 	const auth = await authorize(cookies);
-	const envId = parseEnv(url.searchParams.get('env'));
+	const envId = parseEnvParam(url.searchParams.get('env'));
 	if (auth.authEnabled && !(await auth.can('stacks', 'edit', envId ?? undefined))) {
 		return json({ error: 'Permission denied' }, { status: 403 });
 	}
+	const envAccessDenied = await auth.requireEnvAccess(envId);
+	if (envAccessDenied) return envAccessDenied;
 	const data = await request.json();
 
 	let iconValue: string;
@@ -95,10 +94,12 @@ export const POST: RequestHandler = async ({ params, url, request, cookies }) =>
  */
 export const DELETE: RequestHandler = async ({ params, url, cookies }) => {
 	const auth = await authorize(cookies);
-	const envId = parseEnv(url.searchParams.get('env'));
+	const envId = parseEnvParam(url.searchParams.get('env'));
 	if (auth.authEnabled && !(await auth.can('stacks', 'edit', envId ?? undefined))) {
 		return json({ error: 'Permission denied' }, { status: 403 });
 	}
+	const envAccessDenied = await auth.requireEnvAccess(envId);
+	if (envAccessDenied) return envAccessDenied;
 	deleteStackIcon(params.name, envId);
 	await updateStackSource(params.name, envId, { icon: null });
 	return json({ success: true });

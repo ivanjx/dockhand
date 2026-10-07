@@ -15,6 +15,7 @@
 
 import { createClient } from '@1password/sdk';
 import type { SecretProvider, ServiceAccountConfig, TestConnectionResult } from './shared';
+import { stripSurroundingQuotes } from './shared';
 
 const INTEGRATION_NAME = 'Dockhand';
 const INTEGRATION_VERSION = '1.0.0';
@@ -49,7 +50,7 @@ export const serviceAccountProvider: SecretProvider<ServiceAccountConfig> = {
 	supportsBulk: true,
 
 	isReference(value: unknown): value is string {
-		return typeof value === 'string' && value.trim().startsWith('op://');
+		return typeof value === 'string' && stripSurroundingQuotes(value).startsWith('op://');
 	},
 
 	async testConnection({ token }: ServiceAccountConfig): Promise<TestConnectionResult> {

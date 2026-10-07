@@ -2,6 +2,7 @@
 	import { HardDrive, Image, Database, Box, Hammer, Loader2 } from 'lucide-svelte';
 	import { formatBytes } from '$lib/utils/format';
 	import { Chart, Svg, Pie, Arc } from 'layerchart';
+	import { diskSegmentPath, type DiskSegmentKey } from '$lib/utils/disk-segment-path';
 
 	interface Props {
 		imagesSize: number;
@@ -11,9 +12,26 @@
 		withBorder?: boolean;
 		showPieChart?: boolean;
 		loading?: boolean;
+		onsegmentclick?: (key: DiskSegmentKey) => void;
 	}
 
-	let { imagesSize, volumesSize, containersSize = 0, buildCacheSize = 0, withBorder = true, showPieChart = false, loading = false }: Props = $props();
+	let { imagesSize, volumesSize, containersSize = 0, buildCacheSize = 0, withBorder = true, showPieChart = false, loading = false, onsegmentclick }: Props = $props();
+
+	// Segments without a route (build cache) fall through to the tile click.
+	function isLinked(key: DiskSegmentKey): boolean {
+		return !!onsegmentclick && diskSegmentPath(key) !== null;
+	}
+
+	function handleSegmentClick(e: MouseEvent, key: DiskSegmentKey) {
+		if (!isLinked(key)) return;
+		e.stopPropagation();
+		onsegmentclick?.(key);
+	}
+
+	// DraggableGrid treats pointerdown/up as a tile click, so stop it here too.
+	function handleSegmentPointerDown(e: PointerEvent, key: DiskSegmentKey) {
+		if (isLinked(key)) e.stopPropagation();
+	}
 
 	const totalSize = $derived(imagesSize + volumesSize + containersSize + buildCacheSize);
 
@@ -27,12 +45,12 @@
 
 	// Pie chart data - only include non-zero values
 	const pieData = $derived(
-		[
+		([
 			{ key: 'images', label: 'Images', value: imagesSize, color: '#0ea5e9' },
 			{ key: 'containers', label: 'Containers', value: containersSize, color: '#10b981' },
 			{ key: 'volumes', label: 'Volumes', value: volumesSize, color: '#f59e0b' },
 			{ key: 'buildCache', label: 'Build cache', value: buildCacheSize, color: '#8b5cf6' }
-		].filter(d => d.value > 0)
+		] satisfies { key: DiskSegmentKey; label: string; value: number; color: string }[]).filter(d => d.value > 0)
 	);
 
 	function getPercentage(value: number): number {
@@ -101,7 +119,9 @@
 											padAngle={0.02}
 											cornerRadius={2}
 											fill={arc.data.color}
-											class="transition-opacity hover:opacity-80"
+											class="transition-opacity hover:opacity-80 {isLinked(arc.data.key) ? 'cursor-pointer' : ''}"
+											onclick={(e: MouseEvent) => handleSegmentClick(e, arc.data.key)}
+											onpointerdown={(e: PointerEvent) => handleSegmentPointerDown(e, arc.data.key)}
 										/>
 									{/each}
 								{/snippet}
@@ -113,7 +133,13 @@
 				<!-- Legend with values (vertical) -->
 				<div class="flex flex-col gap-1.5 text-xs flex-1">
 					{#each pieData as item}
-						<div class="flex items-center gap-1.5">
+						<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<!-- svelte-ignore a11y_click_events_have_key_events -->
+						<div
+							class="flex items-center gap-1.5 {isLinked(item.key) ? 'cursor-pointer hover:bg-muted/50 -mx-1 px-1 rounded transition-colors' : ''}"
+							onclick={(e) => handleSegmentClick(e, item.key)}
+							onpointerdown={(e) => handleSegmentPointerDown(e, item.key)}
+						>
 							<div class="w-2 h-2 rounded-full shrink-0" style="background-color: {item.color}"></div>
 							<span class="text-muted-foreground truncate">{item.label}</span>
 							<span class="ml-auto font-medium tabular-nums">{formatBytes(item.value)}</span>

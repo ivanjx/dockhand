@@ -6,6 +6,8 @@
  */
 
 import type { SecretProviderConfig, SecretProviderType } from './secretproviders/shared';
+import { normalizeColor, type Tag, type TagColor } from '$lib/utils/tags-core';
+import { passkeysEnabledFromSetting } from '$lib/utils/passkey-availability';
 import { mergeProviderConfigForWrite } from './secretproviders/shared';
 import {
 	db,
@@ -34,6 +36,7 @@ import {
 	environmentNotifications,
 	authSettings,
 	users,
+	passkeyCredentials,
 	sessions,
 	roles,
 	userRoles,
@@ -45,6 +48,9 @@ import {
 	secretProviders,
 	stackSources,
 	containerIconOverrides,
+	tags,
+	containerTags,
+	stackTags,
 	vulnerabilityScans,
 	auditLogs,
 	containerEvents,
@@ -92,6 +98,7 @@ import { encrypt, decrypt, decryptStrict, isEncrypted } from './encryption.js';
 import { parseEnvInterpolation } from './env-interpolation';
 import { parseInjectedSecretKeys, serializeInjectedSecretKeys } from './stack-secret-keys';
 import { invalidateVulnerabilitiesCache } from './vulnerabilities-cache';
+import { DEFAULT_RETENTION, stripUnstorableEscapes, type ScanRecord } from './scan-retention-core';
 
 // Re-export for backwards compatibility
 export { db, isPostgres, isSqlite };
@@ -357,6 +364,20 @@ export async function getSecretProviderById(id: number): Promise<SecretProviderW
 	};
 }
 
+/** Lightweight existence check (no config decrypt), for validating a bound provider id. */
+export async function secretProviderExists(id: number): Promise<boolean> {
+	const rows = await db.select({ id: secretProviders.id }).from(secretProviders).where(eq(secretProviders.id, id));
+	return rows.length > 0;
+}
+
+/** Stacks currently bound to a secret provider, so a delete can warn which ones lose it. */
+export async function getStacksUsingSecretProvider(id: number): Promise<Array<{ stackName: string; environmentId: number | null }>> {
+	return db
+		.select({ stackName: stackSources.stackName, environmentId: stackSources.environmentId })
+		.from(stackSources)
+		.where(eq(stackSources.secretProviderId, id));
+}
+
 export async function createSecretProvider(data: {
 	type: SecretProviderType;
 	name: string;
@@ -541,8 +562,9 @@ export async function getUserThemePreferences(userId: number): Promise<{
 	coloredActionButtons: boolean;
 	actionIconSize: string;
 	editorIndentGuides: boolean;
+	editorTheme: string;
 }> {
-	const [lightTheme, darkTheme, font, fontSize, gridFontSize, terminalFont, editorFont, animateIcons, coloredActionButtons, actionIconSize, editorIndentGuides] = await Promise.all([
+	const [lightTheme, darkTheme, font, fontSize, gridFontSize, terminalFont, editorFont, animateIcons, coloredActionButtons, actionIconSize, editorIndentGuides, editorTheme] = await Promise.all([
 		getUserSetting(userId, 'light_theme'),
 		getUserSetting(userId, 'dark_theme'),
 		getUserSetting(userId, 'font'),
@@ -553,7 +575,8 @@ export async function getUserThemePreferences(userId: number): Promise<{
 		getUserSetting(userId, 'animate_icons'),
 		getUserSetting(userId, 'colored_action_buttons'),
 		getUserSetting(userId, 'action_icon_size'),
-		getUserSetting(userId, 'editor_indent_guides')
+		getUserSetting(userId, 'editor_indent_guides'),
+		getUserSetting(userId, 'editor_theme')
 	]);
 	return {
 		lightTheme: lightTheme || 'default',
@@ -569,13 +592,14 @@ export async function getUserThemePreferences(userId: number): Promise<{
 		coloredActionButtons: coloredActionButtons === 'true',
 		actionIconSize: actionIconSize || 'normal',
 		// Default OFF — only true when explicitly stored (#1410)
-		editorIndentGuides: editorIndentGuides === 'true'
+		editorIndentGuides: editorIndentGuides === 'true',
+		editorTheme: editorTheme || 'default'
 	};
 }
 
 export async function setUserThemePreferences(
 	userId: number,
-	prefs: { lightTheme?: string; darkTheme?: string; font?: string; fontSize?: string; gridFontSize?: string; terminalFont?: string; editorFont?: string; animateIcons?: boolean; coloredActionButtons?: boolean; actionIconSize?: string; editorIndentGuides?: boolean }
+	prefs: { lightTheme?: string; darkTheme?: string; font?: string; fontSize?: string; gridFontSize?: string; terminalFont?: string; editorFont?: string; animateIcons?: boolean; coloredActionButtons?: boolean; actionIconSize?: string; editorIndentGuides?: boolean; editorTheme?: string }
 ): Promise<void> {
 	const updates: Promise<void>[] = [];
 	if (prefs.lightTheme !== undefined) {
@@ -610,6 +634,9 @@ export async function setUserThemePreferences(
 	}
 	if (prefs.editorIndentGuides !== undefined) {
 		updates.push(setUserSetting(userId, 'editor_indent_guides', prefs.editorIndentGuides ? 'true' : 'false'));
+	}
+	if (prefs.editorTheme !== undefined) {
+		updates.push(setUserSetting(userId, 'editor_theme', prefs.editorTheme));
 	}
 	await Promise.all(updates);
 }
@@ -669,6 +696,48 @@ export async function setSidebarPreferences(prefs: SidebarPreferences, userId?: 
 
 export async function deleteSidebarPreferences(userId?: number): Promise<void> {
 	const key = userId ? `user:${userId}:sidebar_preferences` : 'sidebar_preferences';
+	await deleteSetting(key);
+}
+
+// =============================================================================
+// TAG ORDER
+// =============================================================================
+
+/** Tag ids in the user's chosen order; empty means the default (by name). */
+export async function getTagOrder(userId?: number): Promise<number[]> {
+	const key = userId ? `user:${userId}:tag_order` : 'tag_order';
+	const value = await getSetting(key);
+	return Array.isArray(value) ? value : [];
+}
+
+export async function setTagOrder(order: number[], userId?: number): Promise<void> {
+	const key = userId ? `user:${userId}:tag_order` : 'tag_order';
+	await setSetting(key, order);
+}
+
+export async function deleteTagOrder(userId?: number): Promise<void> {
+	const key = userId ? `user:${userId}:tag_order` : 'tag_order';
+	await deleteSetting(key);
+}
+
+// =============================================================================
+// ENVIRONMENT ORDER
+// =============================================================================
+
+/** Environment ids in the user's chosen order; empty means the default (by name). */
+export async function getEnvironmentOrder(userId?: number): Promise<number[]> {
+	const key = userId ? `user:${userId}:environment_order` : 'environment_order';
+	const value = await getSetting(key);
+	return Array.isArray(value) ? value : [];
+}
+
+export async function setEnvironmentOrder(order: number[], userId?: number): Promise<void> {
+	const key = userId ? `user:${userId}:environment_order` : 'environment_order';
+	await setSetting(key, order);
+}
+
+export async function deleteEnvironmentOrder(userId?: number): Promise<void> {
+	const key = userId ? `user:${userId}:environment_order` : 'environment_order';
 	await deleteSetting(key);
 }
 
@@ -3389,6 +3458,121 @@ export async function deleteContainerIconOverride(containerName: string, environ
 }
 
 // =============================================================================
+// TAGS (user-defined organizational tags)
+// GLOBAL tag catalog (name + colour, unique on name) plus per-env assignment rows
+// keyed by container/stack name. Distinct from Docker labels.
+// =============================================================================
+
+function envClause(col: any, environmentId: number | null) {
+	return environmentId !== null ? eq(col, environmentId) : isNull(col);
+}
+
+function toTag(r: { id: number; name: string; color: string; icon: string | null }): Tag {
+	return { id: r.id, name: r.name, color: normalizeColor(r.color), icon: r.icon ?? null };
+}
+
+/** The whole tag catalog (global - not env-scoped). */
+export async function getTags(): Promise<Tag[]> {
+	const rows = await db.select().from(tags).orderBy(tags.name);
+	return rows.map(toTag);
+}
+
+/**
+ * Get an existing catalog tag by name, or create it. Matching is case-INSENSITIVE
+ * (so "Prod" and "prod" are the same tag), consistent with the rename collision
+ * check and the UI dedup. Done in JS over the (small, curated) catalog rather than
+ * a LOWER() query so it stays dialect-portable across SQLite and Postgres.
+ */
+export async function getOrCreateTag(name: string, color: TagColor, icon?: string | null): Promise<Tag> {
+	const lower = name.toLowerCase();
+	const findExisting = async () =>
+		(await db.select().from(tags)).find((t) => t.name.toLowerCase() === lower);
+	const existing = await findExisting();
+	if (existing) return toTag(existing);
+	// A concurrent same-name create races here; the case-insensitive unique index
+	// (COLLATE NOCASE / lower(name), see migration 0016) makes the loser's insert
+	// throw even for a case variant. Swallow it and re-select the winner so
+	// getOrCreateTag stays idempotent instead of surfacing a 500.
+	try {
+		await db.insert(tags).values({ name, color, icon: icon ?? null });
+	} catch {
+		/* unique violation - the winner is found by the re-select below */
+	}
+	return toTag((await findExisting())!);
+}
+
+/** Update a catalog tag's name/colour/icon. `icon: null` clears it. */
+export async function updateTag(tagId: number, patch: { name?: string; color?: TagColor; icon?: string | null }): Promise<void> {
+	const set: Record<string, unknown> = {};
+	if (patch.name !== undefined) set.name = patch.name;
+	if (patch.color !== undefined) set.color = patch.color;
+	if (patch.icon !== undefined) set.icon = patch.icon;
+	if (Object.keys(set).length === 0) return;
+	await db.update(tags).set(set).where(eq(tags.id, tagId));
+}
+
+/** Delete a catalog tag (assignments in every environment cascade away). */
+export async function deleteTag(tagId: number): Promise<void> {
+	await db.delete(tags).where(eq(tags.id, tagId));
+}
+
+/** Tag ids assigned to one container. */
+export async function getContainerTagIds(containerName: string, environmentId: number | null): Promise<number[]> {
+	const rows = await db.select().from(containerTags)
+		.where(and(eq(containerTags.containerName, containerName), envClause(containerTags.environmentId, environmentId)));
+	return rows.map((r) => r.tagId);
+}
+
+/** All container assignments in an environment as a name -> tagId[] map (no N+1). */
+export async function getContainerTagsMap(environmentId: number | null): Promise<Record<string, number[]>> {
+	const rows = await db.select().from(containerTags).where(envClause(containerTags.environmentId, environmentId));
+	const map: Record<string, number[]> = {};
+	for (const r of rows) {
+		map[r.containerName] ??= [];
+		map[r.containerName].push(r.tagId);
+	}
+	return map;
+}
+
+/** Replace a container's tag assignments. */
+export async function setContainerTagIds(containerName: string, environmentId: number | null, tagIds: number[]): Promise<void> {
+	await db.delete(containerTags)
+		.where(and(eq(containerTags.containerName, containerName), envClause(containerTags.environmentId, environmentId)));
+	const ids = [...new Set(tagIds)];
+	if (ids.length) {
+		await db.insert(containerTags).values(ids.map((tagId) => ({ containerName, environmentId, tagId })));
+	}
+}
+
+/** Tag ids assigned to one stack. */
+export async function getStackTagIds(stackName: string, environmentId: number | null): Promise<number[]> {
+	const rows = await db.select().from(stackTags)
+		.where(and(eq(stackTags.stackName, stackName), envClause(stackTags.environmentId, environmentId)));
+	return rows.map((r) => r.tagId);
+}
+
+/** All stack assignments in an environment as a name -> tagId[] map. */
+export async function getStackTagsMap(environmentId: number | null): Promise<Record<string, number[]>> {
+	const rows = await db.select().from(stackTags).where(envClause(stackTags.environmentId, environmentId));
+	const map: Record<string, number[]> = {};
+	for (const r of rows) {
+		map[r.stackName] ??= [];
+		map[r.stackName].push(r.tagId);
+	}
+	return map;
+}
+
+/** Replace a stack's tag assignments. */
+export async function setStackTagIds(stackName: string, environmentId: number | null, tagIds: number[]): Promise<void> {
+	await db.delete(stackTags)
+		.where(and(eq(stackTags.stackName, stackName), envClause(stackTags.environmentId, environmentId)));
+	const ids = [...new Set(tagIds)];
+	if (ids.length) {
+		await db.insert(stackTags).values(ids.map((tagId) => ({ stackName, environmentId, tagId })));
+	}
+}
+
+// =============================================================================
 // VULNERABILITY SCAN RESULTS
 // =============================================================================
 
@@ -3440,7 +3624,9 @@ export async function saveVulnerabilityScan(data: {
 		lowCount: data.lowCount,
 		negligibleCount: data.negligibleCount,
 		unknownCount: data.unknownCount,
-		vulnerabilities: JSON.stringify(data.vulnerabilities),
+		// A NUL or lone surrogate from a scanner survives JSON.stringify but breaks
+		// every later PostgreSQL read of the column, so it never reaches storage.
+		vulnerabilities: stripUnstorableEscapes(JSON.stringify(data.vulnerabilities)),
 		error: data.error ?? null
 	}).returning();
 	// A new scan makes the dashboard's cached findings stale — drop them so every
@@ -3587,40 +3773,6 @@ export async function getCombinedScanForImage(
 	return combined;
 }
 
-export async function getAllLatestScans(environmentId?: number | null): Promise<VulnerabilityScanData[]> {
-	// This complex query requires raw SQL or multiple queries
-	// For simplicity, we'll fetch all and filter in JS
-	let results;
-	if (environmentId !== undefined) {
-		if (environmentId === null) {
-			results = await db.select().from(vulnerabilityScans)
-				.where(isNull(vulnerabilityScans.environmentId))
-				.orderBy(desc(vulnerabilityScans.scannedAt));
-		} else {
-			results = await db.select().from(vulnerabilityScans)
-				.where(eq(vulnerabilityScans.environmentId, environmentId))
-				.orderBy(desc(vulnerabilityScans.scannedAt));
-		}
-	} else {
-		results = await db.select().from(vulnerabilityScans)
-			.orderBy(desc(vulnerabilityScans.scannedAt));
-	}
-
-	// Group by imageId + scanner and take latest
-	const latestMap = new Map<string, typeof results[0]>();
-	for (const row of results) {
-		const key = `${row.imageId}:${row.scanner}`;
-		if (!latestMap.has(key)) {
-			latestMap.set(key, row);
-		}
-	}
-
-	return Array.from(latestMap.values()).map(row => ({
-		...row,
-		vulnerabilities: row.vulnerabilities ? JSON.parse(row.vulnerabilities) : []
-	})) as VulnerabilityScanData[];
-}
-
 /**
  * Scan freshness for the metrics endpoint: how stale the OLDEST scan is
  * (surfaces environments whose scans have gone stale) and the average scan
@@ -3660,17 +3812,33 @@ export async function getScanFreshness(environmentId?: number | null): Promise<{
 	return { scans: n, oldestAgeSeconds, avgDurationSeconds };
 }
 
-export async function deleteOldScans(keepDays = 30): Promise<number> {
-	const cutoffDate = new Date(Date.now() - keepDays * 24 * 60 * 60 * 1000).toISOString();
-	const countResult = await db.select({ count: sql<number>`count(*)` })
-		.from(vulnerabilityScans)
-		.where(sql`scanned_at < ${cutoffDate}`);
-	const count = Number(countResult[0]?.count ?? 0);
-	if (count > 0) {
-		await db.delete(vulnerabilityScans)
-			.where(sql`scanned_at < ${cutoffDate}`);
+/** Every scan reduced to what a retention decision needs - no findings documents. */
+export async function listScanRecords(): Promise<ScanRecord[]> {
+	return db
+		.select({
+			id: vulnerabilityScans.id,
+			environmentId: vulnerabilityScans.environmentId,
+			imageId: vulnerabilityScans.imageId,
+			scanner: vulnerabilityScans.scanner,
+			scannedAt: vulnerabilityScans.scannedAt
+		})
+		.from(vulnerabilityScans) as Promise<ScanRecord[]>;
+}
+
+/**
+ * Delete the given scans, in batches.
+ *
+ * A single statement would bind one parameter per id, which SQLite caps at
+ * 32766, and a long-neglected install can exceed that many times over.
+ */
+export async function deleteScans(ids: number[], batchSize = 500): Promise<number> {
+	let deleted = 0;
+	for (let i = 0; i < ids.length; i += batchSize) {
+		const batch = ids.slice(i, i + batchSize);
+		await db.delete(vulnerabilityScans).where(inArray(vulnerabilityScans.id, batch));
+		deleted += batch.length;
 	}
-	return count;
+	return deleted;
 }
 
 // =============================================================================
@@ -4109,7 +4277,10 @@ export async function getContainerEvents(filters: ContainerEventFilters = {}): P
 		.from(containerEvents)
 		.leftJoin(environments, eq(containerEvents.environmentId, environments.id))
 		.where(whereClause)
-		.orderBy(desc(containerEvents.timestamp))
+		// id is the tie-breaker: timestamp alone is not unique (a burst of events shares
+		// a timestamp), and offset pagination over a non-unique sort is non-deterministic,
+		// so a row can repeat or vanish across pages.
+		.orderBy(desc(containerEvents.timestamp), desc(containerEvents.id))
 		.limit(limit)
 		.offset(offset);
 
@@ -4390,7 +4561,37 @@ export async function saveDashboardPreferences(data: {
 // SCHEDULE EXECUTION OPERATIONS
 // =============================================================================
 
-export type ScheduleType = 'container_update' | 'container_start' | 'git_stack_sync' | 'system_cleanup' | 'env_update_check' | 'image_prune' | 'backup' | 'restore' | 'repo_prune' | 'repo_check' | 'repo_verify';
+export type ScheduleType = 'container_update' | 'container_start' | 'git_stack_sync' | 'system_cleanup' | 'env_update_check' | 'image_prune' | 'backup' | 'restore' | 'repo_prune' | 'repo_check' | 'repo_verify' | 'stack_deploy' | 'deploy_log_reconcile';
+
+// Runtime list of every ScheduleType. Used to bound a no-type-filter executions
+// query to the caller's viewable types (viewableScheduleTypes). The two type
+// assertions below make it a real drift-guard: `satisfies` rejects a bogus value,
+// and the bidirectional _exhaustive check fails to compile if a union member is
+// missing from (or extra in) this array.
+export const ALL_SCHEDULE_TYPES = [
+	'container_update',
+	'container_start',
+	'git_stack_sync',
+	'system_cleanup',
+	'env_update_check',
+	'image_prune',
+	'backup',
+	'restore',
+	'repo_prune',
+	'repo_check',
+	'repo_verify',
+	'stack_deploy',
+	'deploy_log_reconcile'
+] as const satisfies readonly ScheduleType[];
+// Compile error if ALL_SCHEDULE_TYPES and ScheduleType ever diverge.
+type _ScheduleTypeExhaustive =
+	Exclude<ScheduleType, (typeof ALL_SCHEDULE_TYPES)[number]> extends never
+		? Exclude<(typeof ALL_SCHEDULE_TYPES)[number], ScheduleType> extends never
+			? true
+			: never
+		: never;
+const _scheduleTypeExhaustive: _ScheduleTypeExhaustive = true;
+void _scheduleTypeExhaustive;
 export type ScheduleTrigger = 'cron' | 'webhook' | 'manual' | 'startup';
 export type ScheduleStatus =
 	| 'queued'
@@ -4448,8 +4649,23 @@ export interface ScheduleExecutionUpdateData {
 
 export interface ScheduleExecutionFilters {
 	scheduleType?: ScheduleType;
+	// Enterprise per-resource RBAC: restrict to this allow-list of types when the
+	// caller lacks view on every resource (see viewableScheduleTypes). An empty
+	// array matches nothing (drizzle inArray([]) -> false), which is the correct
+	// "caller may see no types" result.
+	scheduleTypes?: ScheduleType[];
 	scheduleId?: number;
 	environmentId?: number | null;
+	// Enterprise env-scoped RBAC: restrict to these environment ids. A row with a
+	// NULL environmentId (system schedules, local-env deploys) is always included
+	// -- those are not attributed to any environment, matching how the per-run
+	// deploy access checks treat null (deploy-run-access.ts). Ignored when the
+	// caller has all-environment access (pass undefined).
+	environmentIds?: number[];
+	// Powers "runs for this stack" lookups (schedule_executions_entity_env_idx) --
+	// paired with environmentId, an exact match on the (entity_name, environment_id)
+	// index this filter was added for.
+	entityName?: string;
 	status?: ScheduleStatus;
 	statuses?: ScheduleStatus[];
 	triggeredBy?: ScheduleTrigger;
@@ -4569,6 +4785,9 @@ export async function getScheduleExecutions(filters: ScheduleExecutionFilters = 
 	if (filters.scheduleType) {
 		conditions.push(eq(scheduleExecutions.scheduleType, filters.scheduleType));
 	}
+	if (filters.scheduleTypes !== undefined) {
+		conditions.push(inArray(scheduleExecutions.scheduleType, filters.scheduleTypes));
+	}
 	if (filters.scheduleId !== undefined) {
 		conditions.push(eq(scheduleExecutions.scheduleId, filters.scheduleId));
 	}
@@ -4578,6 +4797,18 @@ export async function getScheduleExecutions(filters: ScheduleExecutionFilters = 
 		} else {
 			conditions.push(eq(scheduleExecutions.environmentId, filters.environmentId));
 		}
+	}
+	// Enterprise env-scoping: accessible envs OR a null (unattributed) env.
+	if (filters.environmentIds !== undefined) {
+		conditions.push(
+			or(
+				isNull(scheduleExecutions.environmentId),
+				inArray(scheduleExecutions.environmentId, filters.environmentIds)
+			)
+		);
+	}
+	if (filters.entityName !== undefined) {
+		conditions.push(eq(scheduleExecutions.entityName, filters.entityName));
 	}
 	if (filters.status) {
 		conditions.push(eq(scheduleExecutions.status, filters.status));
@@ -4639,6 +4870,44 @@ export async function getScheduleExecutions(filters: ScheduleExecutionFilters = 
 		limit,
 		offset
 	};
+}
+
+/**
+ * ALL execution ids (+ parsed details) for a given schedule type, unpaginated.
+ *
+ * Deliberately bypasses getScheduleExecutions()'s default 50-row page: a caller that
+ * needs to reconcile every record against something else (deploy-log-reconcile.ts,
+ * against files on disk) cannot afford to only see the most recent page -- an older
+ * record just outside the window would look exactly like an orphan file with no
+ * record, and the file behind it would be deleted even though a record exists.
+ *
+ * `environmentId` is included (F5 fix) so the caller can scope its reconciliation
+ * PER ENVIRONMENT -- deploy-log-store.ts now keeps one log directory per environment
+ * (see envDirName()), so a record's file can only ever be found in, or be deleted
+ * from, ITS OWN environment's directory. Without environmentId here,
+ * deploy-log-reconcile.ts would have to either reconcile everything as one flat pool
+ * again (reintroducing the cross-environment mixing the size-budget fix closes) or
+ * guess which environment a record belongs to.
+ */
+export async function getScheduleExecutionIdsByType(
+	scheduleType: ScheduleType
+): Promise<Array<{ id: number; status: ScheduleStatus; details: any | null; environmentId: number | null }>> {
+	const rows = await db
+		.select({
+			id: scheduleExecutions.id,
+			status: scheduleExecutions.status,
+			details: scheduleExecutions.details,
+			environmentId: scheduleExecutions.environmentId
+		})
+		.from(scheduleExecutions)
+		.where(eq(scheduleExecutions.scheduleType, scheduleType));
+
+	return rows.map((row: { id: number; status: string; details: string | null; environmentId: number | null }) => ({
+		id: row.id,
+		status: row.status as ScheduleStatus,
+		details: row.details ? JSON.parse(row.details) : null,
+		environmentId: row.environmentId
+	}));
 }
 
 /**
@@ -4813,9 +5082,16 @@ const SCHEDULE_CLEANUP_ENABLED_KEY = 'schedule_cleanup_enabled';
 const EVENT_CLEANUP_ENABLED_KEY = 'event_cleanup_enabled';
 const SCANNER_CLEANUP_CRON_KEY = 'scanner_cleanup_cron';
 const SCANNER_CLEANUP_ENABLED_KEY = 'scanner_cleanup_enabled';
+const SCAN_RETENTION_CRON_KEY = 'scan_retention_cron';
+const SCAN_RETENTION_ENABLED_KEY = 'scan_retention_enabled';
+const SCAN_RETENTION_KEEP_KEY = 'scan_retention_keep';
+const SCAN_RETENTION_GRACE_DAYS_KEY = 'scan_retention_grace_days';
+const DEPLOY_LOG_RECONCILE_CRON_KEY = 'deploy_log_reconcile_cron';
+const DEPLOY_LOG_RECONCILE_ENABLED_KEY = 'deploy_log_reconcile_enabled';
 const DEFAULT_SCHEDULE_CLEANUP_CRON = '0 3 * * *'; // Daily at 3 AM
 const DEFAULT_EVENT_CLEANUP_CRON = '30 3 * * *'; // Daily at 3:30 AM
 const DEFAULT_SCANNER_CLEANUP_CRON = '0 3 * * 0'; // Weekly Sunday at 3 AM
+const DEFAULT_DEPLOY_LOG_RECONCILE_CRON = '0 4 * * *'; // Daily at 4 AM
 
 export async function getScheduleRetentionDays(): Promise<number> {
 	const result = await db.select().from(settings).where(eq(settings.key, SCHEDULE_RETENTION_KEY));
@@ -4993,6 +5269,50 @@ export async function setScannerCleanupEnabled(enabled: boolean): Promise<void> 
 	}
 }
 
+export async function getDeployLogReconcileCron(): Promise<string> {
+	const result = await db.select().from(settings).where(eq(settings.key, DEPLOY_LOG_RECONCILE_CRON_KEY));
+	if (result[0]) {
+		return result[0].value || DEFAULT_DEPLOY_LOG_RECONCILE_CRON;
+	}
+	return DEFAULT_DEPLOY_LOG_RECONCILE_CRON;
+}
+
+export async function setDeployLogReconcileCron(cron: string): Promise<void> {
+	const existing = await db.select().from(settings).where(eq(settings.key, DEPLOY_LOG_RECONCILE_CRON_KEY));
+	if (existing.length > 0) {
+		await db.update(settings)
+			.set({ value: cron, updatedAt: new Date().toISOString() })
+			.where(eq(settings.key, DEPLOY_LOG_RECONCILE_CRON_KEY));
+	} else {
+		await db.insert(settings).values({
+			key: DEPLOY_LOG_RECONCILE_CRON_KEY,
+			value: cron
+		});
+	}
+}
+
+export async function getDeployLogReconcileEnabled(): Promise<boolean> {
+	const result = await db.select().from(settings).where(eq(settings.key, DEPLOY_LOG_RECONCILE_ENABLED_KEY));
+	if (result[0]) {
+		return result[0].value === 'true';
+	}
+	return true; // Enabled by default
+}
+
+export async function setDeployLogReconcileEnabled(enabled: boolean): Promise<void> {
+	const existing = await db.select().from(settings).where(eq(settings.key, DEPLOY_LOG_RECONCILE_ENABLED_KEY));
+	if (existing.length > 0) {
+		await db.update(settings)
+			.set({ value: enabled ? 'true' : 'false', updatedAt: new Date().toISOString() })
+			.where(eq(settings.key, DEPLOY_LOG_RECONCILE_ENABLED_KEY));
+	} else {
+		await db.insert(settings).values({
+			key: DEPLOY_LOG_RECONCILE_ENABLED_KEY,
+			value: enabled ? 'true' : 'false'
+		});
+	}
+}
+
 // =============================================================================
 // EXTERNAL STACK PATHS
 // =============================================================================
@@ -5092,6 +5412,25 @@ export interface GlobalSemverConfig {
 	maxBump: 'patch' | 'minor' | 'major';
 	matchFlavor: boolean;
 	includePrerelease: boolean;
+	/**
+	 * Drop a candidate whose image was built BEFORE the running one. A repository
+	 * that still carries old tags whose names sort high (`lidarr:8.1.2135` is
+	 * really 0.8.1.2135 from 2021) otherwise reads as a major upgrade. Looks the date
+	 * up for the chosen candidate only, and caches it per digest.
+	 */
+	rejectOlderImages: boolean;
+}
+
+const PASSKEYS_ENABLED_KEY = 'passkeys_enabled';
+
+/** Whether this instance offers passkey sign-in. The default lives in the pure
+ *  passkeysEnabledFromSetting, so what an absent value means is unit-tested. */
+export async function getPasskeysEnabled(): Promise<boolean> {
+	return passkeysEnabledFromSetting(await getSetting(PASSKEYS_ENABLED_KEY));
+}
+
+export async function setPasskeysEnabled(enabled: boolean): Promise<void> {
+	await setSetting(PASSKEYS_ENABLED_KEY, enabled);
 }
 
 const GLOBAL_SEMVER_KEY = 'global_semver_check';
@@ -5099,7 +5438,8 @@ const DEFAULT_SEMVER_CONFIG: GlobalSemverConfig = {
 	enabled: false,
 	maxBump: 'major',
 	matchFlavor: true,
-	includePrerelease: false
+	includePrerelease: false,
+	rejectOlderImages: true
 };
 
 export async function getGlobalSemverConfig(): Promise<GlobalSemverConfig> {
@@ -5702,10 +6042,15 @@ export async function addPendingContainerUpdate(
 	// A row can exist for a digest update, a newer-version-tag (semver) suggestion,
 	// or both. Both flags default to the classic "digest update only" shape so
 	// existing callers keep working unchanged.
-	options: { hasImageUpdate?: boolean; newerVersion?: unknown | null } = {}
+	options: {
+		hasImageUpdate?: boolean;
+		newerVersion?: unknown | null;
+		releaseAgeRemainingHours?: number | null;
+	} = {}
 ): Promise<void> {
 	const hasImageUpdate = options.hasImageUpdate ?? true;
 	const newerVersion = options.newerVersion != null ? JSON.stringify(options.newerVersion) : null;
+	const releaseAgeRemainingHours = options.releaseAgeRemainingHours ?? null;
 	const now = new Date().toISOString();
 	// Use insert with onConflictDoUpdate for upsert behavior
 	await db.insert(pendingContainerUpdates)
@@ -5716,6 +6061,7 @@ export async function addPendingContainerUpdate(
 			currentImage,
 			hasImageUpdate,
 			newerVersion,
+			releaseAgeRemainingHours,
 			checkedAt: now
 		})
 		.onConflictDoUpdate({
@@ -5725,6 +6071,7 @@ export async function addPendingContainerUpdate(
 				currentImage,
 				hasImageUpdate,
 				newerVersion,
+				releaseAgeRemainingHours,
 				checkedAt: now
 			}
 		});
@@ -5738,6 +6085,24 @@ export async function removePendingContainerUpdate(environmentId: number, contai
 		.where(and(
 			eq(pendingContainerUpdates.environmentId, environmentId),
 			eq(pendingContainerUpdates.containerId, containerId)
+		));
+}
+
+/**
+ * Clear a pending update by container NAME.
+ *
+ * An update recreates the container under a new id, so a caller that ran the update
+ * no longer holds the id the row was written with. The name survives the recreate,
+ * which is what the auto-update schedule identifies a container by anyway.
+ */
+export async function removePendingContainerUpdateByName(
+	environmentId: number,
+	containerName: string
+): Promise<void> {
+	await db.delete(pendingContainerUpdates)
+		.where(and(
+			eq(pendingContainerUpdates.environmentId, environmentId),
+			eq(pendingContainerUpdates.containerName, containerName)
 		));
 }
 
@@ -5951,4 +6316,133 @@ export async function updateBackupConfig(id: number, data: {
 
 export async function deleteBackupConfig(id: number): Promise<void> {
 	await db.delete(backupConfigs).where(eq(backupConfigs.id, id));
+}
+
+// --- Vulnerability scan retention -------------------------------------------
+// Scans are append-only and each carries its findings document, so without a
+// bound they grow until the dashboard costs gigabytes to render.
+
+const DEFAULT_SCAN_RETENTION_CRON = '30 4 * * *'; // Daily at 4:30 AM, after the deploy-log reconcile
+
+// These read through getSetting, which parses the JSON setSetting writes. Reading
+// the column directly would hand back a quoted string, and a cron of `"30 4 * * *"`
+// is not a cron.
+
+export async function getScanRetentionCron(): Promise<string> {
+	const value = await getSetting(SCAN_RETENTION_CRON_KEY);
+	return typeof value === 'string' && value.trim() ? value : DEFAULT_SCAN_RETENTION_CRON;
+}
+
+export async function setScanRetentionCron(cron: string): Promise<void> {
+	await setSetting(SCAN_RETENTION_CRON_KEY, cron);
+}
+
+export async function getScanRetentionEnabled(): Promise<boolean> {
+	// Absent means on: retention is what bounds the scan table's growth.
+	const value = await getSetting(SCAN_RETENTION_ENABLED_KEY);
+	if (value === null) return true;
+	return value === true || value === 'true';
+}
+
+export async function setScanRetentionEnabled(enabled: boolean): Promise<void> {
+	await setSetting(SCAN_RETENTION_ENABLED_KEY, enabled);
+}
+
+export async function getScanRetentionKeep(): Promise<number> {
+	const parsed = parseInt(String(await getSetting(SCAN_RETENTION_KEEP_KEY) ?? ''), 10);
+	return Number.isFinite(parsed) && parsed >= 1 ? parsed : DEFAULT_RETENTION.keepPerImage;
+}
+
+export async function setScanRetentionKeep(keep: number): Promise<void> {
+	await setSetting(SCAN_RETENTION_KEEP_KEY, Math.max(1, Math.floor(keep)));
+}
+
+export async function getScanRetentionGraceDays(): Promise<number> {
+	const parsed = parseInt(String(await getSetting(SCAN_RETENTION_GRACE_DAYS_KEY) ?? ''), 10);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_RETENTION.graceDays;
+}
+
+export async function setScanRetentionGraceDays(days: number): Promise<void> {
+	await setSetting(SCAN_RETENTION_GRACE_DAYS_KEY, Math.max(0, Math.floor(days)));
+}
+
+
+// =============================================================================
+// PASSKEY CREDENTIAL OPERATIONS
+// =============================================================================
+
+export interface PasskeyCredentialData {
+	id: number;
+	userId: number;
+	credentialId: string;
+	webauthnUserId: string;
+	publicKey: string;
+	counter: number;
+	deviceType: string;
+	backedUp: boolean;
+	transports: string | null;
+	aaguid: string | null;
+	name: string | null;
+	createdAt: string;
+}
+
+export async function createPasskeyCredential(
+	data: Omit<PasskeyCredentialData, 'id' | 'createdAt'>
+): Promise<PasskeyCredentialData> {
+	const rows = await db.insert(passkeyCredentials).values(data).returning();
+	return rows[0] as PasskeyCredentialData;
+}
+
+export async function getPasskeyCredentialByCredentialId(credentialId: string): Promise<PasskeyCredentialData | null> {
+	const rows = await db.select().from(passkeyCredentials).where(eq(passkeyCredentials.credentialId, credentialId)).limit(1);
+	return rows[0] as PasskeyCredentialData || null;
+}
+
+export async function getPasskeyCredentialsForUser(userId: number): Promise<PasskeyCredentialData[]> {
+	return await db.select().from(passkeyCredentials)
+		.where(eq(passkeyCredentials.userId, userId))
+		.orderBy(asc(passkeyCredentials.createdAt)) as PasskeyCredentialData[];
+}
+
+export async function getPasskeyCredentialByNameForUser(
+	userId: number,
+	name: string
+): Promise<PasskeyCredentialData | null> {
+	const rows = await db.select().from(passkeyCredentials)
+		.where(and(
+			eq(passkeyCredentials.userId, userId),
+			sql`lower(${passkeyCredentials.name}) = lower(${name})`
+		))
+		.limit(1);
+	return rows[0] as PasskeyCredentialData || null;
+}
+
+export async function deletePasskeyCredentialForUser(id: number, userId: number): Promise<boolean> {
+	const rows = await db.delete(passkeyCredentials)
+		.where(and(eq(passkeyCredentials.id, id), eq(passkeyCredentials.userId, userId)))
+		.returning({ id: passkeyCredentials.id });
+	return rows.length === 1;
+}
+
+/**
+ * Advance a credential's signature counter, refusing the move if another request
+ * already advanced it. A counter that does not move forward is how a cloned
+ * authenticator shows itself, so the caller must fail the login when this returns
+ * false.
+ *
+ * Multi-device passkeys commonly keep a zero counter; the one-time challenge still
+ * prevents replay there, so no write is needed in that case.
+ */
+export async function updatePasskeyCounter(
+	id: number,
+	previousCounter: number,
+	newCounter: number
+): Promise<boolean> {
+	if (previousCounter === 0 && newCounter === 0) return true;
+
+	const rows = await db.update(passkeyCredentials)
+		.set({ counter: newCounter })
+		.where(and(eq(passkeyCredentials.id, id), eq(passkeyCredentials.counter, previousCounter)))
+		.returning({ id: passkeyCredentials.id });
+	return rows.length === 1;
 }

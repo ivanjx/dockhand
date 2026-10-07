@@ -48,6 +48,20 @@ export type SecretProviderType =
  * self-hosted Vault/Infisical/Connect on the local network still works. Throws on
  * an unsafe host; call it before the first request in every REST provider.
  */
+/**
+ * Strip ONE layer of matching surrounding quotes for reference DETECTION only.
+ * 1Password's "Copy Secret Reference" puts `"op://Vault/Item/field"` on the clipboard
+ * (quotes included), so a pasted value fails a bare `startsWith('op://')` test and the
+ * reference is silently skipped (#1521). Providers normalize with this before the prefix
+ * test, and the resolver uses it to key the reference - the STORED value is left untouched
+ * (so #1086's "stop stripping quotes on save" still holds). Only strips when both ends are
+ * the same quote char; leaves a value with mismatched/one-sided quotes as-is.
+ */
+export function stripSurroundingQuotes(value: string): string {
+	// \1 backreference: strip only when the SAME quote char wraps both ends.
+	return value.trim().replace(/^(["'])(.*)\1$/s, '$2');
+}
+
 export function assertSafeProviderHost(rawUrl: string, label: string): void {
 	const safe = isSafeNotificationUrl(rawUrl);
 	if (!safe.ok) {
@@ -244,6 +258,39 @@ export type SecretProviderConfig =
 export const SECRET_CONFIG_KEYS = new Set(['token', 'clientSecret', 'password']);
 
 /**
+ * Every user-overridable connection-destination field across all provider types. If a
+ * client-supplied override changes one of these, the request targets a DIFFERENT server than
+ * the stored config, so a stored secret must NOT be reattached (that would send the real
+ * credential to a caller-chosen host). Must list EVERY provider's destination field:
+ *   - `address`  Vault
+ *   - `host`     1Password Connect, Infisical
+ *   - `serverUrl` Bitwarden Secrets Manager (EU / self-hosted)
+ *   - `vaultUri` Azure Key Vault
+ * (KeePass `databasePath` is a LOCAL file, not a network destination, so it's out of scope.
+ * When you add a provider with an overridable server URL, add its field here.)
+ */
+export const PROVIDER_DESTINATION_KEYS = ['host', 'address', 'serverUrl', 'vaultUri'] as const;
+
+/**
+ * True when the incoming override changes the connection destination (host/address) from the
+ * stored value. Used to decide whether a stored secret may follow the request (#secret-exfil):
+ * a test whose destination the client changed must not carry the stored credential.
+ */
+export function destinationOverridesStored(
+	incoming: Record<string, unknown>,
+	stored: Record<string, unknown>
+): boolean {
+	for (const key of PROVIDER_DESTINATION_KEYS) {
+		if (!(key in incoming)) continue;
+		const inVal = incoming[key];
+		if (typeof inVal !== 'string') continue;
+		if (inVal.trim() === '') continue; // a cleared field isn't a redirect
+		if (inVal !== stored[key]) return true;
+	}
+	return false;
+}
+
+/**
  * A masked secret key that only makes sense alongside a non-secret partner field, as a
  * pair the user chooses or abandons together. When the user CLEARS the partner in the edit
  * form (an explicit, visible field), keeping the stored secret would strand it - a secret
@@ -381,4 +428,18 @@ export interface SecretProvider<C extends SecretProviderConfig = SecretProviderC
 	 * concept throw {@link UnsupportedOperationError}.
 	 */
 	resolveBulk(config: C, selector: string): Promise<Record<string, string>>;
+
+	/**
+	 * Optional: does a bulk pull AND a reference batch against ONE backend
+	 * session. Only worth implementing where opening a session is expensive - a
+	 * CLI provider pays a full login per call, so the editor probe (which needs
+	 * both) otherwise logs in twice for one keystroke. Callers that see it
+	 * absent must fall back to calling the two methods separately.
+	 */
+	resolveCombined?(
+		config: C,
+		selector: string | undefined,
+		refs: string[],
+		logPrefix?: string
+	): Promise<{ bulk: Record<string, string>; refs: Map<string, string> }>;
 }

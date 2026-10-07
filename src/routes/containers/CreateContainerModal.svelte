@@ -54,6 +54,7 @@
 	let name = $state('');
 	let image = $state('');
 	let command = $state('');
+	let entrypoint = $state('');
 	let restartPolicy = $state('no');
 	let restartMaxRetries = $state<number | ''>('');
 	let networkMode = $state('bridge');
@@ -343,6 +344,7 @@
 				});
 
 			const cmd = command.trim() ? parseShellCommand(command.trim()) : undefined;
+			const entrypointArr = entrypoint.trim() ? parseShellCommand(entrypoint.trim()) : undefined;
 
 			let healthcheck: any = undefined;
 			if (healthcheckEnabled && healthcheckCommand.trim()) {
@@ -407,6 +409,7 @@
 				env: env.length > 0 ? env : undefined,
 				labels: Object.keys(labelsObj).length > 0 ? labelsObj : undefined,
 				cmd,
+				entrypoint: entrypointArr,
 				restartPolicy,
 				restartMaxRetries: restartPolicy === 'on-failure' && restartMaxRetries !== '' ? Number(restartMaxRetries) : undefined,
 				networkMode,
@@ -447,6 +450,9 @@
 			});
 
 			const result = await response.json();
+			for (const warning of result.warnings ?? []) {
+				if (warning.status === 'warning') toast.warning(warning.message);
+			}
 
 			if (!response.ok) {
 				let errorMsg = result.error || 'Failed to create container';
@@ -477,7 +483,7 @@
 			if (scheduledStartEnabled) {
 				try {
 					const envParam = $currentEnvironment ? `?env=${$currentEnvironment.id}` : '';
-					await fetch(`/api/container-start/${encodeURIComponent(name.trim())}${envParam}`, {
+					const scheduleResponse = await fetch(`/api/container-start/${encodeURIComponent(name.trim())}${envParam}`, {
 						method: 'POST',
 						headers: { 'Content-Type': 'application/json' },
 						body: JSON.stringify({
@@ -485,8 +491,13 @@
 							cronExpression: scheduledStartCronExpression
 						})
 					});
+					if (!scheduleResponse.ok) {
+						const scheduleResult = await scheduleResponse.json();
+						throw new Error(scheduleResult.error || 'Failed to save container start schedule');
+					}
 				} catch (err) {
 					console.error('Failed to save container start schedule:', err);
+					toast.warning('Container created, but scheduled start was not saved: ' + (err instanceof Error ? err.message : String(err)));
 				}
 			}
 
@@ -511,6 +522,7 @@
 		name = '';
 		image = '';
 		command = '';
+		entrypoint = '';
 		restartPolicy = 'no';
 		restartMaxRetries = '';
 		networkMode = 'bridge';
@@ -712,6 +724,7 @@
 				bind:name
 				bind:image
 				bind:command
+			bind:entrypoint
 				bind:restartPolicy
 				bind:restartMaxRetries
 				bind:networkMode

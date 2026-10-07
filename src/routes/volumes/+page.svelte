@@ -8,8 +8,8 @@
 	import { toast } from 'svelte-sonner';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
-	import { Input } from '$lib/components/ui/input';
-	import { Trash2, Search, Plus, Eye, Check, XCircle, RefreshCw, Icon, AlertTriangle, X, HardDrive, Stamp, FolderOpen, Download, Database, Server, CircleDot, Circle } from 'lucide-svelte';
+	import { SearchInput } from '$lib/components/ui/search-input';
+	import { Trash2, Plus, Eye, Check, XCircle, RefreshCw, Icon, AlertTriangle, X, HardDrive, Stamp, FolderOpen, Download, Database, Server, CircleDot, Circle } from 'lucide-svelte';
 	import { broom } from '@lucide/lab';
 	import ConfirmPopover from '$lib/components/ConfirmPopover.svelte';
 	import BatchOperationModal from '$lib/components/BatchOperationModal.svelte';
@@ -424,16 +424,7 @@
 	<div class="shrink-0 flex flex-wrap justify-between items-center gap-3 min-h-8">
 		<PageHeader icon={HardDrive} title="Volumes" count={volumes.length} />
 		<div class="flex flex-wrap items-center gap-2">
-			<div class="relative">
-				<Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-				<Input
-					type="text"
-					placeholder="Search volumes..."
-					bind:value={searchInput}
-					onkeydown={(e) => e.key === 'Escape' && (searchInput = '')}
-					class="pl-8 h-8 w-48 text-sm"
-				/>
-			</div>
+			<SearchInput bind:value={searchInput} placeholder="Search volumes..." class="h-8 w-48 text-sm" />
 			<MultiSelectFilter
 				bind:value={driverFilter}
 				options={driverOptions}

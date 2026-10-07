@@ -38,7 +38,7 @@ separate from container auto-update schedules.
 Behavior to preserve:
 
 - A `container_start` schedule type exists throughout the scheduler and schedule
-  APIs.
+  APIs, including the database's `ALL_SCHEDULE_TYPES` execution-history allow-list.
 - A scheduled start looks up the container by name, skips if it is already
   running, starts it if stopped, records schedule execution logs, and updates
   `last_started`.
@@ -48,8 +48,10 @@ Behavior to preserve:
 - Container rename updates both auto-update and scheduled-start records.
 - Container delete, batch remove, stack down, and stack remove unregister and
   delete scheduled-start records.
-- Environment access checks apply to `container_start` schedule run, toggle, and
-  delete routes.
+- Schedule permissions and environment access checks apply to scheduled-start
+  configuration reads and writes, plus schedule run, toggle, and delete routes.
+- Unscoped configuration reads and schedule streams expose only accessible
+  environments, matching the schedule list.
 
 Key files:
 
@@ -74,9 +76,9 @@ Key files:
 
 ## Shell Attach Terminal
 
-The fork adds a shell-terminal attach mode alongside the existing shell
-(`exec`) mode. Attach connects to the running container's main process instead
-of creating a new Docker exec session.
+The fork's shell-terminal attach mode is now integrated with upstream's attach
+implementation alongside the existing shell (`exec`) mode. Attach connects to
+the running container's main process instead of creating a new Docker exec session.
 
 Behavior to preserve:
 
@@ -93,8 +95,9 @@ Behavior to preserve:
   including attach mode.
 - Container TTY settings determine whether Docker's multiplexed output frames
   must be decoded. Terminal resize requests use the container resize endpoint.
-- Attach works through local sockets, direct TCP/TLS, and Hawser standard
-  connections. Hawser Edge remains exec-only and rejects attach sessions.
+- Attach works through local sockets, direct TCP/TLS, Hawser standard, and Hawser
+  Edge connections. Edge requires an agent that implements `attach: true`; older
+  agents may ignore the flag and launch an exec session instead.
 - Production and Vite development WebSocket handlers implement the same attach
   stream, resize, cleanup, and output behavior.
 
@@ -103,6 +106,7 @@ Key files:
 - `server.js`
 - `vite.config.ts`
 - `src/lib/server/docker.ts`
+- `src/lib/server/docker-stream-core.ts`
 - `src/lib/types.ts`
 - `src/routes/containers/+page.svelte`
 - `src/routes/terminal/+page.svelte`
@@ -130,6 +134,9 @@ Behavior to preserve:
   being recreated with raw container settings.
 - If a Compose service was stopped before update, the update recreates it
   without starting it.
+- Scheduled Compose updates use the approved immutable image in execution-only
+  Compose content, including user overrides, with re-pull disabled. Keep the
+  original source file and image-tracking labels so future checks follow its tag.
 
 Key files:
 
@@ -147,7 +154,8 @@ The fork adjusts stack operations to better support Compose workflows.
 Behavior to preserve:
 
 - `executeComposeCommand('up', ...)` runs a `create` step first.
-- Local Compose `up` does not pass `--force-recreate`.
+- Local and direct Compose `up` never pass `--force-recreate`, including explicit
+  recreate requests and restore redeploys. This fork policy overrides upstream.
 - `updateStackService` accepts a no-start mode and uses Compose `create` for
   stopped services.
 - Hawser treats Compose `create` as a no-op until remote support exists.
@@ -350,6 +358,12 @@ Add any required upstream data backfill SQL to the generated SQL file. Preserve
 Drizzle's `--> statement-breakpoint` separators where separate statements are
 required.
 
+Preserve upstream SQL behavior that the schema DSL or generator does not capture,
+not only backfills. In particular, the tag catalog's `tags_name_unique` index must
+remain case-insensitive: `name COLLATE NOCASE` on SQLite and `lower(name)` on
+PostgreSQL. Drizzle currently regenerates a case-sensitive uniqueness definition;
+replace that definition in the new, undeployed migration, not in old SQL files.
+
 Generate the PostgreSQL migration with a disposable PostgreSQL URL so the config
 selects PostgreSQL. The `generate` command reads schema files and snapshots; it
 must not target production.
@@ -412,11 +426,11 @@ For each supported dialect, test:
 4. Application startup a second time to confirm migrations are idempotent.
 5. The database health endpoint and affected application behavior.
 
-Use targeted database tests where applicable:
+Run the SQLite migration constraint regressions alongside the disposable
+application-startup checks for both dialects:
 
 ```bash
-bun test tests/database-postgres.test.ts
-bun test tests/crud-operations.test.ts
+bun test tests/fork-migrations.test.ts
 ```
 
 The expected result is:
@@ -425,6 +439,12 @@ The expected result is:
 - the second startup reports no pending migrations;
 - no `already exists`, missing column, or duplicate constraint errors occur;
 - existing data remains intact.
+
+Confirm that a purported fork database actually matches the fork's migration
+timestamps and SQL hashes before treating it as an upgrade fixture. Account for
+Git's Windows CRLF checkout conversion when comparing hashes: runtime hashes use
+the SQL bytes on disk, while Linux image builds normally use LF. Do not rewrite
+deployed migration records to conceal a different baseline.
 
 Commit the merged schemas, regenerated migrations, snapshots, journals, and any
 required data backfills together:

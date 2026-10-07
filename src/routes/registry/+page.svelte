@@ -6,6 +6,7 @@
 	import { onMount } from 'svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
+	import { SearchInput } from '$lib/components/ui/search-input';
 	import * as Select from '$lib/components/ui/select';
 	import { Search, Download, Star, RefreshCw, Settings2, List, Play, Copy, Clipboard, Check, Server, Icon, ChevronRight, ChevronDown, Loader2, Tag, Calendar, HardDrive, Trash2, HelpCircle } from 'lucide-svelte';
 	import * as Tooltip from '$lib/components/ui/tooltip';
@@ -677,15 +678,7 @@
 		<!-- Browse mode filter -->
 		{#if browseMode}
 			<div class="shrink-0 flex items-center gap-2 text-sm">
-				<div class="relative flex-1 max-w-xs">
-					<Search class="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-					<Input
-						type="text"
-						placeholder="Filter results..."
-						bind:value={browseFilter}
-						class="h-8 pl-8 text-xs"
-					/>
-				</div>
+				<SearchInput bind:value={browseFilter} placeholder="Filter results..." class="h-8 text-xs" containerClass="flex-1 max-w-xs" />
 				<span class="text-muted-foreground text-xs">
 					{filteredResults.length === results.length
 						? `${results.length} images`

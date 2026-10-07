@@ -469,7 +469,7 @@ zabbixs://hostname/api_jsonrpc.php?token=TOKEN&amp;host=HOST&amp;key=ITEM_KEY"
 					</p>
 					<p class="flex gap-1.5 text-xs text-muted-foreground">
 						<HelpCircle class="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-500" />
-						<span>Need a provider that is not in the list (Matrix, Nextcloud, Pushbullet, Home Assistant, ...)? Run a <a href="https://github.com/caronc/apprise-api" target="_blank" rel="noopener">caronc/apprise-api</a> server, configure the provider there, and point Dockhand at it with <code>apprise://host/key</code> (or <code>apprises://</code> for TLS). Every provider Apprise supports is then reachable.</span>
+						<span>Need a provider that is not in the list (Matrix, Nextcloud, Pushbullet, Home Assistant, ...)? Run a <a href="https://github.com/caronc/apprise-api" target="_blank" rel="noopener">caronc/apprise-api</a> server, configure the provider there, and point Dockhand at it with <code>apprise://host/key</code> (or <code>apprises://</code> for TLS). Every provider Apprise supports is then reachable. If the Apprise server is behind basic auth, use <code>apprise://user:pass@host/key</code> (percent-encode special characters in the password).</span>
 					</p>
 					</div>
 				</div>

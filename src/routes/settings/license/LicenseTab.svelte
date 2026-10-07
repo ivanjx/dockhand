@@ -8,6 +8,7 @@
 	import { Crown, Building2, Key, RefreshCw, ShieldCheck, XCircle } from 'lucide-svelte';
 	import { canAccess } from '$lib/stores/auth';
 	import { licenseStore } from '$lib/stores/license';
+	import ConfirmPopover from '$lib/components/ConfirmPopover.svelte';
 	import { formatDate } from '$lib/stores/settings';
 
 	// License state
@@ -183,10 +184,28 @@
 				</div>
 				{#if $canAccess('settings', 'edit')}
 				<div class="flex justify-end">
-					<Button variant="outline" size="sm" onclick={deactivateLicense}>
-						<XCircle class="w-4 h-4" />
-						Deactivate license
-					</Button>
+					<ConfirmPopover
+						action="Deactivate"
+						itemType="license"
+						itemName={licenseInfo.payload?.name || 'this license'}
+						title="Deactivate"
+						position="left"
+						confirmText="Deactivate license"
+						onConfirm={deactivateLicense}
+					>
+						{#snippet children({ open })}
+							<span class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border transition-colors {open ? 'border-destructive text-destructive' : 'hover:bg-muted'}">
+								<XCircle class="w-4 h-4" />
+								Deactivate license
+							</span>
+						{/snippet}
+						{#snippet extraContent()}
+							<p class="text-xs text-muted-foreground">
+								Roles stop being enforced, so everyone who can sign in gets full access
+								until a valid license is installed.
+							</p>
+						{/snippet}
+					</ConfirmPopover>
 				</div>
 				{/if}
 			</Card.Content>

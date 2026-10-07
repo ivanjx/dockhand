@@ -15,7 +15,7 @@
 
 import { request } from 'undici';
 import type { ConnectConfig, SecretProvider, TestConnectionResult } from './shared';
-import { assertSafeProviderHost, parseProviderError, isJsonResponse } from './shared';
+import { assertSafeProviderHost, parseProviderError, isJsonResponse, stripSurroundingQuotes } from './shared';
 import { UnsupportedOperationError } from './shared';
 
 /** A vault as returned by GET /v1/vaults. */
@@ -228,7 +228,7 @@ export const connectProvider: SecretProvider<ConnectConfig> = {
 	supportsBulk: false,
 
 	isReference(value: unknown): value is string {
-		return typeof value === 'string' && value.trim().startsWith('op://');
+		return typeof value === 'string' && stripSurroundingQuotes(value).startsWith('op://');
 	},
 
 	async testConnection(config: ConnectConfig): Promise<TestConnectionResult> {

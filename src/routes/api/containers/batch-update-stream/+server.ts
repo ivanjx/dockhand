@@ -1,3 +1,4 @@
+import { trackedImageReference } from '$lib/utils/tracked-image';
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { authorize } from '$lib/server/authorize';
@@ -14,8 +15,10 @@ import {
 } from '$lib/server/docker';
 import { auditContainer } from '$lib/server/audit';
 import { getScannerSettings, scanImage } from '$lib/server/scanner';
-import { saveVulnerabilityScan, removePendingContainerUpdate, type VulnerabilityCriteria } from '$lib/server/db';
-import { parseImageNameAndTag, shouldBlockUpdate, combineScanSummaries, isSystemContainer, shouldProceedOnScanError } from '$lib/server/scheduler/tasks/update-utils';
+import { saveVulnerabilityScan, removePendingContainerUpdateByName, getPendingContainerUpdates, type VulnerabilityCriteria } from '$lib/server/db';
+import { resolveContainer, labelForMissing } from '$lib/utils/stale-container-id';
+import { parseImageNameAndTag, combineScanSummaries, isSystemContainer, shouldProceedOnScanError } from '$lib/server/scheduler/tasks/update-utils';
+import { resolveBlockDecision } from '$lib/server/scheduler/tasks/block-decision';
 import { isUpdateDisabledByLabel } from '$lib/server/container-labels';
 import { recreateContainer } from '$lib/server/scheduler/tasks/container-update';
 import { createJob, appendLine, completeJob, failJob } from '$lib/server/jobs';
@@ -52,6 +55,7 @@ export interface UpdateProgress {
 	};
 	// Pull log specific fields
 	pullStatus?: string;
+	pullMessage?: string;
 	pullId?: string;
 	pullProgress?: string;
 	// Scan specific fields
@@ -70,6 +74,17 @@ export interface UpdateProgress {
 	}>;
 }
 
+/** id -> name from the pending rows, read once for the whole batch. */
+async function pendingNames(envId: number | null): Promise<Map<string, string>> {
+	if (envId == null) return new Map();
+	try {
+		const rows = await getPendingContainerUpdates(envId);
+		return new Map(rows.map((r) => [r.containerId, r.containerName]));
+	} catch {
+		return new Map();
+	}
+}
+
 /**
  * Batch update containers with streaming progress.
  * Expects JSON body: { containerIds: string[], vulnerabilityCriteria?: VulnerabilityCriteria }
@@ -77,7 +92,7 @@ export interface UpdateProgress {
  * @openapi
  * summary: Recreate a set of containers with live streaming progress (Server-Sent Events), optionally blocking on vulnerability criteria (requires the 'create' permission)
  * description: Returns a `text/event-stream` reporting per-container progress. `vulnerabilityCriteria` (default "never") can block an update when a container's image scan exceeds the configured severity threshold. containerIds from GET /api/containers.
- * query: env:integer The target environment ID (omit for the local/default Docker host) (from GET /api/environments)
+ * query: env:integer! The target environment ID the container lives in (from GET /api/environments)
  * body: {containerIds:array<string>!, vulnerabilityCriteria:string}
  * body-example: {"containerIds":["3f4a1c2b9d8e"],"vulnerabilityCriteria":"never"}
  * resp-200: Server-Sent Events stream (text/event-stream) of per-container update progress
@@ -135,6 +150,8 @@ export const POST: RequestHandler = async (event) => {
 			message: `Starting update of ${containerIds.length} container${containerIds.length > 1 ? 's' : ''}${shouldScan ? ' with vulnerability scanning' : ''}`
 		});
 
+		const namesById = await pendingNames(envIdNum ?? null);
+
 		// Process containers sequentially
 		for (let i = 0; i < containerIds.length; i++) {
 			const containerId = containerIds[i];
@@ -143,13 +160,17 @@ export const POST: RequestHandler = async (event) => {
 			try {
 				// Find container
 				const containers = await listContainers(true, envIdNum);
-				const container = containers.find(c => c.id === containerId);
+				// An update recreates the container under a new id, so a selection made
+				// before one ran holds an id that no longer exists. The pending row keeps
+				// the NAME, which survives, so the same container is still reachable.
+				const pendingName = namesById.get(containerId) ?? null;
+				const container = resolveContainer(containers, containerId, pendingName);
 
 				if (!container) {
 					sendData({
 						type: 'progress',
 						containerId,
-						containerName: 'unknown',
+						containerName: labelForMissing(pendingName),
 						step: 'failed',
 						current: i + 1,
 						total: containerIds.length,
@@ -161,11 +182,15 @@ export const POST: RequestHandler = async (event) => {
 				}
 
 				containerName = container.name;
+				// Everything from here talks to the daemon, so it uses the id the
+				// container HAS. `containerId` is what the caller selected and stays the
+				// key in the progress events the UI is keyed on.
+				const liveId = container.id;
 
 				// Get full container config
-				const inspectData = await inspectContainer(containerId, envIdNum) as any;
+				const inspectData = await inspectContainer(liveId, envIdNum) as any;
 				const config = inspectData.Config;
-				const imageName = config.Image;
+				const imageName = trackedImageReference(config.Image, config.Labels);
 				const currentImageId = inspectData.Image;
 
 				// Capture the OLD image's Env/Labels BEFORE pulling — once the tag is
@@ -247,6 +272,7 @@ export const POST: RequestHandler = async (event) => {
 								containerId,
 								containerName,
 								pullStatus: data.status,
+								pullMessage: data.message,
 								pullId: data.id,
 								pullProgress: data.progress
 							});
@@ -362,9 +388,15 @@ export const POST: RequestHandler = async (event) => {
 								} catch { /* ignore save errors */ }
 							}
 
-							// Check if blocked (combineScanSummaries uses Math.max for security check)
+							// Re-scan the current image when more_than_current needs a fresh comparison.
 							const combinedForBlockCheck = combineScanSummaries(scanResults);
-							const { blocked, reason } = shouldBlockUpdate(vulnerabilityCriteria, combinedForBlockCheck, undefined);
+							const { blocked, reason } = await resolveBlockDecision(
+								combinedForBlockCheck,
+								currentImageId,
+								envIdNum,
+								vulnerabilityCriteria,
+								(message) => sendData({ type: 'scan_log', containerId, containerName, message })
+							);
 							if (blocked) {
 								scanBlocked = true;
 								blockReason = reason;
@@ -478,7 +510,7 @@ export const POST: RequestHandler = async (event) => {
 					});
 				};
 
-				let newContainerId = containerId;
+				let newContainerId = liveId;
 
 				sendData({
 					type: 'progress',
@@ -534,9 +566,11 @@ export const POST: RequestHandler = async (event) => {
 				});
 				successCount++;
 
-				// Clear pending update indicator from database
+				// Clear pending update indicator from database. By name, because the
+				// row may have been written against an id this container no longer has -
+				// which is how a spent row survives to fail the next batch.
 				if (envIdNum) {
-					await removePendingContainerUpdate(envIdNum, containerId).catch(() => {
+					await removePendingContainerUpdateByName(envIdNum, containerName).catch(() => {
 						// Ignore errors - record may not exist
 					});
 				}

@@ -4,7 +4,8 @@ import {
 	getSecretProviders,
 	getSecretProviderById,
 	updateSecretProvider,
-	deleteSecretProvider
+	deleteSecretProvider,
+	getStacksUsingSecretProvider
 } from '$lib/server/db';
 import { hasProvider } from '$lib/server/secretproviders';
 import { redactProviderConfig } from '$lib/server/secretproviders/shared';
@@ -15,7 +16,7 @@ import { auditSecretProvider } from '$lib/server/audit';
  * @openapi
  * summary: Get one secret provider with its non-secret config coordinates (the token is redacted out)
  * path: id:integer The secret provider id
- * resp-200: {id:integer!, name:string!, type:string!, config:object!}
+ * resp-200: {id:integer!, name:string!, type:string!, config:object!, stacksUsing:array<{stackName:string!, environmentId:integer}>!}
  * resp-400: Invalid secret provider ID
  * resp-403: Permission denied (needs secrets:view)
  * resp-404: Secret provider not found
@@ -39,7 +40,17 @@ export const GET: RequestHandler = async ({ params, cookies }) => {
 		return json({ error: 'Secret provider not found' }, { status: 404 });
 	}
 	const { config, ...summary } = full;
-	return json({ ...summary, config: redactProviderConfig(config) });
+	// Name the stacks currently bound to this provider so the delete confirmation can
+	// warn the user that deleting it unbinds them (#1522). A provider is global, but its
+	// bound stacks live in environments - so env-scope the list to what the caller may
+	// see (Enterprise RBAC), or a restricted user would learn stack names in envs they
+	// cannot reach. null = all-environments access (admin/free/disabled) -> no filter.
+	const allStacksUsing = await getStacksUsingSecretProvider(id);
+	const accessibleEnvIds = await auth.getAccessibleEnvironmentIds();
+	const stacksUsing = accessibleEnvIds === null
+		? allStacksUsing
+		: allStacksUsing.filter((s) => s.environmentId === null || accessibleEnvIds.includes(s.environmentId));
+	return json({ ...summary, config: redactProviderConfig(config), stacksUsing });
 };
 
 /**

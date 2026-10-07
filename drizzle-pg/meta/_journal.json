@@ -71,6 +71,13 @@
       "when": 1788003738235,
       "tag": "0009_upstream_1_0_45_postgres",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1791343989083,
+      "tag": "0010_upstream_2026_10_07_postgres",
+      "breakpoints": true
     }
   ]
 }
