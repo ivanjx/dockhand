@@ -16,7 +16,7 @@
 	import { connectSSE, disconnectSSE } from '$lib/stores/events';
 	import { currentEnvironment, environments } from '$lib/stores/environment';
 	import { licenseStore, daysUntilExpiry, expiryMessage } from '$lib/stores/license';
-	import { licenceHoldMessage } from '$lib/utils/licence-hold';
+	import { heldByLapsedLicence } from '$lib/utils/licence-hold';
 	import { get } from 'svelte/store';
 	import { authStore } from '$lib/stores/auth';
 	import { extractPath, isSessionExpiryCandidate } from '$lib/utils/session-expiry';
@@ -25,6 +25,8 @@
 	import { appSettings } from '$lib/stores/settings';
 	import { shouldShowWhatsNew } from '$lib/utils/version';
 	import { AlertTriangle, Search } from 'lucide-svelte';
+	import { getLocale } from '$lib/paraglide/runtime.js';
+	import { m } from '$lib/paraglide/messages.js';
 
 	// Check if current route is login page (no sidebar needed)
 	const isLoginPage = $derived($page.url.pathname === '/login');
@@ -38,14 +40,17 @@
 	let commandPaletteOpen = $state(false);
 	// Said once, at the top: a lapsed licence refuses every read, so each page would
 	// otherwise report it separately as an empty table or a request that failed.
+	// Same decision as licenceHoldMessage (utils/licence-hold), worded in the UI language.
 	const licenceHold = $derived(
-		licenceHoldMessage({
+		heldByLapsedLicence({
 			hasEnterpriseLicense: $licenseStore.hasEnterpriseLicense,
 			isEnterprise: $licenseStore.isEnterprise,
 			isAdmin: $authStore.user?.isAdmin ?? false,
 			isAuthenticated: $authStore.authEnabled ? !!$authStore.user : false,
 			loading: $licenseStore.loading || $authStore.loading
 		})
+			? m.licence_hold()
+			: null
 	);
 
 
@@ -90,6 +95,9 @@
 	});
 
 	onMount(() => {
+		// app.html ships lang="en"; tell the browser (and screen readers) the UI language
+		document.documentElement.lang = getLocale();
+
 		// Apply theme from localStorage immediately (for flash-free loading)
 		applyTheme(themeStore.get());
 
@@ -130,7 +138,7 @@
 						await authStore.check(); // confirm with the server whether the session is actually gone
 						const auth = get(authStore);
 						if (auth.authEnabled && !auth.authenticated && window.location.pathname !== '/login') {
-							toast.error('Your session has expired. Please sign in again.');
+							toast.error(m.layout_session_expired());
 							goto('/login');
 						}
 					} finally {
@@ -189,7 +197,7 @@
 
 <svelte:head>
 	<link rel="icon" href="/logo_light.webp" />
-	<title>Dockhand - Docker Management</title>
+	<title>{m.layout_page_title()}</title>
 </svelte:head>
 
 {#if noSidebar}
@@ -213,7 +221,7 @@
 						class="flex items-center gap-2 px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground border rounded-md hover:bg-muted/50 transition-colors"
 					>
 						<Search class="w-3.5 h-3.5" />
-						<span class="hidden sm:inline">Search...</span>
+						<span class="hidden sm:inline">{m.layout_search()}</span>
 						<kbd class="pointer-events-none hidden sm:inline-flex h-5 select-none items-center gap-1 rounded border bg-muted px-1.5 font-mono text-2xs font-medium text-muted-foreground">
 							{#if isMac}
 								<span class="text-xs">⌘</span>

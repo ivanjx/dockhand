@@ -116,7 +116,7 @@ export function walkServerFiles(rootDirs: string[]): string[] {
 
 export function toOpenApiPath(serverFile: string, routesRoot: string): { path: string; params: string[] } {
 	const rel = relative(routesRoot, dirname(serverFile));
-	const segments = rel.split('/').filter(Boolean);
+	const segments = rel.split(/[\\/]/).filter(Boolean);
 	const params: string[] = [];
 	const converted = segments.map((seg) => {
 		const m = seg.match(/^\[(\.\.\.)?([^\]=]+?)(=.*)?\]$/);

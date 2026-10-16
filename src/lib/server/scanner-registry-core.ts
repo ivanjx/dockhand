@@ -60,9 +60,17 @@ export function toRegistryRef(image: string, repoTags?: string[] | null): string
 		const tags = (repoTags || []).filter(
 			(t) => typeof t === 'string' && t && t !== '<none>:<none>'
 		);
-		// A temp tag is no better than the ID here, so take a real one or nothing.
+		// A real tag is the best answer. Failing that, a temp tag still names the
+		// repository, and stripping its suffix yields the ref that was pulled - which is
+		// all a scheduled update's new image carries, since the real tag has already been
+		// handed back to the outgoing image.
 		const real = tags.find((t) => !isTempTag(t));
-		return real ? toRegistryRef(real) : image;
+		if (real) return toRegistryRef(real);
+		for (const temp of tags) {
+			const stripped = toRegistryRef(temp);
+			if (stripped !== temp) return stripped;
+		}
+		return image;
 	}
 
 	// A digest pins the content and resolves in the registry as-is.
@@ -132,11 +140,12 @@ export function registryAuthEnv(
 /**
  * Per-environment memory of "this daemon's image store loses blobs on export, so
  * skip the daemon path and scan straight from the registry". Keyed by the scan's
- * environment (envId, or the 'local' sentinel). Sticky for the process lifetime:
- * once a blob-export failure is seen for an env, every later scan on that env goes
- * registry-first, avoiding the ~15-50s wasted on a doomed `docker save`. Reset on
- * Dockhand restart so a fixed store returns to the fast daemon path automatically.
- * In-memory only - no DB, no migration.
+ * environment (envId, or the 'local' sentinel). Once a blob-export failure is seen
+ * for an env, later scans on it go registry-first, avoiding the ~15-50s wasted on a
+ * doomed `docker save`; the daemon remains the fallback for a ref no registry can
+ * answer. Held for the process lifetime and reset on restart, which is when a store
+ * is actually reconfigured - a single daemon success cannot clear it, because blob
+ * loss is per-image. In-memory only - no DB, no migration.
  */
 export class RegistryFallbackMemory {
 	private readonly envs = new Set<string>();
@@ -155,6 +164,77 @@ export class RegistryFallbackMemory {
 	clear(): void {
 		this.envs.clear();
 	}
+}
+
+/**
+ * Which of two failures to report when BOTH the registry and the daemon refused a scan.
+ *
+ * On an env already marked broken the registry is tried first and the daemon is the
+ * fallback - a registry cannot answer every ref (a local-only image, a private registry
+ * with no stored credentials). When the daemon fails with the export bug again, the
+ * registry's error is the actionable one: the operator already knows the export is
+ * broken, and the daemon's message would hide why the registry could not stand in. Any
+ * other daemon failure (a missing image, a dead socket) is its own problem and is
+ * reported as itself.
+ */
+export function chooseReportedError(
+	registryError: string,
+	daemonError: string
+): 'registry' | 'daemon' {
+	return isDaemonExportFailure(daemonError) ? 'registry' : 'daemon';
+}
+
+/**
+ * The registry coordinates a scan must authenticate against, for the ref it will
+ * actually ask for.
+ *
+ * A bare image ID carries no repository, so resolving it is what makes a private
+ * registry's stored credentials findable at all: looked up against the ID itself, the
+ * ref parses as Docker Hub's `library/sha256` and never matches. `registry` is fed to
+ * the credential lookup and `authority` scopes grype's auth env; both therefore come
+ * from the RESOLVED ref, not from the name the daemon was asked for.
+ *
+ * The parsing is injected (`parseRegistry`) so this stays free of the daemon-side
+ * registry module.
+ */
+export function resolveRegistryScanTarget(
+	imageName: string,
+	repoTags: string[] | null | undefined,
+	parseRegistry: (ref: string) => string
+): RegistryScanTarget {
+	const ref = toRegistryRef(imageName, repoTags);
+	return {
+		ref,
+		registry: parseRegistry(ref),
+		authority: imageRegistryAuthority(ref),
+		resolved: ref !== imageName,
+		unresolvableId: ref === imageName && needsRepoTags(imageName)
+	};
+}
+
+/** Everything registry mode needs about the image, decided in one place. */
+export interface RegistryScanTarget {
+	/** The ref to ask the registry for. */
+	ref: string;
+	/** The registry whose stored credentials apply. */
+	registry: string;
+	/** The host scoping grype's auth env, or null for implicit Docker Hub. */
+	authority: string | null;
+	/** The ref differs from the name the daemon was asked for. */
+	resolved: boolean;
+	/** A bare ID that no tag could name, so the registry cannot answer it. */
+	unresolvableId: boolean;
+}
+
+/**
+ * Whether resolving this ref needs an image inspect.
+ *
+ * Only a bare ID does: it carries no repository, so nothing but `RepoTags` can name
+ * one. A tag resolves on its own, and the inspect is a remote round-trip worth paying
+ * for only on the path that cannot do without it.
+ */
+export function needsRepoTags(imageName: string): boolean {
+	return isBareImageId(imageName);
 }
 
 /**

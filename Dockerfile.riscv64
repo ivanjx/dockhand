@@ -23,7 +23,7 @@
 # -----------------------------------------------------------------------------
 # Alpine edge has docker-cli for riscv64 but NOT docker-compose.
 # Build it from source since Go has excellent riscv64 cross-compilation.
-FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine AS compose-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine AS compose-builder
 ARG TARGETARCH
 
 RUN apk add --no-cache git
@@ -49,7 +49,10 @@ RUN MAKEFLAGS="-j$(nproc)" npm ci --ignore-scripts \
     && MAKEFLAGS="-j$(nproc)" npm rebuild
 
 COPY . .
-RUN npm run build
+# The message catalogue puts the build close to Node's default heap: it needs over 3 GB
+# at 2168 keys across 6 locales and grows with every locale. Without a limit the build
+# dies as an exit-134 OOM with no useful message, so state the ceiling here.
+RUN NODE_OPTIONS=--max-old-space-size=6144 npm run build
 
 # -----------------------------------------------------------------------------
 # Stage 3: Native Addon Builder (runs on riscv64 via QEMU)
@@ -72,7 +75,7 @@ RUN MAKEFLAGS="-j$(nproc)" npm ci --omit=dev --ignore-scripts \
 # -----------------------------------------------------------------------------
 # Stage 4: Go Collector Builder (cross-compile from build platform)
 # -----------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.26.8 AS go-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.9 AS go-builder
 ARG TARGETARCH
 WORKDIR /app
 COPY collector/ ./collector/
@@ -120,10 +123,9 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     PORT=3000 \
     HOST=0.0.0.0 \
     DATA_DIR=/app/data \
-    HOME=/home/dockhand
-# PUID/PGID are deliberately NOT set here. The entrypoint defaults them to
-# 1001:1001, and it can only tell "nobody asked for a user" from "somebody
-# asked for 1001" while the variables are genuinely absent.
+    HOME=/home/dockhand \
+    PUID=1001 \
+    PGID=1001
 
 # Copy node_modules with riscv64 native addons
 COPY --from=addon-builder --chown=dockhand:dockhand /app/node_modules ./node_modules

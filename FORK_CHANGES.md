@@ -8,7 +8,7 @@ Use it with a fresh upstream fetch:
 
 ```bash
 git switch mine
-git fetch origin upstream
+git fetch --multiple origin upstream
 git diff --name-status main...mine
 git diff --name-status mine...upstream/main
 ```
@@ -39,6 +39,9 @@ Behavior to preserve:
 
 - A `container_start` schedule type exists throughout the scheduler and schedule
   APIs, including the database's `ALL_SCHEDULE_TYPES` execution-history allow-list.
+- Merge schedule type unions and execution-history allow-lists additively. Keep
+  `container_start` alongside upstream types such as `env_report` and the
+  repository-maintenance types.
 - A scheduled start looks up the container by name, skips if it is already
   running, starts it if stopped, records schedule execution logs, and updates
   `last_started`.
@@ -87,6 +90,9 @@ Behavior to preserve:
 - Attach uses Docker's `/containers/<id>/attach` stream with stdin, stdout, and
   stderr enabled. It does not launch a shell and does not require shell or user
   selection.
+- Keep the mode selector available while shell detection is pending or no shell
+  is found, so shell-less containers can still attach. Switching back to `exec`
+  re-detects shells and restores the shell-mode user selection.
 - Attach is available from the full terminal page and the per-container
   terminal action. The terminal page lists running containers only.
 - The terminal WebSocket keeps authentication and environment access checks for
@@ -184,6 +190,31 @@ Key files:
 - `src/routes/api/containers/[id]/rename/+server.ts`
 - `src/routes/api/batch/+server.ts`
 
+## Localization And Generated API Documentation
+
+Upstream uses Paraglide for UI messages. Merge translated labels without replacing
+fork-owned control flow, schedule branches, or terminal mode-change handlers.
+
+The fork also keeps OpenAPI generation portable across Windows and Unix:
+
+- Convert native filesystem separators to URL path segments before recognizing
+  dynamic route parameters. Generated paths must use `/`, never `\`.
+- Regenerate both API artifacts from the merged route annotations; do not resolve
+  generated JSON conflicts by hand or discard fork-owned endpoints.
+
+```bash
+npm run generate:openapi
+npm run generate:openapi:check
+bun test tests/openapi-route-paths.test.ts
+```
+
+Key files:
+
+- `scripts/openapi/lib.ts`
+- `src/lib/openapi.generated.json`
+- `static/openapi.json`
+- `tests/openapi-route-paths.test.ts`
+
 ## Build, Packaging, And Deployment
 
 The fork carries local deployment/build changes.
@@ -192,7 +223,9 @@ Behavior to preserve:
 
 - GitHub Actions workflow builds and pushes fork images to GHCR natively:
   amd64 on `ubuntu-latest`, arm64 on `ubuntu-24.04-arm`, without QEMU.
-- Docker build uses a larger Node heap for `npm run build`.
+- Docker build uses an explicit larger Node heap for `npm run build`. Preserve
+  upstream's 6144 MiB ceiling for the localized build rather than restoring the
+  fork's older 4096 MiB value.
 - Docker Compose examples mount the host Docker Compose CLI plugin into the app
   container.
 - `.dockerignore` excludes dependency, build, VCS, compose, Dockerfile, and
@@ -446,6 +479,12 @@ timestamps and SQL hashes before treating it as an upgrade fixture. Account for
 Git's Windows CRLF checkout conversion when comparing hashes: runtime hashes use
 the SQL bytes on disk, while Linux image builds normally use LF. Do not rewrite
 deployed migration records to conceal a different baseline.
+
+Fresh databases and fixtures generated from the committed fork migration chain
+are useful additional checks, but do not replace a verified deployed-database
+copy. If no matching copy is available, report that deployment prerequisite
+explicitly rather than rewriting migration records or treating a mismatched
+database as a valid upgrade fixture.
 
 Commit the merged schemas, regenerated migrations, snapshots, journals, and any
 required data backfills together:

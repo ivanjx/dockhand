@@ -92,12 +92,21 @@ export function prefixMatches(a: string, b: string): boolean {
 const PRERELEASE_RE = /(^|[-.])(rc|beta|alpha|nightly|dev|pre|snapshot)(\d|[-.]|$)/i;
 
 // A trailing commit hash, e.g. `-b2da6b90f` in searxng's `2026.8.16-b2da6b90f`.
-// Requiring 7+ pure-hex chars keeps real build variants (`-alpine`, `-ls123`,
+// Requiring 7+ pure-hex chars keeps real build variants (`-alpine`,
 // `-ubuntu22.04`) intact - they aren't long hex runs - while collapsing the
 // per-release hash so every hashed tag of one image shares a flavor and can be
 // compared. Guarded by at least one letter so a plain numeric build (`-12345678`)
 // isn't mistaken for a hash.
 const COMMIT_HASH_RE = /[-.](?=[0-9a-f]*[a-f])[0-9a-f]{7,}$/i;
+
+// linuxserver.io appends a build counter (`-ls121`) that increments on every rebuild
+// of the same upstream version, so it moves with each release rather than naming a
+// variant. Left intact it makes every release its own flavor, and an image pinned as
+// `<version>-ls<build>` can never match a candidate. Collapse the digits so
+// `2.5.1-ls121` and `2.5.2-ls122` share `-ls`, while `-ls` still never matches bare
+// or `-alpine`. The digits stay in `suffix`, so they remain available as a
+// tie-breaker between two tags of one upstream version.
+const LS_BUILD_RE = /(-ls)\d+$/i;
 
 export function isPrerelease(tag: ParsedTag): boolean {
 	return PRERELEASE_RE.test(tag.suffix);
@@ -105,8 +114,9 @@ export function isPrerelease(tag: ParsedTag): boolean {
 
 /**
  * The "flavor" is the stable part of the suffix — the build variant like
- * `-alpine` or `-ls123` — with any prerelease channel and any trailing commit
- * hash stripped off. So `1.0-alpine` and `1.1-alpine` share the flavor `-alpine`,
+ * `-alpine` — with any prerelease channel, trailing commit hash and linuxserver
+ * build counter normalised away. So `1.0-alpine` and `1.1-alpine` share `-alpine`,
+ * `2.5.1-ls121` and `2.5.2-ls122` share `-ls`,
  * `1.0-rc1` / `1.0-rc2` share the flavor `` (they only differ in the prerelease),
  * and `2026.8.15-a1b2c3d` / `2026.8.16-b2da6b9` share the flavor `` (they only
  * differ in the per-release hash). This lets one hashed tag suggest the next
@@ -115,6 +125,7 @@ export function isPrerelease(tag: ParsedTag): boolean {
 export function flavorOf(tag: ParsedTag): string {
 	return tag.suffix
 		.replace(COMMIT_HASH_RE, '')
+		.replace(LS_BUILD_RE, '$1')
 		.replace(PRERELEASE_RE, (_m, delim: string) => (delim === '.' ? '' : delim))
 		.replace(/[-.]+$/, ''); // drop the delimiter the prerelease left dangling
 }
@@ -174,10 +185,18 @@ export const ALTERNATION_QUANTIFIER_RE = new RegExp(
  */
 export const MAX_QUANTIFIERS = 8;
 const QUANTIFIER_RE = /[+*?]|\{\d*,?\d*\}/g;
+/**
+ * Group-opening syntax, which spends a `?` without being a quantifier:
+ * `(?<name>`, `(?:`, `(?=`, `(?!`, `(?<=`, `(?<!`. A named group is REQUIRED to
+ * write an override at all, so counting its `?` makes each version part cost two
+ * and puts the documented five-part forms over the limit.
+ */
+const GROUP_SYNTAX_RE = /\(\?(?:<[A-Za-z_][A-Za-z0-9_]*>|<[=!]|[:=!])/g;
 
 /** Whether a pattern carries so many quantifiers that one match could stall. */
 export function hasTooManyQuantifiers(source: string): boolean {
-	return (source.match(QUANTIFIER_RE) ?? []).length > MAX_QUANTIFIERS;
+	const quantifiersOnly = source.replace(GROUP_SYNTAX_RE, '(');
+	return (quantifiersOnly.match(QUANTIFIER_RE) ?? []).length > MAX_QUANTIFIERS;
 }
 
 /**
@@ -187,6 +206,32 @@ export function hasTooManyQuantifiers(source: string): boolean {
  * `regex:` scheme, a `major` named group, a sane length, and rejects obvious
  * catastrophic-backtracking shapes (the value comes from an untrusted image label).
  */
+/**
+ * Why a `dockhand.version.pattern` label was not used, or null when it was. The
+ * fallback to the default parser is deliberate - a bad label must cost the label,
+ * never the update check - but from outside the label just does nothing, so the
+ * caller can log this once instead of leaving somebody to read this file.
+ */
+export function versionPatternRejection(value: string | undefined | null): string | null {
+	if (!value) return null; // no label is not a rejection
+	const trimmed = value.trim();
+	if (!trimmed.startsWith(VERSION_PATTERN_SCHEME)) return `missing the "${VERSION_PATTERN_SCHEME}" prefix`;
+
+	const source = trimmed.slice(VERSION_PATTERN_SCHEME.length);
+	if (source.length === 0) return 'the pattern is empty';
+	if (source.length > MAX_PATTERN_LENGTH) return `too long (${source.length} > ${MAX_PATTERN_LENGTH} characters)`;
+	if (!source.includes('(?<major>')) return 'no (?<major>) group, so it yields no version';
+	if (NESTED_QUANTIFIER_RE.test(source)) return 'a quantified group inside a quantifier can backtrack catastrophically';
+	if (ALTERNATION_QUANTIFIER_RE.test(source)) return 'a quantified alternation can backtrack catastrophically';
+	if (hasTooManyQuantifiers(source)) return `too many quantifiers (more than ${MAX_QUANTIFIERS})`;
+	try {
+		new RegExp(source);
+	} catch (e) {
+		return `it does not compile: ${e instanceof Error ? e.message : String(e)}`;
+	}
+	return null;
+}
+
 export function compileVersionPattern(value: string | undefined | null): RegExp | null {
 	if (!value) return null;
 	const trimmed = value.trim();

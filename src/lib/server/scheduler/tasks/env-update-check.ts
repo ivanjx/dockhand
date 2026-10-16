@@ -43,7 +43,7 @@ import { sendEventNotification } from '../../notifications';
 import { getScannerSettings, scanImage, type VulnerabilitySeverity } from '../../scanner';
 import { parseImageNameAndTag, combineScanSummaries, isSystemContainer, shouldProceedOnScanError, isPodmanInfraContainer } from './update-utils';
 import { resolveBlockDecision } from './block-decision';
-import { isUpdateDisabledByLabel, isHiddenByLabel, getVersionPatternOverride, digestUpdateVisible } from '../../container-labels';
+import { isUpdateDisabledByLabel, isHiddenByLabel, getVersionPatternOverride, getVersionPatternRejection, digestUpdateVisible } from '../../container-labels';
 import { tagFilterFromLabels } from '$lib/server/semver/tag-filter-labels';
 import { recreateContainer } from './container-update';
 
@@ -248,6 +248,15 @@ export async function runEnvUpdateCheckJob(
 					// A `dockhand.version.pattern` label lets a container teach the check
 					// how to read its own non-standard tags (CalVer+hash, etc.).
 					const versionPattern = getVersionPatternOverride(inspectData.Config?.Labels);
+					// Say so when the label was refused: the fall back to the default
+					// parser is silent otherwise, and from outside the label just looks
+					// like it does nothing.
+					const patternRejection = getVersionPatternRejection(inspectData.Config?.Labels);
+					if (patternRejection) {
+						await log(
+							`  [${container.name}] dockhand.version.pattern ignored - ${patternRejection}`
+						);
+					}
 					// A version tag names what a maintainer called a build, not when it was
 					// made, so a repo still carrying high-sorting old tags offers them as
 					// upgrades. The running image's build date is read locally; the

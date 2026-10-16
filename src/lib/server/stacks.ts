@@ -5,8 +5,9 @@
  * All lifecycle operations use docker compose commands.
  */
 
-import { existsSync, mkdirSync, rmSync, readdirSync, cpSync, statSync, unlinkSync, renameSync, readFileSync, writeFileSync, realpathSync, accessSync, constants as fsConstants } from 'node:fs';
-import { join, resolve, dirname, basename, isAbsolute, normalize as pathNormalize, sep as pathSep } from 'node:path';
+import { existsSync, mkdirSync, rmSync, readdirSync, cpSync, statSync, lstatSync, readlinkSync, unlinkSync, renameSync, readFileSync, writeFileSync, realpathSync, accessSync, constants as fsConstants } from 'node:fs';
+import { join, resolve, relative, dirname, basename, isAbsolute, normalize as pathNormalize, sep as pathSep } from 'node:path';
+import { judgeSymlink } from './stack-symlinks';
 import { spawn as nodeSpawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -70,7 +71,7 @@ import { isDeletableStackDir } from './stack-delete-guard';
 import { cleanPem } from '$lib/utils/pem';
 import { quoteForEnvFile } from '$lib/utils/env-file-values';
 import { rewriteComposeVolumePaths, getHostDataDir } from './host-path';
-import { getOrderValue } from './container-labels';
+import { compareContainerOrder } from './container-labels';
 import { stackLabelTags, type LabelTagSpec } from '$lib/utils/tags-core';
 import { pendingRowsToClear } from './pending-updates-core';
 import { buildDockhandOverrideFile } from './dockhand-override-file';
@@ -306,37 +307,49 @@ async function readDirFilesAsMap(dirPath: string): Promise<Record<string, string
 	let totalSize = 0;
 	const skipped: string[] = [];
 
+	/** Read one regular file into the map, honouring the per-file and total caps. */
+	async function readOneFile(fullPath: string, relPath: string, fileSize: number): Promise<void> {
+		if (fileSize > MAX_FILE_SIZE) {
+			skipped.push(`${relPath} (${(fileSize / 1024 / 1024).toFixed(1)} MB)`);
+			return;
+		}
+		if (totalSize + fileSize > MAX_TOTAL_SIZE) {
+			skipped.push(`${relPath} (would exceed ${MAX_TOTAL_SIZE / 1024 / 1024} MB total limit)`);
+			return;
+		}
+		const bytes = readFileSync(fullPath);
+		totalSize += fileSize;
+		if (isBinaryContent(bytes)) {
+			files[relPath] = `base64:${bytes.toString('base64')}`;
+		} else {
+			files[relPath] = new TextDecoder().decode(bytes);
+		}
+	}
+
 	async function scanDir(currentPath: string, relativePath: string = ''): Promise<void> {
 		const entries = readdirSync(currentPath, { withFileTypes: true });
 		for (const entry of entries) {
 			const fullPath = join(currentPath, entry.name);
 			const relPath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
 
+			// A symlink is neither isDirectory() nor isFile() to withFileTypes, so without
+			// this it would match no branch and vanish from the payload unremarked. The
+			// protocol carries path -> content and cannot express a link, so the link is
+			// not sent; it is named instead, because a file the agent never receives has
+			// to be visible to whoever wonders where it went.
+			if (entry.isSymbolicLink()) {
+				let target = '?';
+				try { target = readlinkSync(fullPath); } catch { /* keep the placeholder */ }
+				skipped.push(`${relPath} -> ${target} (symlink; only regular files are sent)`);
+				continue;
+			}
+
 			if (entry.isDirectory()) {
 				// Skip .git directory
 				if (entry.name === '.git') continue;
 				await scanDir(fullPath, relPath);
 			} else if (entry.isFile()) {
-				const fileSize = statSync(fullPath).size;
-
-				if (fileSize > MAX_FILE_SIZE) {
-					skipped.push(`${relPath} (${(fileSize / 1024 / 1024).toFixed(1)} MB)`);
-					continue;
-				}
-
-				if (totalSize + fileSize > MAX_TOTAL_SIZE) {
-					skipped.push(`${relPath} (would exceed ${MAX_TOTAL_SIZE / 1024 / 1024} MB total limit)`);
-					continue;
-				}
-
-				const bytes = readFileSync(fullPath);
-				totalSize += fileSize;
-
-				if (isBinaryContent(bytes)) {
-					files[relPath] = `base64:${bytes.toString('base64')}`;
-				} else {
-					files[relPath] = new TextDecoder().decode(bytes);
-				}
+				await readOneFile(fullPath, relPath, statSync(fullPath).size);
 			}
 		}
 	}
@@ -2227,12 +2240,7 @@ export async function listComposeStacks(envId?: number | null): Promise<ComposeS
 					newerVersion: newerVersionById.get(c.id) ?? null
 				};
 			})
-			.sort((a, b) => {
-				const orderA = getOrderValue(a.labels);
-				const orderB = getOrderValue(b.labels);
-				if (orderA !== orderB) return orderA - orderB;
-				return a.service.localeCompare(b.service);
-			});
+			.sort(compareContainerOrder);
 
 		return {
 			name,
@@ -3305,11 +3313,40 @@ export async function deployStack(options: DeployStackOptions): Promise<StackOpe
 			// and would be destroyed, causing data loss (#831).
 			console.log(`${logPrefix} Copying source directory to stack directory...`);
 			mkdirSync(workingDir, { recursive: true });
+			// Links are copied verbatim so a relative one stays relative: resolving it
+			// writes an absolute path into the clone, and the next deploy then finds the
+			// destination link resolving onto its own source and cp refuses the copy.
+			// judgeSymlink names the three shapes that cannot be carried; each is dropped
+			// and reported, since a file the stack does not get should not be a mystery.
+			const refused: string[] = [];
 			cpSync(sourceDir, workingDir, {
 				recursive: true,
 				force: true,
-				filter: (src) => !src.includes('/.git/') && !src.endsWith('/.git')
+				verbatimSymlinks: true,
+				filter: (src) => {
+					if (src.includes('/.git/') || src.endsWith('/.git')) return false;
+					let target: string;
+					try {
+						if (!lstatSync(src).isSymbolicLink()) return true;
+						target = readlinkSync(src);
+					} catch {
+						// Unreadable means it is not a link we can judge; let cp decide.
+						return true;
+					}
+					const verdict = judgeSymlink(src, target, sourceDir, existsSync);
+					if (verdict.kind === 'refuse') {
+						refused.push(`  ${relative(sourceDir, src)} -> ${target} (skipped: ${verdict.reason})`);
+						return false;
+					}
+					return true;
+				}
 			});
+			if (refused.length > 0) {
+				console.log(`${logPrefix} Skipped ${refused.length} symlink(s):`);
+				for (const line of refused) console.log(`${logPrefix} ${line}`);
+				onLine?.(`Skipped ${refused.length} symlink(s):`);
+				for (const line of refused) onLine?.(line);
+			}
 			console.log(`${logPrefix} Copied ${sourceDir} -> ${workingDir}`);
 
 			// Git deletion sync (#966): remove files that were deleted from the

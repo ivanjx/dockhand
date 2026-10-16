@@ -147,9 +147,27 @@ describe('toRegistryRef for the bare image ID the auto-update scans with', () =>
 		).toBe('nginx:1.27');
 	});
 
-	test('a temp tag is still cleaned when it is the only one', () => {
-		// Nothing better exists, and the stripped form is what was pulled.
-		expect(toRegistryRef(ID, ['nginx:1.27-dockhand-pending'])).toBe(ID);
+	test('a lone temp tag is stripped to the ref that was pulled', () => {
+		// What a scheduled update's new image carries: the real tag went back to the
+		// outgoing image before the scan, so the temp tag is the only name left. Its
+		// stripped form is exactly what was pulled, and the registry can answer it.
+		expect(toRegistryRef(ID, ['nginx:1.27-dockhand-pending'])).toBe('nginx:1.27');
+		expect(toRegistryRef(ID, ['busybox:latest-dockhand-pending'])).toBe('busybox:latest');
+		expect(toRegistryRef(ID, ['registry.bor6.pl:5000/team/app:v2-dockhand-update'])).toBe(
+			'registry.bor6.pl:5000/team/app:v2'
+		);
+	});
+
+	test('a temp tag that strips to nothing usable stays the ID', () => {
+		// The suffix alone is not a repository, so there is no ref to offer.
+		expect(toRegistryRef(ID, ['acme/app:-dockhand-pending'])).toBe(ID);
+	});
+
+	test('a tag merely containing the suffix is not treated as a temp tag', () => {
+		// It is a real tag, so it is returned as-is rather than mangled.
+		expect(toRegistryRef(ID, ['acme/dockhand-pending-tools:v1'])).toBe(
+			'acme/dockhand-pending-tools:v1'
+		);
 	});
 
 	test('stays the ID when the inspect offers nothing usable', () => {

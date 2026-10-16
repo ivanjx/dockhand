@@ -2,10 +2,9 @@
  * Shared backup utilities — used by BackupPanel, BackupsTab, RestoreModal, backups page.
  */
 
-import { HardDrive, Globe } from 'lucide-svelte';
+import { HardDrive, Globe, Server } from 'lucide-svelte';
 import { AmazonS3Icon, BackblazeIcon, AzureBlobIcon, GoogleCloudIcon, RestServerIcon } from '$lib/components/cloud-icons';
 import cronstrue from 'cronstrue';
-import type { Component } from 'svelte';
 import { computeExecutionTally, type Execution, type ExecutionTally } from '$lib/utils/execution-tally';
 export { computeExecutionTally, type Execution, type ExecutionTally };
 
@@ -41,13 +40,14 @@ export function classifyJobResult(result: any): { outcome: BackupOutcome; messag
 // Repository type helpers
 // ---------------------------------------------------------------------------
 
-export function getRepoTypeIcon(repository: string): Component {
+export function getRepoTypeIcon(repository: string) {
 	if (repository.startsWith('/') || repository.startsWith('./')) return HardDrive;
 	if (repository.startsWith('s3:')) return AmazonS3Icon;
 	if (repository.startsWith('b2:')) return BackblazeIcon;
 	if (repository.startsWith('azure:')) return AzureBlobIcon;
 	if (repository.startsWith('gs:')) return GoogleCloudIcon;
 	if (repository.startsWith('rest:')) return RestServerIcon;
+	if (repository.startsWith('sftp:')) return Server;
 	return Globe;
 }
 
@@ -58,6 +58,7 @@ export function getRepoTypeLabel(repository: string): string {
 	if (repository.startsWith('azure:')) return 'Azure Blob';
 	if (repository.startsWith('gs:')) return 'Google Cloud';
 	if (repository.startsWith('rest:')) return 'REST';
+	if (repository.startsWith('sftp:')) return 'SFTP';
 	return 'Unknown';
 }
 
@@ -133,9 +134,10 @@ export function retentionSummary(retention: string | RetentionPolicy | null | un
 // Cron helpers
 // ---------------------------------------------------------------------------
 
-export function formatCron(cron: string | null): string {
+/** `locale` is a cronstrue locale (see $lib/i18n/cron); English when omitted. */
+export function formatCron(cron: string | null, locale?: string): string {
 	if (!cron) return '—';
-	try { return cronstrue.toString(cron, { use24HourTimeFormat: true }); } catch { return cron; }
+	try { return cronstrue.toString(cron, { use24HourTimeFormat: true, ...(locale && { locale }) }); } catch { return cron; }
 }
 
 // ---------------------------------------------------------------------------

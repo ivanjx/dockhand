@@ -1,9 +1,38 @@
 [
   {
-    "version": "1.0.52",
+    "version": "1.0.54",
     "date": "",
     "comingSoon": true,
     "changes": [
+      { "type": "fix", "text": "a version pattern with four or five parts is no longer refused, and an ignored pattern says why (#1702)" },
+      { "type": "fix", "text": "reading pages no longer fails behind an nginx reverse proxy that uses an upstream block (#1707)" },
+      { "type": "fix", "text": "image scans work again when the Docker daemon compresses its logs (PR#1715, @santacruz-usa)" },
+      { "type": "fix", "text": "a container with a long stop_grace_period updates instead of being left stopped" },
+      { "type": "feature", "text": "the interface follows your language - translation engine and German (#494, PR#1706, PR#1709, PR#1718, PR#1719, PR#1722, PR#1726, PR#1734, PR#1736, PR#1738, PR#1742, @Hellraiser28)" },
+      { "type": "feature", "text": "Simplified Chinese translation (#494, PR#1708, PR#1716, PR#1720, PR#1721, PR#1730, PR#1733, PR#1741, PR#1749, @maicent)" },
+      { "type": "feature", "text": "French translations, for France and Canada (#494, PR#1714, PR#1717, PR#1727, PR#1728, PR#1729, PR#1732, PR#1735, PR#1746, PR#1747, PR#1748, @MagnanGG)" },
+      { "type": "feature", "text": "Polish translation (#494)" },
+      { "type": "fix", "text": "a wider sidebar so translated labels fit (PR#1731, @MagnanGG)" },
+      { "type": "fix", "text": "a scheduled update is no longer blocked by a failed scan of an image the registry cannot name (#1737)" },
+      { "type": "feature", "text": "Psono as a secret provider, with bulk pull and inline psono:// references" },
+      { "type": "fix", "text": "bulk operations on stacks over the API no longer fail every item (#1745)" },
+      { "type": "fix", "text": "the update check now reports a newer release on Kubernetes instead of giving up (#1710)" }
+    ],
+    "imageTag": "fnsys/dockhand:v1.0.54"
+  },
+  {
+    "version": "1.0.53",
+    "date": "2026-10-10",
+    "changes": [
+      { "type": "fix", "text": "remove the 1.0.52 PUID change that could alter stack file ownership on upgrade (#1700, #1701)" }
+    ],
+    "imageTag": "fnsys/dockhand:v1.0.53"
+  },
+  {
+    "version": "1.0.52",
+    "date": "2026-10-10",
+    "changes": [
+      { "type": "feature", "text": "back up to an SFTP server with a dedicated SSH key and verified host keys (#1478, PR#1693, @ddeitterick)" },
       { "type": "fix", "text": "a container started with PUID=1001 runs as that user instead of root (#1669)" },
       { "type": "feature", "text": "offer the compose file detected from container labels when adopting an external stack (#1612, PR#1617, @ondras)" },
       { "type": "feature", "text": "hold off automatic updates until a new image is older than a configurable minimum image age (#918, #1365, PR#1643, @TheDuffman85)" },
@@ -13,7 +42,13 @@
       { "type": "fix", "text": "skip newer-version tags whose image is older than the one running (#1673)" },
       { "type": "feature", "text": "filter newer-version candidates per container (#1674)" },
       { "type": "feature", "text": "read per-stack resource totals from the API (#1626)" },
-      { "type": "feature", "text": "show stack health on the stacks page, and filter by it (#1678)" }
+      { "type": "feature", "text": "show stack health on the stacks page, and filter by it (#1678)" },
+      { "type": "fix", "text": "find the stack folder when a nested bind shares a name with one at the root (#1679)" },
+      { "type": "fix", "text": "ordering one container with dockhand.order now moves it ahead of the unlabelled ones (#1117)" },
+      { "type": "fix", "text": "restore preview no longer reports an empty target for a stack whose files are there (#1681)" },
+      { "type": "fix", "text": "updating a Podman container started by podman-compose no longer leaves it stopped (#1692)" },
+      { "type": "fix", "text": "the next compose deploy no longer recreates a container Dockhand just updated (#1687)" },
+      { "type": "fix", "text": "a stack's bind directories are no longer left out of a backup when no volume covers them (#1696)" }
     ],
     "imageTag": "fnsys/dockhand:v1.0.52"
   },

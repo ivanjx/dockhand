@@ -4561,7 +4561,7 @@ export async function saveDashboardPreferences(data: {
 // SCHEDULE EXECUTION OPERATIONS
 // =============================================================================
 
-export type ScheduleType = 'container_update' | 'container_start' | 'git_stack_sync' | 'system_cleanup' | 'env_update_check' | 'image_prune' | 'backup' | 'restore' | 'repo_prune' | 'repo_check' | 'repo_verify' | 'stack_deploy' | 'deploy_log_reconcile';
+export type ScheduleType = 'container_update' | 'container_start' | 'git_stack_sync' | 'system_cleanup' | 'env_update_check' | 'image_prune' | 'backup' | 'restore' | 'repo_prune' | 'repo_check' | 'repo_verify' | 'stack_deploy' | 'deploy_log_reconcile' | 'env_report';
 
 // Runtime list of every ScheduleType. Used to bound a no-type-filter executions
 // query to the caller's viewable types (viewableScheduleTypes). The two type
@@ -4581,7 +4581,8 @@ export const ALL_SCHEDULE_TYPES = [
 	'repo_check',
 	'repo_verify',
 	'stack_deploy',
-	'deploy_log_reconcile'
+	'deploy_log_reconcile',
+	'env_report'
 ] as const satisfies readonly ScheduleType[];
 // Compile error if ALL_SCHEDULE_TYPES and ScheduleType ever diverge.
 type _ScheduleTypeExhaustive =
@@ -5513,6 +5514,73 @@ export async function getAllEnvUpdateCheckSettings(): Promise<Array<{ envId: num
 }
 
 // =============================================================================
+// ENVIRONMENT REPORT SCHEDULE SETTINGS
+// =============================================================================
+
+/**
+ * A scheduled state report for one environment, mailed to a notification channel.
+ *
+ * Only an administrator configures this: the report lists everything running and every
+ * vulnerability known about it, and the mail leaves the installation on a timer with
+ * nobody watching. One key holding one object, so a field added later needs no migration.
+ */
+export interface EnvReportSettings {
+	enabled: boolean;
+	cron: string;
+	format: 'pdf' | 'csv';
+	/** The SMTP channel to mail it to. Only SMTP can carry the attachment. */
+	notificationId: number | null;
+}
+
+const envReportKey = (envId: number) => `env_${envId}_report`;
+
+export async function getEnvReportSettings(envId: number): Promise<EnvReportSettings | null> {
+	const result = await db.select().from(settings).where(eq(settings.key, envReportKey(envId)));
+	if (!result[0]) return null;
+	try {
+		return JSON.parse(result[0].value);
+	} catch {
+		return null;
+	}
+}
+
+export async function setEnvReportSettings(envId: number, config: EnvReportSettings): Promise<void> {
+	const key = envReportKey(envId);
+	const value = JSON.stringify(config);
+	const existing = await db.select().from(settings).where(eq(settings.key, key));
+	if (existing.length > 0) {
+		await db.update(settings)
+			.set({ value, updatedAt: new Date().toISOString() })
+			.where(eq(settings.key, key));
+	} else {
+		await db.insert(settings).values({ key, value });
+	}
+}
+
+export async function deleteEnvReportSettings(envId: number): Promise<void> {
+	await db.delete(settings).where(eq(settings.key, envReportKey(envId)));
+}
+
+/** Every environment with reporting switched on, for the scheduler to register at boot. */
+export async function getAllEnvReportSettings(): Promise<Array<{ envId: number; settings: EnvReportSettings }>> {
+	const rows = await db.select().from(settings).where(sql`${settings.key} LIKE 'env_%_report'`);
+	const results: Array<{ envId: number; settings: EnvReportSettings }> = [];
+	for (const row of rows) {
+		try {
+			const match = row.key.match(/^env_(\d+)_report$/);
+			if (!match) continue;
+			const config = JSON.parse(row.value) as EnvReportSettings;
+			if (config.enabled && config.cron) {
+				results.push({ envId: parseInt(match[1]), settings: config });
+			}
+		} catch {
+			// Skip invalid entries
+		}
+	}
+	return results;
+}
+
+// =============================================================================
 // IMAGE PRUNE SCHEDULE SETTINGS
 // =============================================================================
 
@@ -6131,6 +6199,8 @@ export async function createBackupDestination(data: {
 	policies?: string | null;
 	cacert?: string | null;
 	tlsClientCert?: string | null;
+	sshPrivateKey?: string | null;
+	sshKnownHosts?: string | null;
 }): Promise<BackupDestination> {
 	const result = await db.insert(backupDestinations).values({
 		name: data.name,
@@ -6141,7 +6211,9 @@ export async function createBackupDestination(data: {
 		hostPath: data.hostPath ?? null,
 		policies: data.policies ?? null,
 		cacert: data.cacert ? encrypt(data.cacert) : null,
-		tlsClientCert: data.tlsClientCert ? encrypt(data.tlsClientCert) : null
+		tlsClientCert: data.tlsClientCert ? encrypt(data.tlsClientCert) : null,
+		sshPrivateKey: data.sshPrivateKey ? encrypt(data.sshPrivateKey) : null,
+		sshKnownHosts: data.sshKnownHosts ? encrypt(data.sshKnownHosts) : null
 	}).returning();
 	return result[0];
 }
@@ -6156,6 +6228,8 @@ export async function updateBackupDestination(id: number, data: {
 	policies?: string | null;
 	cacert?: string | null;
 	tlsClientCert?: string | null;
+	sshPrivateKey?: string | null;
+	sshKnownHosts?: string | null;
 	lastTestAt?: string | null;
 	lastTestStatus?: string | null;
 	lastTestError?: string | null;
@@ -6173,6 +6247,9 @@ export async function updateBackupDestination(id: number, data: {
 	// Certs (optional): undefined = keep, '' = clear (user removed it), value = encrypt.
 	if (data.cacert !== undefined) updateData.cacert = data.cacert ? encrypt(data.cacert) : null;
 	if (data.tlsClientCert !== undefined) updateData.tlsClientCert = data.tlsClientCert ? encrypt(data.tlsClientCert) : null;
+	// SFTP credentials use the same keep/replace/clear contract as TLS PEMs.
+	if (data.sshPrivateKey !== undefined) updateData.sshPrivateKey = data.sshPrivateKey ? encrypt(data.sshPrivateKey) : null;
+	if (data.sshKnownHosts !== undefined) updateData.sshKnownHosts = data.sshKnownHosts ? encrypt(data.sshKnownHosts) : null;
 	if (data.flags !== undefined) updateData.flags = data.flags;
 	if (data.hostPath !== undefined) updateData.hostPath = data.hostPath;
 	if (data.policies !== undefined) updateData.policies = data.policies;
@@ -6200,7 +6277,14 @@ export async function updateBackupDestinationTestStatus(id: number, status: 'suc
 /**
  * Decrypt sensitive fields from a backup destination for runtime use.
  */
-export function decryptBackupDestination(dest: BackupDestination): BackupDestination & { decryptedPassword: string; decryptedEnvVars: Record<string, string>; decryptedCacert: string | null; decryptedTlsClientCert: string | null } {
+export function decryptBackupDestination(dest: BackupDestination): BackupDestination & {
+	decryptedPassword: string;
+	decryptedEnvVars: Record<string, string>;
+	decryptedCacert: string | null;
+	decryptedTlsClientCert: string | null;
+	decryptedSshPrivateKey: string | null;
+	decryptedSshKnownHosts: string | null;
+} {
 	// (audit low #55) Fail closed: if the stored password is a genuine ciphertext
 	// blob that can't be decrypted (wrong/rotated key), decryptStrict throws rather
 	// than forwarding the literal `enc:v1:...` string as RESTIC_PASSWORD.
@@ -6221,7 +6305,17 @@ export function decryptBackupDestination(dest: BackupDestination): BackupDestina
 	// the literal enc:v1 string to restic.
 	const decryptedCacert = dest.cacert ? (decryptStrict(dest.cacert) || null) : null;
 	const decryptedTlsClientCert = dest.tlsClientCert ? (decryptStrict(dest.tlsClientCert) || null) : null;
-	return { ...dest, decryptedPassword, decryptedEnvVars, decryptedCacert, decryptedTlsClientCert };
+	const decryptedSshPrivateKey = dest.sshPrivateKey ? (decryptStrict(dest.sshPrivateKey) || null) : null;
+	const decryptedSshKnownHosts = dest.sshKnownHosts ? (decryptStrict(dest.sshKnownHosts) || null) : null;
+	return {
+		...dest,
+		decryptedPassword,
+		decryptedEnvVars,
+		decryptedCacert,
+		decryptedTlsClientCert,
+		decryptedSshPrivateKey,
+		decryptedSshKnownHosts
+	};
 }
 
 // =============================================================================

@@ -18,6 +18,10 @@ import {
 } from './docker';
 import {
 	isDaemonExportFailure,
+	chooseReportedError,
+	resolveRegistryScanTarget,
+	needsRepoTags,
+	type RegistryScanTarget,
 	toRegistryScanCmd,
 	toRegistryRef,
 	registryAuthEnv,
@@ -701,11 +705,28 @@ async function runScannerContainerImpl(
 			runScannerContainerCore(scannerImage, scannerType, imageName, cmd, envId, onOutput, registryMode)
 		);
 
-	// This env's store already lost blobs on a prior scan -> skip the doomed daemon
-	// export and scan the registry directly.
+	// This env's store lost blobs on a prior scan -> try the registry first, since the
+	// daemon export is the slow half and was already seen to fail. The daemon stays as
+	// the fallback, because a registry cannot answer every ref: a local-only image, or a
+	// private registry with no stored credentials. The preference is NOT cleared on a
+	// daemon success - blob loss is per-image, so one image exporting proves nothing
+	// about the store, and releasing the env would send the next scan back through the
+	// doomed export.
 	if (registryFallback.prefersRegistry(envId)) {
-		console.log(`[Scanner] ${scannerType}: env ${envId ?? 'local'} known to break daemon export - scanning registry directly`);
-		return run(true);
+		console.log(`[Scanner] ${scannerType}: env ${envId ?? 'local'} previously broke daemon export - trying the registry first`);
+		try {
+			return await run(true);
+		} catch (registryError) {
+			const rmsg = registryError instanceof Error ? registryError.message : String(registryError);
+			console.warn(`[Scanner] ${scannerType}: registry scan failed (${rmsg.split('\n')[0]}); retrying via the daemon`);
+			try {
+				return await run(false);
+			} catch (daemonError) {
+				const dmsg = daemonError instanceof Error ? daemonError.message : String(daemonError);
+				// Both halves failed; the core decides which failure explains the outcome.
+				throw chooseReportedError(rmsg, dmsg) === 'registry' ? registryError : daemonError;
+			}
+		}
 	}
 
 	try {
@@ -840,13 +861,12 @@ async function runScannerContainerCore(
 	// on the remote host with default networking; if that registry is internal-only
 	// and was previously reachable only via the daemon, the registry scan can't reach
 	// it. Surface that so a split-network user knows why.
+	let registryScanTarget: RegistryScanTarget | null = null;
 	if (registryMode) {
-		// An auto-update scans either a temporary local tag or the bare image ID, and a
-		// registry knows neither. A tag resolves by itself; an ID needs the inspect's
-		// RepoTags to name a repository at all, and that inspect is only worth paying
-		// for on this path.
+		// Only a bare image ID needs the inspect, and that is a remote round-trip, so
+		// the core decides whether to pay for it.
 		let repoTags: string[] | undefined;
-		if (/^(sha256:)?[0-9a-f]{64}$/.test(imageName)) {
+		if (needsRepoTags(imageName)) {
 			try {
 				repoTags = ((await inspectImage(imageName, envId)) as any)?.RepoTags ?? undefined;
 			} catch {
@@ -854,13 +874,19 @@ async function runScannerContainerCore(
 				// rather than an inspect error that says nothing about the scan.
 			}
 		}
-		const registryRef = toRegistryRef(imageName, repoTags);
-		if (registryRef !== imageName) {
-			console.log(`[Scanner] Registry mode - scanning ${registryRef} (${imageName} is local)`);
-		} else if (repoTags !== undefined) {
+		// One call decides the ref to scan AND the registry to authenticate against, so
+		// the two can never disagree about which image is being read.
+		registryScanTarget = resolveRegistryScanTarget(
+			imageName,
+			repoTags,
+			(ref) => parseImageReference(ref).registry
+		);
+		if (registryScanTarget.resolved) {
+			console.log(`[Scanner] Registry mode - scanning ${registryScanTarget.ref} (${imageName} is local)`);
+		} else if (registryScanTarget.unresolvableId) {
 			console.warn(`[Scanner] Registry mode - no pushed tag known for ${imageName}; the registry cannot resolve it`);
 		}
-		cmd = toRegistryScanCmd(scannerType, cmd, imageName, registryRef);
+		cmd = toRegistryScanCmd(scannerType, cmd, imageName, registryScanTarget.ref);
 		if (isHawser) {
 			console.warn(`[Scanner] Registry-mode fallback on a remote (hawser) env - the scanner container must be able to reach the registry from the remote host's default network.`);
 		}
@@ -906,8 +932,13 @@ async function runScannerContainerCore(
 		// findRegistryCredentials matches on the registry HOST, not the full ref, so
 		// resolve the registry the same way image pulls do (parseImageReference), not
 		// by passing the tagged image name (which never matches a stored org path).
-		const registry = parseImageReference(imageName).registry;
-		const authority = imageRegistryAuthority(imageName);
+		// Resolved above, in the same `if (registryMode)` block that rewrote the command,
+		// so the scan and its credentials always describe one image. A missing target
+		// would mean the two blocks had drifted apart.
+		if (!registryScanTarget) {
+			throw new Error('Registry mode reached the credential step without a resolved target');
+		}
+		const { registry, authority } = registryScanTarget;
 		const creds = await findRegistryCredentials(registry);
 		const authEnv = registryAuthEnv(scannerType, creds, authority ?? undefined);
 		if (authEnv.length > 0) {

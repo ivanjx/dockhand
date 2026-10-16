@@ -7,7 +7,7 @@
  * - dockhand.notify=false  — Suppress notifications for this container's events
  * - dockhand.url=<url>     — Custom clickable URL displayed alongside container ports
  * - dockhand.port.<hostPort>.url=<url> — Override the click URL for a specific published port
- * - dockhand.order=<int>  — Controls display order within a stack (lower = first, default 0)
+ * - dockhand.order=<int>  - Controls display order within a stack (lower = first; unlabelled last)
  * - dockhand.name=<text>  - Display-only name shown in the UI (real name stays in details/tooltips)
  * - dockhand.adopt=false  — Prevent this stack from being adopted (any container in the stack)
  * - dockhand.tags=a,b,c  - Tags to show for this container (read where containers
@@ -27,7 +27,7 @@
  * The opt-out model means labels override DB settings (label wins).
  */
 
-import { compileVersionPattern } from './semver/tag-parser';
+import { compileVersionPattern, versionPatternRejection } from './semver/tag-parser';
 
 /** Recognized Dockhand label keys */
 export const DOCKHAND_LABELS = {
@@ -174,6 +174,17 @@ export function getVersionPatternOverride(
 }
 
 /**
+ * Why this container's `dockhand.version.pattern` was not used, or null when it was
+ * (or when there is no label). Lets a caller say so once, since a rejected label is
+ * otherwise indistinguishable from no label at all.
+ */
+export function getVersionPatternRejection(
+	labels: Record<string, string> | undefined | null
+): string | null {
+	return versionPatternRejection(getLabel(labels, DOCKHAND_LABELS.VERSION_PATTERN));
+}
+
+/**
  * Check if notifications should be suppressed for this container.
  * Returns true if dockhand.notify is explicitly set to false/no/0.
  * Default (no label): send notifications (opt-out model).
@@ -213,14 +224,33 @@ export function getCustomUrl(labels: Record<string, string> | undefined | null):
 }
 
 /**
- * Get the sort order value from dockhand.order label.
- * Returns the parsed integer, or 0 for missing/invalid values.
+ * Sort order from the dockhand.order label, or null when the container carries none.
+ * Null is NOT a number on purpose: any sentinel would sit in the same range a user can
+ * type, so a container labelled with that exact value would be indistinguishable from
+ * an unlabelled one. Ranking is the caller's job - see compareContainerOrder.
  */
-export function getOrderValue(labels: Record<string, string> | undefined | null): number {
+export function getOrderValue(labels: Record<string, string> | undefined | null): number | null {
 	const value = getLabel(labels, DOCKHAND_LABELS.ORDER);
-	if (value == null) return 0;
+	if (value == null) return null;
 	const parsed = parseInt(value.trim(), 10);
-	return Number.isNaN(parsed) ? 0 : parsed;
+	return Number.isNaN(parsed) ? null : parsed;
+}
+
+/**
+ * Order two containers within a stack: every labelled container comes before every
+ * unlabelled one, so labelling a single service is enough to move it to the front,
+ * and no value a user can type lands it among the unlabelled. Equal ranks fall back
+ * to the service name.
+ */
+export function compareContainerOrder(
+	a: { service: string; labels?: Record<string, string> | null },
+	b: { service: string; labels?: Record<string, string> | null }
+): number {
+	const orderA = getOrderValue(a.labels);
+	const orderB = getOrderValue(b.labels);
+	if ((orderA === null) !== (orderB === null)) return orderA === null ? 1 : -1;
+	if (orderA !== null && orderB !== null && orderA !== orderB) return orderA - orderB;
+	return a.service.localeCompare(b.service);
 }
 
 /**

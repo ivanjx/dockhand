@@ -1,7 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import {
 	supportsPercentageWarnings,
-	percentageUnsupportedNote,
 	percentageOptionDisabled,
 	poolSizeBytes
 } from '../src/lib/utils/disk-percentage-support';
@@ -52,17 +51,6 @@ describe('whether percentage warnings can fire', () => {
 	test('a malformed entry is skipped rather than throwing', () => {
 		expect(supportsPercentageWarnings([null, ['x'], ['Data Space Total', '1 GB']])).toBe(true);
 		expect(supportsPercentageWarnings([null, ['x']])).toBe(false);
-	});
-});
-
-describe('what the note says', () => {
-	test('it names the driver when one is known', () => {
-		expect(percentageUnsupportedNote('overlay2')).toContain('overlay2');
-	});
-
-	test('it still reads as a sentence without one', () => {
-		expect(percentageUnsupportedNote(null)).toContain('never fire');
-		expect(percentageUnsupportedNote('  ')).not.toContain('  storage driver');
 	});
 });
 

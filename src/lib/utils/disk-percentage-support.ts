@@ -58,14 +58,6 @@ export function supportsPercentageWarnings(driverStatus: DriverStatus): boolean 
 	return false;
 }
 
-/** What to tell somebody whose environment cannot use the mode it is set to. */
-export function percentageUnsupportedNote(storageDriver?: string | null): string {
-	const driver = storageDriver?.trim();
-	return driver
-		? `This host's ${driver} storage driver reports no total size, so percentage warnings never fire.`
-		: 'This host reports no total size, so percentage warnings never fire.';
-}
-
 /**
  * Whether the percentage option should be unselectable.
  *

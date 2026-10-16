@@ -8,7 +8,7 @@
  * Usage: node ./server.js
  */
 
-import { createServer as createHttpServer, request as httpRequest } from 'node:http';
+import { createServer as createHttpServer, request as httpRequest, ServerResponse } from 'node:http';
 import { createServer as createHttpsServer, request as httpsRequest } from 'node:https';
 import { createConnection } from 'node:net';
 import { connect as tlsConnect, rootCertificates } from 'node:tls';
@@ -39,6 +39,9 @@ const HOST = process.env.HOST || '0.0.0.0';
 // HTTPS_KEY_PATH must both point to readable PEM files.
 const HTTPS_MODE = (process.env.HTTPS_MODE || 'off').toLowerCase();
 const useHttps = HTTPS_MODE === 'on';
+// Set when HTTPS is on. Read by the HTTPS request listener and by the upgrade
+// passthrough, which calls `handler` directly and so never reaches that listener.
+let hstsHeader = null;
 
 let server;
 if (useHttps) {
@@ -112,7 +115,7 @@ if (useHttps) {
 	// HSTS — only meaningful over HTTPS, so wired only here. Default 1 year;
 	// set HSTS_MAX_AGE=0 to disable.
 	const hstsMaxAge = parseInt(process.env.HSTS_MAX_AGE ?? '31536000', 10);
-	const hstsHeader = hstsMaxAge > 0 ? `max-age=${hstsMaxAge}` : null;
+	hstsHeader = hstsMaxAge > 0 ? `max-age=${hstsMaxAge}` : null;
 	if (hstsHeader) {
 		console.log(`[HTTPS] HSTS enabled: ${hstsHeader}`);
 	} else {
@@ -211,6 +214,40 @@ server.on('upgrade', async (req, socket, head) => {
 	// Only handle our specific WebSocket paths
 	const isTerminal = url.pathname.includes('/api/containers/') && url.pathname.includes('/exec');
 	const isHawser = url.pathname === '/api/hawser/connect';
+
+	// Node routes a request here by its `Connection: upgrade` header alone, without
+	// looking at the path, so an ordinary read arrives whenever a proxy leaves that
+	// header on a reused keepalive connection - nginx with an `upstream` block does.
+	// A request with no `Sec-WebSocket-Key` is not a handshake, so answer it instead of
+	// dropping the connection: the app replies normally and the proxy has no reason to
+	// invent a status for the browser (#1707).
+	//
+	// Only a request with no body. Node stops reading the stream once this event fires,
+	// so a body would be partly in `head` and partly still on the socket, and the app
+	// would see it empty or truncated with no error at all - an endpoint reading an
+	// absent field as "clear it" would then delete data and answer 200. The requests
+	// this fixes are reads; anything carrying a body falls through to the drop below,
+	// which is a visible failure the caller retries.
+	if (
+		!req.headers['sec-websocket-key'] &&
+		!req.headers['content-length'] &&
+		!req.headers['transfer-encoding']
+	) {
+		const res = new ServerResponse(req);
+		res.assignSocket(socket);
+		res.on('finish', () => {
+			res.detachSocket(socket);
+			socket.end();
+		});
+		// The socket is ended on finish, so say so. The request asked to upgrade, which
+		// leaves Node defaulting to keep-alive and a proxy free to send another request
+		// down a connection that is closing.
+		res.setHeader('Connection', 'close');
+		// Set per response by the HTTPS listener, which this path does not go through.
+		if (hstsHeader) res.setHeader('Strict-Transport-Security', hstsHeader);
+		handler(req, res);
+		return;
+	}
 
 	if (!isTerminal && !isHawser) {
 		socket.destroy();

@@ -17,8 +17,14 @@ import { pumpWebStreamToWritable } from './stream-pump';
 import { toWebReadableStream } from './node-readable-stream';
 import { buildImagePruneFilters } from './image-prune-core';
 import { demuxDockerStream } from './docker-demux-core';
-import { computeRequestTimeoutMs, isPrunePath } from './backups/request-timeout';
-import { helperWaitDeadline, helperExitFromState } from './helper-wait-core';
+import { isDockerProbePath, isDockerNetworkError } from './docker-probe-core';
+import {
+	computeRequestTimeoutMs,
+	isPrunePath,
+	isStopPath,
+	stopTimeoutMs
+} from './backups/request-timeout';
+import { helperWaitDeadline, helperExitFromState, helperFailureDetail, needsDaemonErrorLookup } from './helper-wait-core';
 import { cancelReaderOnAbort } from './reader-abort-core';
 import { configuredMacAddress, endpointWithoutGeneratedMac } from './endpoint-mac-core';
 import { rescopeForPrimarySwitch } from './primary-network-switch-core';
@@ -33,12 +39,12 @@ import { getAdditionalVolumeBinds, dedupeVolumesForRecreate } from './mount-dedu
 import { resolveNanoCpusConflict, resolvePodmanUsernsMode } from './hostconfig-recreate';
 import { isUnknownNetworkKeyError, retryEndpointKey } from './podman-network-key';
 import { expectedEvents, EXPECTED_EVENT_TTL_MS } from './expected-events-core';
-import { decideRespawnOutcome, isExactNameMatch } from './systemd-recreate-core';
+import { decideRespawnOutcome, isExactNameMatch, isSystemdManagedUnit } from './systemd-recreate-core';
 // Import-light image parsing shared with the semver layer; re-exported below for callers.
 import { parseImageReference } from './registry/image-ref';
 import { fetchImageCreatedAt, imagePlatform } from './registry/image-age';
 export { parseImageReference } from './registry/image-ref';
-import { rebaseEnvOntoImage, rebaseLabelsOntoImage, rebaseCommand, describeEnvRebase, describeLabelRebase, type ImageEnvLabels } from './container-env-merge';
+import { rebaseEnvOntoImage, rebaseLabelsOntoImage, rebaseCommand, describeEnvRebase, describeLabelRebase, composeImageLabelForRecreate, composeImageLabelForm, COMPOSE_IMAGE_LABEL, type ImageEnvLabels } from './container-env-merge';
 import { encodeRegistryAuth, fetchRegistryToken, isSafeRegistryHost } from './registry-auth';
 import { describeRegistryFailure } from './registry-failure-core';
 import {
@@ -412,11 +418,16 @@ export function httpsAgentRequest(
 		// A stream request BODY (a large tar PUT) must not get the small-request idle timeout
 		// even though the RESPONSE isn't streamed - computeRequestTimeoutMs decides on both.
 		const streamingBody = typeof (options.body as ReadableStream | undefined)?.getReader === 'function';
+		// `reqOptions.timeout` is a socket idle timeout that the caller's AbortSignal cannot
+		// lengthen, so a stop has to be given its allowance here too. The grace period is
+		// already on the path as `?t=`.
 		const timeoutMs = computeRequestTimeoutMs({
 			path,
 			streamingBody,
 			streamingResponse: streaming,
 			composeTimeoutSecs: parseInt(process.env.COMPOSE_TIMEOUT || '900'),
+			stopTimeoutSecs: stopTimeoutFromPath(path),
+			stopEnvSecs: stopTimeoutEnvSecs(),
 		});
 		if (timeoutMs !== null) reqOptions.timeout = timeoutMs;
 
@@ -805,6 +816,23 @@ export function unixSocketStreamRequest(
 	});
 }
 
+function logDockerFetchFailure(
+	targetLabel: string,
+	method: string,
+	path: string,
+	elapsed: number,
+	msg: string,
+	error: unknown
+) {
+	// For probing endpoints failing with expected network reachability errors (e.g. host is powered off),
+	// downgrade to debug/warn to avoid error log flooding (#1739).
+	if (isDockerProbePath(path) && isDockerNetworkError(error)) {
+		console.debug(`[Docker] ${targetLabel}: ${method} ${path} probe failed after ${elapsed}ms (host offline/unreachable): ${msg}`);
+	} else {
+		console.error(`[Docker] ${targetLabel}: ${method} ${path} failed after ${elapsed}ms: ${msg}`);
+	}
+}
+
 export async function dockerFetch(
 	path: string,
 	options: DockerFetchOptions = {},
@@ -875,7 +903,7 @@ export async function dockerFetch(
 				body,
 				headers,
 				streaming || false,
-				(streaming || path === '/_hawser/compose' || isPrunePath(path)) ? 300000 : 30000, // 5 min for streaming/compose/prune, 30s for normal
+				edgeTimeoutMs(path, streaming || false), // streaming/compose/prune get longer; a stop waits out its grace period
 				isBinary,
 				fetchOptions.signal ?? undefined,
 				onLine
@@ -890,7 +918,7 @@ export async function dockerFetch(
 			const elapsed = Date.now() - startTime;
 			// Log error message only, not full stack trace
 			const msg = error?.message || String(error);
-			console.error(`[Docker] Edge env ${config.environmentId}: ${method} ${path} failed after ${elapsed}ms: ${msg}`);
+			logDockerFetchFailure(`Edge env ${config.environmentId}`, method, path, elapsed, msg, error);
 			throw DockerConnectionError.fromError(error);
 		}
 	}
@@ -910,7 +938,7 @@ export async function dockerFetch(
 			const elapsed = Date.now() - startTime;
 			// Log error message only, not full stack trace
 			const msg = error?.message || String(error);
-			console.error(`[Docker] Socket: ${method} ${path} failed after ${elapsed}ms: ${msg}`);
+			logDockerFetchFailure('Socket', method, path, elapsed, msg, error);
 			throw DockerConnectionError.fromError(error);
 		}
 	} else {
@@ -943,7 +971,7 @@ export async function dockerFetch(
 			} catch (error: any) {
 				const elapsed = Date.now() - startTime;
 				const msg = error?.message || String(error);
-				console.error(`[Docker] ${config.connectionType || 'direct'} ${config.host}: ${method} ${path} failed after ${elapsed}ms: ${msg}`);
+				logDockerFetchFailure(`${config.connectionType || 'direct'} ${config.host}`, method, path, elapsed, msg, error);
 				throw DockerConnectionError.fromError(error);
 			}
 		}
@@ -983,7 +1011,7 @@ export async function dockerFetch(
 		} catch (error: any) {
 			const elapsed = Date.now() - startTime;
 			const msg = error?.message || String(error);
-			console.error(`[Docker] ${config.connectionType || 'direct'} ${config.host}: ${method} ${path} failed after ${elapsed}ms: ${msg}`);
+			logDockerFetchFailure(`${config.connectionType || 'direct'} ${config.host}`, method, path, elapsed, msg, error);
 			throw DockerConnectionError.fromError(error);
 		}
 	}
@@ -1200,13 +1228,90 @@ export async function startContainer(id: string, envId?: number | null) {
 	await assertDockerResponse(response, 304); // 304 = already started
 }
 
-export async function stopContainer(id: string, envId?: number | null) {
-	const response = await dockerFetch(`/containers/${id}/stop`, { method: 'POST' }, envId);
+/**
+ * The grace period a container declares, in seconds, or null. Compose's
+ * `stop_grace_period` arrives here as Config.StopTimeout.
+ *
+ * Best-effort: the inspect is only here to size a timeout, so a failure falls back to the
+ * default rather than taking the stop down with it.
+ */
+async function declaredStopTimeout(id: string, envId?: number | null): Promise<number | null> {
+	try {
+		const inspect = await inspectContainer(id, envId);
+		const t = (inspect as { Config?: { StopTimeout?: number | null } })?.Config?.StopTimeout;
+		return typeof t === 'number' && t > 0 ? t : null;
+	} catch {
+		return null;
+	}
+}
+
+/** The grace period a stop/restart path carries as `?t=`, or null when it carries none. */
+function stopTimeoutFromPath(path: string): number | null {
+	if (!isStopPath(path)) return null;
+	const t = parseInt(new URLSearchParams(path.split('?')[1] || '').get('t') || '', 10);
+	return Number.isFinite(t) && t > 0 ? t : null;
+}
+
+/** DOCKER_STOP_TIMEOUT, seconds: a floor for a container that declares no grace period. */
+function stopTimeoutEnvSecs(): number | null {
+	const raw = process.env.DOCKER_STOP_TIMEOUT;
+	if (!raw || !raw.trim()) return null;
+	const n = parseInt(raw, 10);
+	return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Stop a container, waiting as long as it is allowed to take.
+ *
+ * Docker holds the response until the container exits or its grace period expires, so the
+ * request timeout has to cover that period - otherwise a container with a 60s
+ * `stop_grace_period` is aborted at 30s, the caller sees a failure, and the daemon stops it
+ * anyway, leaving it down. The period is passed explicitly as `?t=` too, so
+ * the daemon and Dockhand are working to the same deadline.
+ */
+/**
+ * The edge transport computes its own deadline instead of reading the request signal, so the
+ * stop/restart allowance has to be derived again here. The grace period is already on the
+ * path as `?t=`, put there by stopContainer, so no second inspect is needed.
+ */
+function edgeTimeoutMs(path: string, streaming: boolean): number {
+	if (streaming || path === '/_hawser/compose' || isPrunePath(path)) return 300000;
+	if (isStopPath(path)) return stopTimeoutMs(stopTimeoutFromPath(path), stopTimeoutEnvSecs());
+	return 30000;
+}
+
+export async function stopContainer(
+	id: string,
+	envId?: number | null,
+	knownStopTimeout?: number | null
+) {
+	const declared =
+		knownStopTimeout !== undefined ? knownStopTimeout : await declaredStopTimeout(id, envId);
+	const timeoutMs = stopTimeoutMs(declared, stopTimeoutEnvSecs());
+	const query = declared !== null ? `?t=${declared}` : '';
+	const response = await dockerFetch(
+		`/containers/${id}/stop${query}`,
+		{ method: 'POST', signal: AbortSignal.timeout(timeoutMs) },
+		envId
+	);
 	await assertDockerResponse(response, 304); // 304 = already stopped
 }
 
-export async function restartContainer(id: string, envId?: number | null) {
-	const response = await dockerFetch(`/containers/${id}/restart`, { method: 'POST' }, envId);
+/** Restart waits the same way a stop does: the daemon stops the container first. */
+export async function restartContainer(
+	id: string,
+	envId?: number | null,
+	knownStopTimeout?: number | null
+) {
+	const declared =
+		knownStopTimeout !== undefined ? knownStopTimeout : await declaredStopTimeout(id, envId);
+	const timeoutMs = stopTimeoutMs(declared, stopTimeoutEnvSecs());
+	const query = declared !== null ? `?t=${declared}` : '';
+	const response = await dockerFetch(
+		`/containers/${id}/restart${query}`,
+		{ method: 'POST', signal: AbortSignal.timeout(timeoutMs) },
+		envId
+	);
 	await assertDockerResponse(response);
 }
 
@@ -1933,11 +2038,13 @@ async function recreateSystemdManagedContainer(
 		name: string; oldContainerId: string; wasRunning: boolean; unit: string;
 		verifiedImageId?: string;
 		rollback?: { imageId: string; repo: string; tag: string };
+		/** The old container's own grace period, already known from its inspect. */
+		stopTimeout?: number | null;
 	},
 	envId: number | null | undefined,
 	log?: (msg: string) => void
 ): Promise<{ Id: string }> {
-	const { name, oldContainerId, wasRunning, unit } = opts;
+	const { name, oldContainerId, wasRunning, unit, stopTimeout } = opts;
 	log?.(`Managed by systemd unit ${unit} - handing the recreate to systemd (Quadlet)`);
 
 	// A stopped Quadlet container does not exist: the unit's ExecStop (podman rm -f)
@@ -1957,7 +2064,7 @@ async function recreateSystemdManagedContainer(
 	expectedEvents.markExpected(oldContainerId, Date.now(), EXPECTED_EVENT_TTL_MS);
 	log?.('Stopping container (systemd will recreate it on the new image)...');
 	try {
-		await stopContainer(oldContainerId, envId);
+		await stopContainer(oldContainerId, envId, stopTimeout ?? null);
 	} catch {
 		// A Quadlet stop can race the unit's own teardown; the container may already be
 		// gone. Not fatal - we verify the respawn below.
@@ -2037,9 +2144,43 @@ async function findRunningContainerByName(
 
 // Generous window: systemd honours RestartSec, and a heavy image can take a while to
 // become running even though it is already pulled.
+/** How long to wait for a stop we gave up on to actually land, before giving up too. */
+const RESTORE_AFTER_STOP_TIMEOUT_MS = 120_000;
+const RESTORE_AFTER_STOP_POLL_MS = 1_000;
+
 const SYSTEMD_RESPAWN_TIMEOUT_MS = 90_000;
 const SYSTEMD_RESPAWN_POLL_MS = 500;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Bring a container back up after a stop Dockhand stopped waiting for.
+ *
+ * The daemon is still stopping it, so a start issued immediately answers 304 and changes
+ * nothing. Poll until it has exited, then start it. Best-effort throughout: the caller is
+ * already failing, and the worst case is an operator starting it by hand.
+ */
+async function restoreAfterFailedStop(
+	id: string,
+	envId: number | null | undefined,
+	log?: (msg: string) => void
+): Promise<void> {
+	const deadline = Date.now() + RESTORE_AFTER_STOP_TIMEOUT_MS;
+	try {
+		for (;;) {
+			const inspect = await inspectContainer(id, envId);
+			if (!inspect?.State?.Running) break;
+			if (Date.now() >= deadline) {
+				log?.('It is still stopping; start it by hand once it has.');
+				return;
+			}
+			await sleep(RESTORE_AFTER_STOP_POLL_MS);
+		}
+		await startContainer(id, envId);
+		log?.('Started again.');
+	} catch {
+		log?.('Could not start it again; it is stopped and needs starting by hand.');
+	}
+}
 
 /**
  * Recreate a container using full Config/HostConfig passthrough from inspect data.
@@ -2088,7 +2229,10 @@ export async function recreateContainerFromInspect(
 	// already-removed id ("Failed to rename old container"), and creating our own
 	// container would collide with systemd's respawn. So hand the recreate to systemd:
 	// stop, then wait for the unit to bring the container back on the new image.
-	const systemdUnit = config.Labels?.['PODMAN_SYSTEMD_UNIT'];
+	// Only a unit that actually owns the lifecycle; podman-compose sets the same label
+	// for a template it never installs, and that container recreates normally.
+	const labelUnit = config.Labels?.['PODMAN_SYSTEMD_UNIT'];
+	const systemdUnit = isSystemdManagedUnit(labelUnit, config.Labels) ? labelUnit : undefined;
 	if (verifiedImageId) {
 		// Validate before stopping anything.
 		trackedImageLabels({}, newImage, verifiedImageId, verifiedImageReference);
@@ -2109,7 +2253,10 @@ export async function recreateContainerFromInspect(
 			}
 		}
 		return await recreateSystemdManagedContainer(
-			{ name, oldContainerId, wasRunning, unit: systemdUnit, verifiedImageId, rollback },
+			{
+				name, oldContainerId, wasRunning, unit: systemdUnit, verifiedImageId, rollback,
+				stopTimeout: config.StopTimeout ?? null
+			},
 			envId,
 			log
 		);
@@ -2132,7 +2279,18 @@ export async function recreateContainerFromInspect(
 		// The stop/kill/die events this triggers are an EXPECTED part of the update,
 		// not a crash - mark the id so the event handler skips their notifications (#68).
 		expectedEvents.markExpected(oldContainerId, Date.now(), EXPECTED_EVENT_TTL_MS);
-		await stopContainer(oldContainerId, envId);
+		try {
+			await stopContainer(oldContainerId, envId, config.StopTimeout ?? null);
+		} catch (error) {
+			// The daemon carries on stopping whether or not Dockhand is still waiting, so a
+			// failed update would leave the container down. Starting it right now changes
+			// nothing - it is still running, so the start answers 304 and the stop lands a
+			// moment later - so wait for it to exit, then bring it back.
+			log?.(`Stop failed: ${error instanceof Error ? error.message : String(error)}`);
+			log?.('Waiting for the stop to land, then starting it again...');
+			await restoreAfterFailedStop(oldContainerId, envId, log);
+			throw error;
+		}
 	}
 
 	// 2. Rename old container to free the name
@@ -2273,6 +2431,29 @@ export async function recreateContainerFromInspect(
 
 	// Keep the tracked tag separately; creation and rebasing use the verified ID.
 	if (verifiedImageId) createConfig.Labels = trackedImageLabels(createConfig.Labels, newImage, verifiedImageId, verifiedImageReference);
+
+	// Compose records which image it created a container from, and recreates the container
+	// whenever that disagrees with the image behind the service's tag. Carried over verbatim it
+	// still names the OLD image, so the next `docker compose up` restarts a container that
+	// already runs the right one - unplanned downtime, on a database as readily as anything
+	// else. Outside the try above so the verbatim-labels fallback is corrected too (#1687).
+	if (createConfig.Labels?.[COMPOSE_IMAGE_LABEL]) {
+		// Resolve the id ONCE and address the image by it from here on: a tag can be repointed
+		// between the pull and this read, and a digest fetched by tag would then describe an
+		// image the container is not created from.
+		const newId: string | undefined = verifiedImageId ?? ((await inspectImage(newImage, envId).catch(() => null)) as any)?.Id;
+		// Only fetched for the digest form, which a containerd image store uses.
+		const needsDigest = composeImageLabelForm(createConfig.Labels[COMPOSE_IMAGE_LABEL], inspectData.Image) === 'digest';
+		const composeImage = composeImageLabelForRecreate(
+			createConfig.Labels[COMPOSE_IMAGE_LABEL],
+			inspectData.Image,
+			{ imageId: newId, manifestDigest: needsDigest && newId ? await imageManifestDigest(newId, envId) : null }
+		);
+		if (composeImage) {
+			createConfig.Labels[COMPOSE_IMAGE_LABEL] = composeImage;
+			log?.(`Compose image label updated to the new image (${composeImage.slice(0, 19)})`);
+		}
+	}
 
 	// Strip default MemorySwappiness — Podman + cgroupv2 rejects it.
 	// Docker returns -1, Podman returns 0 when unset.
@@ -3281,6 +3462,24 @@ export async function getImageHistory(id: string, envId?: number | null) {
 
 export async function inspectImage(id: string, envId?: number | null) {
 	return dockerJsonRequest(`/images/${encodeURIComponent(id)}/json`, {}, envId);
+}
+
+/**
+ * The digest of an image's platform manifest, which a containerd image store reports and Compose
+ * records as `com.docker.compose.image` there. Needs `?manifests=true` (API 1.48+); older daemons
+ * and the classic image store answer without it, and get null. Never throws - the caller treats
+ * an unavailable digest as "leave the label alone".
+ */
+export async function imageManifestDigest(id: string, envId?: number | null): Promise<string | null> {
+	try {
+		const data = await dockerJsonRequest<{ Manifests?: Array<{ Kind?: string; Available?: boolean; Descriptor?: { digest?: string } }> }>(
+			`/images/${encodeURIComponent(id)}/json?manifests=true`, {}, envId
+		);
+		const image = (data?.Manifests ?? [])[0];
+		return image?.Descriptor?.digest || null;
+	} catch {
+		return null;
+	}
 }
 
 
@@ -4314,9 +4513,9 @@ export async function getDockerVersion(envId?: number | null) {
  * Used to pin DOCKER_API_VERSION when spawning sidecar containers (scanner, updater)
  * whose bundled Docker CLI may be newer than the host daemon supports.
  * Returns null if the version cannot be determined.
- * Requires an envId — local Docker (no environment) must query /version directly.
+ * Omitting envId asks the local daemon, the same way getDockerVersion does.
  */
-export async function getNegotiatedApiVersion(envId: number): Promise<string | null> {
+export async function getNegotiatedApiVersion(envId?: number | null): Promise<string | null> {
 	try {
 		const versionInfo = await getDockerVersion(envId);
 		return versionInfo?.ApiVersion || null;
@@ -5367,7 +5566,7 @@ export async function runContainerWithStreaming(options: {
 			// dies with the ephemeral container so it never accumulates on disk.
 			LogConfig: {
 				Type: 'json-file',
-				Config: { 'max-file': '1', 'max-size': '1g' }
+				Config: { 'max-file': '1', 'max-size': '1g', 'compress': 'false' }
 			}
 		}
 	};
@@ -5449,6 +5648,10 @@ export async function runContainerWithStreaming(options: {
 			// Poll is the safe default; set HELPERS_WAIT_MODE=wait to force the streaming /wait.
 			// Applies to every helper this function runs — backup/restore AND the image scanner.
 			let exitCode: number | undefined;
+			// The daemon's own reason when it refused to START the container (a bad bind
+			// source, a missing image platform). Such a container produces NO logs, so
+			// without this the failure reads as "no output" and says nothing.
+			let daemonError: string | undefined;
 			if (process.env.HELPERS_WAIT_MODE !== 'wait') {
 				// Bounded by the caller's timeout (scanner passes 600_000, probes 60_000);
 				// the backup helper passes 0 = unbounded. One line so the log confirms which
@@ -5467,6 +5670,7 @@ export async function runContainerWithStreaming(options: {
 							// terminally `created`/`dead` after a start failure (e.g. Docker 29.x
 							// exit 128 "failed to mount overlay: device or resource busy", #1487) -
 							// otherwise the unbounded poll waits forever for an `exited` that never comes.
+							if (st?.Error) daemonError = st.Error;
 							const resolved = helperExitFromState(st);
 							if (resolved !== undefined) {
 								exitCode = resolved;
@@ -5528,6 +5732,7 @@ export async function runContainerWithStreaming(options: {
 								StartedAt: st?.StartedAt, FinishedAt: st?.FinishedAt, Pid: st?.Pid,
 							})}`
 						);
+						if (st?.Error) daemonError = st.Error;
 						const resolved = helperExitFromState(st);
 						if (resolved !== undefined) {
 							exitCode = resolved;
@@ -5572,9 +5777,20 @@ export async function runContainerWithStreaming(options: {
 				} catch {
 					// Ignore stderr fetch errors
 				}
-				// Include stdout in the detail too — restic often writes its error
-				// summary there — so callers' error matching (e.g. repo-not-init) works.
-				const detail = (stderrText || stdout || 'no output').substring(0, 1000);
+				// A container the daemon refused has no logs, and the wait-mode route never
+				// inspects it, so read State.Error now rather than reporting "no output".
+				if (needsDaemonErrorLookup({ stderr: stderrText, stdout, daemonError })) {
+					try {
+						const insp = await dockerFetch(`/containers/${containerId}/json`, {}, options.envId);
+						if (insp.ok) {
+							const data = await insp.json() as { State?: { Error?: string } };
+							if (data.State?.Error) daemonError = data.State.Error;
+						}
+					} catch {
+						// Best-effort: a failed inspect just leaves the detail as it was.
+					}
+				}
+				const detail = helperFailureDetail({ stderr: stderrText, stdout, daemonError });
 				const code = exitCode === undefined ? 'unknown (could not determine container exit status)' : String(exitCode);
 				throw new Error(`Container exited with code ${code}: ${detail}`);
 			}
