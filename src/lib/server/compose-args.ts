@@ -15,19 +15,22 @@ export interface ComposeOperationArgOptions {
 	noBuildCache?: boolean;
 	pullPolicy?: string;
 	serviceName?: string;
+	/** Create the targeted containers without starting them (`up --no-start`). */
+	noStart?: boolean;
 }
 
 export function buildComposeOperationArgs(
 	operation: 'up' | 'down' | 'stop' | 'start' | 'restart' | 'pull' | 'build',
 	options: ComposeOperationArgOptions = {}
 ): string[] {
-	const { forceRecreate, removeVolumes, build, noBuildCache, pullPolicy, serviceName } = options;
+	const { forceRecreate, removeVolumes, build, noBuildCache, pullPolicy, serviceName, noStart } = options;
 	const args: string[] = [];
 
 	switch (operation) {
 		case 'up':
 			args.push('up', '-d', '--remove-orphans');
 			if (forceRecreate) args.push('--force-recreate');
+			if (noStart) args.push('--no-start');
 			// A no-cache rebuild is handled by a separate `build` step, so `up` must not
 			// also carry --build (and never --no-cache, which up doesn't accept).
 			if (build && !noBuildCache) args.push('--build');

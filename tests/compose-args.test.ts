@@ -28,6 +28,11 @@ describe('buildComposeOperationArgs', () => {
 		expect(a).toEqual(['up', '-d', '--remove-orphans', '--force-recreate', '--pull', 'always', 'web']);
 	});
 
+	it('up with noStart creates without starting', () => {
+		const a = buildComposeOperationArgs('up', { noStart: true, serviceName: 'web' });
+		expect(a).toEqual(['up', '-d', '--remove-orphans', '--no-start', 'web']);
+	});
+
 	it('build operation carries --no-cache only when requested', () => {
 		expect(buildComposeOperationArgs('build', { noBuildCache: true })).toEqual(['build', '--no-cache']);
 		expect(buildComposeOperationArgs('build', { noBuildCache: false })).toEqual(['build']);

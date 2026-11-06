@@ -159,13 +159,16 @@ The fork adjusts stack operations to better support Compose workflows.
 
 Behavior to preserve:
 
-- `executeComposeCommand('up', ...)` runs a `create` step first.
+- `executeComposeCommand('up', ...)` runs a `create` step first for whole-stack
+  `up`. A service-scoped `up` skips it: `create` has no `--no-deps`, so it would
+  recreate the service's dependencies and leave them in `created`.
 - Compose `up` passes `--force-recreate` only when explicitly requested. Honor the
   upstream Force recreate checkbox, recreate actions, and restore redeploys on
   local/direct environments as well as Hawser.
-- `updateStackService` accepts a no-start mode and uses Compose `create` for
-  stopped services.
-- Hawser treats Compose `create` as a no-op until remote support exists.
+- `updateStackService` runs under the stack lock and accepts a no-start mode,
+  which uses `up --no-start --no-deps` for stopped services.
+- Hawser treats Compose `create` and no-start `up` as no-ops until remote support
+  exists.
 - Stack down/remove cleans up auto-update schedules, scheduled-start schedules,
   and pending container updates for affected containers.
 

@@ -1223,6 +1223,8 @@ interface ComposeCommandOptions {
 	remoteStackHostDir?: string;
 	/** Immutable image approved for a single-service scheduled update. */
 	serviceImage?: ComposeServiceImage;
+	/** Create the targeted service without starting it (`up --no-start`). */
+	noStart?: boolean;
 }
 
 /**
@@ -1290,7 +1292,8 @@ async function executeLocalCompose(
 	// remote daemon binds the staged files. undefined = no staging, compose unchanged.
 	remoteStackHostDir?: string,
 	onLine?: (line: string) => void,
-	serviceImage?: ComposeServiceImage
+	serviceImage?: ComposeServiceImage,
+	noStart?: boolean
 ): Promise<StackOperationResult> {
 	const logPrefix = `[Stack:${stackName}]`;
 
@@ -1536,7 +1539,7 @@ async function executeLocalCompose(
 		args.push('--profile', '*', 'create');
 		if (serviceName) args.push(serviceName);
 	} else {
-		args.push(...buildComposeOperationArgs(operation, { forceRecreate, removeVolumes, build, noBuildCache, pullPolicy, serviceName }));
+		args.push(...buildComposeOperationArgs(operation, { forceRecreate, removeVolumes, build, noBuildCache, pullPolicy, serviceName, noStart }));
 		if (operation === 'up' && serviceName) args.push('--no-deps');
 	}
 
@@ -1928,7 +1931,7 @@ async function executeComposeCommand(
 	secretVars?: Record<string, string>,
 	onLine?: (line: string) => void
 ): Promise<StackOperationResult> {
-	const { stackName, envId, forceRecreate, build, noBuildCache, pullPolicy, removeVolumes, stackFiles, workingDir, composePath, envPath, useOverrideFile, serviceName, composeFileName, filesToDelete, removeFiles, serviceImage } = options;
+	const { stackName, envId, forceRecreate, build, noBuildCache, pullPolicy, removeVolumes, stackFiles, workingDir, composePath, envPath, useOverrideFile, serviceName, composeFileName, filesToDelete, removeFiles, serviceImage, noStart } = options;
 
 	const env = envId ? await getEnvironment(envId) : null;
 	let remoteStackHostDir = options.remoteStackHostDir;
@@ -1948,9 +1951,11 @@ async function executeComposeCommand(
 		}
 	}
 
-	// Always create containers, networks, and volumes before starting them.
+	// Create containers, networks, and volumes before starting a whole stack.
 	// Stack deployments remain outside the container-update cooldown.
-	if (operation === 'up') {
+	// A service-scoped up skips this: `create` has no --no-deps, so it would also
+	// converge the service's dependencies and leave any it recreates in `created`.
+	if (operation === 'up' && !serviceName) {
 		const createResult = await executeComposeCommand('create', { ...options, remoteStackHostDir }, composeContent, envVars, secretVars, onLine);
 		if (!createResult.success) {
 			return createResult;
@@ -1980,15 +1985,16 @@ async function executeComposeCommand(
 			pullPolicy,
 			undefined,    // remoteStackHostDir
 			onLine,
-			serviceImage
+			serviceImage,
+			noStart
 		);
 	}
 
 	switch (env.connectionType) {
 		case 'hawser-standard':
 		case 'hawser-edge': {
-			if (operation === 'create') {
-				return executeComposeViaHawser(operation, stackName, composeContent, envId!);
+			if (operation === 'create' || noStart) {
+				return executeComposeViaHawser('create', stackName, composeContent, envId!);
 			}
 			// For Hawser deployments, we need to read the .env file and send variables via envVars
 			// because Docker Compose on the remote host may not auto-read the .env file reliably.
@@ -2091,7 +2097,8 @@ async function executeComposeCommand(
 				pullPolicy,
 				remoteStackHostDir,
 				onLine,
-				serviceImage
+				serviceImage,
+				noStart
 			);
 		}
 
@@ -2126,7 +2133,8 @@ async function executeComposeCommand(
 				pullPolicy,
 				undefined,    // remoteStackHostDir
 				onLine,
-				serviceImage
+				serviceImage,
+				noStart
 			);
 		}
 	}
@@ -3602,7 +3610,8 @@ export async function pullStackService(
  * Docker Compose detects image changes naturally (the image is pulled beforehand),
  * so --force-recreate is not needed and can cause permission issues on bind mounts.
  * This preserves all compose configuration (static IPs, network aliases, etc.) while only
- * recreating the specified service when its image has changed.
+ * recreating the specified service when its image has changed. Dependencies are never
+ * touched, and updates of services in the same stack are serialized.
  *
  * @param stackName - The compose project name
  * @param serviceName - The service name to update
@@ -3619,27 +3628,31 @@ export async function updateStackService(
 	noStart?: boolean,
 	verifiedImage?: VerifiedStackServiceImage
 ): Promise<StackOperationResult> {
-	const result = await requireComposeFile(stackName, envId, composeConfigPath);
+	return withStackLock(stackName, async () => {
+		const result = await requireComposeFile(stackName, envId, composeConfigPath);
 
-	if (!result.success) {
-		return {
-			success: false,
-			error: result.error || `Compose file not found for stack "${stackName}"`
-		};
-	}
+		if (!result.success) {
+			return {
+				success: false,
+				error: result.error || `Compose file not found for stack "${stackName}"`
+			};
+		}
 
-	await applyProviderSecretsToComposeResult(result, stackName, envId, `[Stack:${stackName}]`);
+		await applyProviderSecretsToComposeResult(result, stackName, envId, `[Stack:${stackName}]`);
 
-	const serviceImage = verifiedImage ? {
-		imageId: verifiedImage.imageId,
-		labels: trackedImageLabels(undefined, verifiedImage.reference, verifiedImage.imageId, verifiedImage.registryReference)
-	} : undefined;
+		const serviceImage = verifiedImage ? {
+			imageId: verifiedImage.imageId,
+			labels: trackedImageLabels(undefined, verifiedImage.reference, verifiedImage.imageId, verifiedImage.registryReference)
+		} : undefined;
 
-	if (noStart) {
-		// Only recreate the container, do not start it.
-		// Needed when the service was already stopped before the update.
+		// Don't use forceRecreate - Docker Compose will detect the image change
+		// naturally since the image was already pulled before this function is called.
+		// Using forceRecreate can cause permission issues on bind mounts.
+		// This matches the behavior of: docker compose pull && docker compose up -d
+		// noStart (service was stopped before the update) uses `up --no-start --no-deps`
+		// rather than `create`, which has no --no-deps and would recreate dependencies.
 		return executeComposeCommand(
-			'create',
+			'up',
 			{
 				stackName,
 				envId,
@@ -3647,33 +3660,14 @@ export async function updateStackService(
 				composePath: result.composePath,
 				envPath: result.envPath,
 				serviceName,
-				serviceImage
+				serviceImage,
+				noStart
 			},
 			result.content!,
 			result.nonSecretVars,
 			result.secretVars
 		);
-	}
-
-	// Don't use forceRecreate - Docker Compose will detect the image change
-	// naturally since the image was already pulled before this function is called.
-	// Using forceRecreate can cause permission issues on bind mounts.
-	// This matches the behavior of: docker compose pull && docker compose up -d
-	return executeComposeCommand(
-		'up',
-		{
-			stackName,
-			envId,
-			workingDir: result.stackDir,
-			composePath: result.composePath,
-			envPath: result.envPath,
-			serviceName,
-			serviceImage
-		},
-		result.content!,
-		result.nonSecretVars,
-		result.secretVars
-	);
+	});
 }
 
 // =============================================================================
